@@ -1,20 +1,20 @@
 import 'dotenv/config';
-import fs from 'fs';
-import path from 'path';
 import { createApp } from './app';
 import { config } from './common/config';
 import { logger } from './common/logger';
 import { getPool, closePool } from './db/pool';
+import { MIGRATIONS } from './db/embeddedMigrations';
 
 // ---------------------------------------------------------------------------
-// Auto-migration: runs every startup, skips already-applied files.
-// Safe to run concurrently — each file is wrapped in a transaction and
-// recorded in _migrations before COMMIT, so duplicate runs are no-ops.
+// Auto-migration: SQL is embedded in TypeScript so it is always present in
+// the compiled dist/ output — no file-system path resolution needed.
+// Each migration is idempotent (IF NOT EXISTS guards + _migrations table).
 // ---------------------------------------------------------------------------
 async function runMigrations(): Promise<void> {
   const pool = getPool();
   const client = await pool.connect();
   try {
+    // Tracking table — safe to run every startup
     await client.query(`
       CREATE TABLE IF NOT EXISTS _migrations (
         id         SERIAL PRIMARY KEY,
@@ -23,38 +23,26 @@ async function runMigrations(): Promise<void> {
       )
     `);
 
-    const migrationsDir = path.join(__dirname, 'db', 'migrations');
-    if (!fs.existsSync(migrationsDir)) {
-      logger.warn('[Migrate] Migrations directory not found — skipping');
-      return;
-    }
-
-    const files = fs
-      .readdirSync(migrationsDir)
-      .filter((f) => f.endsWith('.sql'))
-      .sort();
-
-    for (const file of files) {
+    for (const migration of MIGRATIONS) {
       const { rows } = await client.query(
         'SELECT id FROM _migrations WHERE filename = $1',
-        [file],
+        [migration.filename],
       );
       if (rows.length > 0) {
-        logger.info(`[Migrate] Already applied: ${file}`);
+        logger.info(`[Migrate] Already applied: ${migration.filename}`);
         continue;
       }
 
-      const sql = fs.readFileSync(path.join(migrationsDir, file), 'utf8');
-      logger.info(`[Migrate] Applying: ${file}`);
+      logger.info(`[Migrate] Applying: ${migration.filename}`);
       await client.query('BEGIN');
       try {
-        await client.query(sql);
+        await client.query(migration.sql);
         await client.query(
           'INSERT INTO _migrations (filename) VALUES ($1)',
-          [file],
+          [migration.filename],
         );
         await client.query('COMMIT');
-        logger.info(`[Migrate] Applied: ${file}`);
+        logger.info(`[Migrate] Applied: ${migration.filename}`);
       } catch (err) {
         await client.query('ROLLBACK');
         throw err;
