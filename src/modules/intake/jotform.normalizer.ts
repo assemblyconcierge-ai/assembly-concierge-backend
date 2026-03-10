@@ -9,18 +9,58 @@ import { normalizePhone } from '../../common/utils';
 
 type RawPayload = Record<string, unknown>;
 
+/**
+ * Resolve a field value from a Jotform payload using a mapping key.
+ *
+ * Jotform webhooks can send data in several formats:
+ *   1. Nested object:  { "q3_name": { "first": "Jane", "last": "Smith" } }
+ *      Mapping key:    "q3_name"  → returns "Jane Smith"
+ *      Mapping key:    "q3_name.first" → returns "Jane"
+ *
+ *   2. Bracket notation (legacy / rawRequest decoded):
+ *      { "q3_name[first]": "Jane" }
+ *      Mapping key: "q3_name[first]" → returns "Jane"
+ *
+ *   3. Flat string:    { "q4_email": "jane@test.com" }
+ *      Mapping key:    "q4_email" → returns "jane@test.com"
+ */
 function get(payload: RawPayload, key: string): string {
-  const val = payload[key];
-  if (val === undefined || val === null) return '';
-  if (typeof val === 'string') return val.trim();
-  if (typeof val === 'object') {
-    // Jotform sometimes nests values: { "first": "John", "last": "Doe" }
-    return Object.values(val as Record<string, string>)
-      .filter(Boolean)
-      .join(' ')
-      .trim();
+  // 1. Try exact key match first (handles flat strings and bracket-notation keys)
+  const direct = payload[key];
+  if (direct !== undefined && direct !== null) {
+    if (typeof direct === 'string') return direct.trim();
+    if (typeof direct === 'object') {
+      // Nested object — join all values (e.g. name object → "Jane Smith")
+      return Object.values(direct as Record<string, string>)
+        .filter(Boolean)
+        .join(' ')
+        .trim();
+    }
+    return String(direct).trim();
   }
-  return String(val).trim();
+
+  // 2. Try dot-notation: "q3_name.first" → payload["q3_name"]["first"]
+  if (key.includes('.')) {
+    const [parent, child] = key.split('.', 2);
+    const parentVal = payload[parent];
+    if (parentVal && typeof parentVal === 'object') {
+      const childVal = (parentVal as Record<string, unknown>)[child];
+      if (childVal !== undefined && childVal !== null) return String(childVal).trim();
+    }
+  }
+
+  // 3. Try bracket-notation: "q3_name[first]" → payload["q3_name"]["first"]
+  const bracketMatch = key.match(/^(.+?)\[(.+?)\]$/);
+  if (bracketMatch) {
+    const [, parent, child] = bracketMatch;
+    const parentVal = payload[parent];
+    if (parentVal && typeof parentVal === 'object') {
+      const childVal = (parentVal as Record<string, unknown>)[child];
+      if (childVal !== undefined && childVal !== null) return String(childVal).trim();
+    }
+  }
+
+  return '';
 }
 
 /** Extract media URLs from Jotform payload — handles both array and object formats */

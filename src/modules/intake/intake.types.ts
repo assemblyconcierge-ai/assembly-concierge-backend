@@ -49,7 +49,15 @@ export interface JotformFieldMapping {
   customDetails?: string;
 }
 
-/** Default Jotform field mapping — matches current form structure */
+/**
+ * Default Jotform field mapping — supports both nested object and bracket-notation.
+ *
+ * Jotform sends name fields as a nested object: { "q3_name": { "first": "Jane", "last": "Smith" } }
+ * The normalizer resolves "q3_name[first]" by checking:
+ *   1. payload["q3_name[first]"] (bracket-notation literal key)
+ *   2. payload["q3_name"]["first"] (nested object lookup)
+ * Both formats are handled automatically.
+ */
 export const DEFAULT_JOTFORM_FIELD_MAPPING: JotformFieldMapping = {
   firstName: 'q3_name[first]',
   lastName: 'q3_name[last]',
