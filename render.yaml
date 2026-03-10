@@ -1,0 +1,39 @@
+services:
+  - type: web
+    name: assembly-concierge-api
+    runtime: node
+    plan: starter          # Change to "free" for zero-cost (cold starts)
+    region: oregon
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: "10000"
+      - key: DATABASE_URL
+        fromDatabase:
+          name: assembly-concierge-db
+          property: connectionString
+      - key: APP_BASE_URL
+        sync: false        # Set manually after first deploy
+      - key: STRIPE_SECRET_KEY
+        sync: false        # Set manually — sk_live_... or sk_test_...
+      - key: STRIPE_WEBHOOK_SECRET
+        sync: false        # Set after adding webhook endpoint in Stripe Dashboard
+      - key: ADMIN_JWT_SECRET
+        generateValue: true
+      - key: AIRTABLE_API_KEY
+        sync: false
+      - key: AIRTABLE_BASE_ID
+        sync: false
+      - key: AIRTABLE_TABLE_JOBS
+        value: Jobs
+
+databases:
+  - name: assembly-concierge-db
+    databaseName: assembly_concierge
+    user: ac_user
+    plan: free             # Free tier: 90-day expiry if inactive; upgrade for production
+    region: oregon
