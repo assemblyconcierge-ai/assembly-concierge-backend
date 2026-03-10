@@ -15,7 +15,9 @@ export let schemaReady = false;
 // ---------------------------------------------------------------------------
 // SCHEMA CONTRACT
 // These are the minimum tables, columns, and indexes the API requires.
-// If any are missing after migrations, the server starts in degraded mode.
+// All checks use pg_catalog views (pg_class, pg_attribute, pg_indexes) which
+// are ALWAYS authoritative. information_schema views have visibility rules
+// that can return stale data immediately after DDL in some Postgres configs.
 // ---------------------------------------------------------------------------
 const REQUIRED_TABLES = [
   'customers',
@@ -50,6 +52,23 @@ const REQUIRED_INDEXES = [
 ];
 
 // ---------------------------------------------------------------------------
+// Table existence check using pg_class (authoritative, always current)
+// ---------------------------------------------------------------------------
+async function tableExists(client: import('pg').PoolClient, tableName: string): Promise<boolean> {
+  const { rows } = await client.query<{ exists: boolean }>(
+    `SELECT EXISTS (
+       SELECT 1 FROM pg_class c
+       JOIN pg_namespace n ON n.oid = c.relnamespace
+       WHERE n.nspname = 'public'
+       AND   c.relname = $1
+       AND   c.relkind = 'r'
+     ) AS exists`,
+    [tableName],
+  );
+  return rows[0].exists;
+}
+
+// ---------------------------------------------------------------------------
 // Migration runner
 // Runs all pending migrations in order. If a migration is recorded in
 // _migrations but its key tables are missing (partial/failed previous run),
@@ -75,22 +94,17 @@ async function runMigrations(): Promise<void> {
       );
 
       if (rows.length > 0) {
-        // Migration is recorded — but verify the schema contract for 001
-        // to detect partial/failed previous runs.
+        // Migration is recorded — but for 001, verify the tables actually exist.
+        // This handles the case where a previous deploy recorded the migration
+        // in _migrations but the actual DDL failed (partial apply).
         if (migration.filename === '001_initial_schema.sql') {
-          const tableCheck = await client.query<{ exists: boolean }>(
-            `SELECT EXISTS (
-               SELECT 1 FROM information_schema.tables
-               WHERE table_schema = 'public'
-               AND   table_name   = 'intake_submissions'
-             ) AS exists`,
-          );
-          if (!tableCheck.rows[0].exists) {
+          const exists = await tableExists(client, 'intake_submissions');
+          if (!exists) {
             logger.warn(
               `[Migrate] ${migration.filename} is recorded but intake_submissions is missing — re-running migration`,
             );
             await client.query('DELETE FROM _migrations WHERE filename = $1', [migration.filename]);
-            // Fall through to apply block below
+            // Fall through to the apply block below
           } else {
             logger.info(`[Migrate] Already applied: ${migration.filename}`);
             continue;
@@ -126,39 +140,47 @@ async function runMigrations(): Promise<void> {
 // ---------------------------------------------------------------------------
 // Schema verifier
 // Runs after migrations. Checks that all required tables, columns, and
-// indexes exist. Returns a list of missing items (empty = all good).
+// indexes exist using pg_catalog views (always authoritative).
+// Returns a list of missing items (empty = all good).
 // ---------------------------------------------------------------------------
 async function verifySchema(): Promise<string[]> {
   const pool = getPool();
   const missing: string[] = [];
 
-  // Check tables
+  // Check tables via pg_class
   for (const table of REQUIRED_TABLES) {
     const { rows } = await pool.query<{ exists: boolean }>(
       `SELECT EXISTS (
-         SELECT 1 FROM information_schema.tables
-         WHERE table_schema = 'public' AND table_name = $1
+         SELECT 1 FROM pg_class c
+         JOIN pg_namespace n ON n.oid = c.relnamespace
+         WHERE n.nspname = 'public'
+         AND   c.relname = $1
+         AND   c.relkind = 'r'
        ) AS exists`,
       [table],
     );
     if (!rows[0].exists) missing.push(`TABLE: ${table}`);
   }
 
-  // Check columns
+  // Check columns via pg_attribute
   for (const { table, column } of REQUIRED_COLUMNS) {
     const { rows } = await pool.query<{ exists: boolean }>(
       `SELECT EXISTS (
-         SELECT 1 FROM information_schema.columns
-         WHERE table_schema = 'public'
-         AND   table_name   = $1
-         AND   column_name  = $2
+         SELECT 1 FROM pg_attribute a
+         JOIN pg_class c ON c.oid = a.attrelid
+         JOIN pg_namespace n ON n.oid = c.relnamespace
+         WHERE n.nspname = 'public'
+         AND   c.relname = $1
+         AND   a.attname = $2
+         AND   a.attnum > 0
+         AND   NOT a.attisdropped
        ) AS exists`,
       [table, column],
     );
     if (!rows[0].exists) missing.push(`COLUMN: ${table}.${column}`);
   }
 
-  // Check indexes
+  // Check indexes via pg_indexes
   for (const idx of REQUIRED_INDEXES) {
     const { rows } = await pool.query<{ exists: boolean }>(
       `SELECT EXISTS (
