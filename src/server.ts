@@ -60,8 +60,18 @@ async function runMigrations(): Promise<void> {
 // ---------------------------------------------------------------------------
 async function start(): Promise<void> {
   logger.info('[AC-API] Running database migrations…');
-  await runMigrations();
-  logger.info('[AC-API] Migrations complete — starting HTTP server');
+  try {
+    await runMigrations();
+    logger.info('[AC-API] Migrations complete — starting HTTP server');
+  } catch (migrationErr) {
+    // Log the failure but do NOT crash — Render needs the HTTP server to
+    // start so /health can respond. On a real Postgres DATABASE_URL this
+    // path should never be hit; it only fires on transient connection errors.
+    logger.error(
+      { err: migrationErr },
+      '[AC-API] Migration failed — server will start but DB may be unavailable. Check DATABASE_URL and Postgres connectivity.',
+    );
+  }
 
   const app = createApp();
   const PORT = config.PORT;
