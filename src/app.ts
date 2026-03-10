@@ -8,6 +8,7 @@ import { stripeWebhookRouter } from './modules/payments/stripe.webhook';
 import { intakeRouter } from './modules/intake/intake.routes';
 import { jobsRouter } from './modules/jobs/jobs.routes';
 import { adminRouter } from './modules/admin/admin.routes';
+import { schemaResetRouter } from './modules/admin/schemaReset.routes';
 import { config } from './common/config';
 
 // ---------------------------------------------------------------------------
@@ -107,6 +108,9 @@ export function createApp(): express.Application {
       res.status(503).json({ status: 'not_ready', db: 'disconnected' });
     }
   });
+
+  // ─── Schema reset (one-time recovery — no schema guard, requires ALLOW_SCHEMA_RESET=true) ──
+  app.use('/admin', schemaResetRouter);
 
   // ─── Intake webhooks (schema guard applied) ───────────────────────────────
   app.use('/', schemaGuard, intakeRouter);
