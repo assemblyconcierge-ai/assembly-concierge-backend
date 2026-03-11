@@ -94,16 +94,49 @@ async function runMigrations(): Promise<void> {
       );
 
       if (rows.length > 0) {
-        // Migration is recorded — but for 001, verify the tables actually exist.
-        // This handles the case where a previous deploy recorded the migration
-        // in _migrations but the actual DDL failed (partial apply).
+        // Migration is recorded — but for 001, verify the schema is actually complete.
+        // A corrupted partial deploy may have:
+        //   (a) created some tables but not others, OR
+        //   (b) created tables with an old schema missing columns (e.g. phone_e164)
+        // CREATE TABLE IF NOT EXISTS is a no-op on existing tables, so if customers
+        // exists but lacks phone_e164, the subsequent CREATE INDEX will fail with 42703.
+        // Fix: check BOTH table existence AND the phone_e164 column. If either is
+        // missing, drop all application tables and re-run from scratch.
         if (migration.filename === '001_initial_schema.sql') {
-          const exists = await tableExists(client, 'intake_submissions');
-          if (!exists) {
+          const intakeExists = await tableExists(client, 'intake_submissions');
+          const { rows: colRows } = await client.query<{ exists: boolean }>(
+            `SELECT EXISTS (
+               SELECT 1 FROM pg_attribute a
+               JOIN pg_class c ON c.oid = a.attrelid
+               JOIN pg_namespace n ON n.oid = c.relnamespace
+               WHERE n.nspname = 'public'
+               AND   c.relname  = 'customers'
+               AND   a.attname  = 'phone_e164'
+               AND   a.attnum   > 0
+               AND   NOT a.attisdropped
+             ) AS exists`,
+          );
+          const phoneColExists = colRows[0].exists;
+
+          if (!intakeExists || !phoneColExists) {
             logger.warn(
-              `[Migrate] ${migration.filename} is recorded but intake_submissions is missing — re-running migration`,
+              `[Migrate] ${migration.filename} recorded but schema is incomplete ` +
+              `(intake_submissions=${intakeExists}, customers.phone_e164=${phoneColExists}) — ` +
+              `dropping stale tables and re-running migration`,
             );
+            // Drop ALL application tables in reverse dependency order so
+            // CREATE TABLE IF NOT EXISTS will actually create them fresh.
+            const dropOrder = [
+              'integration_failures', 'audit_events', 'payment_events', 'payments',
+              'contractor_assignments', 'dispatches', 'notifications', 'uploaded_media',
+              'jobs', 'intake_submissions', 'addresses', 'customers',
+              'pricing_rules', 'service_areas', 'service_types', 'contractors', 'config_entries',
+            ];
+            for (const tbl of dropOrder) {
+              await client.query(`DROP TABLE IF EXISTS "${tbl}" CASCADE`);
+            }
             await client.query('DELETE FROM _migrations WHERE filename = $1', [migration.filename]);
+            logger.info('[Migrate] Stale tables dropped — will re-run 001_initial_schema.sql from clean state');
             // Fall through to the apply block below
           } else {
             logger.info(`[Migrate] Already applied: ${migration.filename}`);
