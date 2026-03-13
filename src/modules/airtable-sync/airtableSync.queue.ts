@@ -9,7 +9,7 @@
 import { logger } from '../../common/logger';
 import { config } from '../../common/config';
 import { query, queryOne } from '../../db/pool';
-import { syncJobToAirtable, updateAirtableRecord, logIntegrationFailure } from './airtable.adapter';
+import { syncJobToAirtable, updateAirtableStatus, logIntegrationFailure } from './airtable.adapter';
 
 let Queue: any = null;
 let Worker: any = null;
@@ -117,6 +117,7 @@ async function processSyncJob(jobId: string, correlationId: string): Promise<voi
       customerPhone: row.customer_phone,
       city: row.city_detected || '',
       serviceType: row.service_type_code,
+      areaStatus: row.service_area_status,
       rushRequested: row.rush_requested,
       totalAmountCents: row.total_amount_cents,
       depositAmountCents: row.deposit_amount_cents,
@@ -127,11 +128,12 @@ async function processSyncJob(jobId: string, correlationId: string): Promise<voi
     };
 
     if (row.airtable_record_id) {
-      // Update existing record
-      await updateAirtableRecord(row.airtable_record_id, {
-        'Status': record.status,
-        'Total Amount': record.totalAmountCents / 100,
-      });
+      // Update existing record — status mapped through safe label layer
+      await updateAirtableStatus(
+        row.airtable_record_id,
+        record.status,
+        record.totalAmountCents,
+      );
       log.info({ airtableRecordId: row.airtable_record_id }, 'Airtable record updated');
     } else {
       // Create new record
