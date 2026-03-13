@@ -6,30 +6,43 @@ import {
   normalizeRushFlag,
 } from './intake.types';
 import { normalizePhone } from '../../common/utils';
+import { logger } from '../../common/logger';
 
 type RawPayload = Record<string, unknown>;
 
 /**
- * Resolve a field value from a Jotform payload using a mapping key.
+ * Resolve a field value from a Jotform payload.
  *
- * Supported key formats:
- *   1. Flat string key:      "q4_email"          → payload["q4_email"]
- *   2. Dot-notation:         "q3_fullName.first"  → payload["q3_fullName"]["first"]
- *   3. Bracket-notation:     "q3_name[first]"     → payload["q3_name"]["first"]
- *   4. Nested object (no sub-key): "q3_fullName"  → joins all child values
+ * WHY THIS IS COMPLEX:
+ * Jotform posts webhooks as application/x-www-form-urlencoded.
+ * Express urlencoded parser (extended:true) converts bracket-notation keys into
+ * nested objects:
+ *   "q3_fullName[first]=Jane" → { q3_fullName: { first: "Jane" } }
  *
- * The long Jotform prepopulated address key is handled as dot-notation:
- *   "q38_addresshttpswwwjotformcomhelp71-Prepopulating-Fiel.state"
- *   → payload["q38_addresshttpswwwjotformcomhelp71-Prepopulating-Fiel"]["state"]
+ * BUT for very long keys (like the prepopulated address field), Express may leave
+ * them as flat bracket-notation strings:
+ *   "q38_address...Fiel[state]=GA" → { "q38_address...Fiel[state]": "GA" }
+ *
+ * We support ALL of these lookup strategies in priority order:
+ *   1. Exact flat key match:          payload["q4_email"]
+ *   2. Bracket-notation literal key:  payload["q3_fullName[first]"]
+ *   3. Nested object via dot-notation: payload["q3_fullName"]["first"]
+ *   4. Nested object via bracket-notation: payload["q3_fullName"]["first"]
+ *      (same as 3, just the mapping key uses bracket syntax)
+ *   5. Whole nested object joined:    payload["q3_fullName"] → "Jane Smith"
+ *
+ * Mapping keys use DOT notation (e.g. "q3_fullName.first") as the canonical form.
+ * The resolver converts them to bracket-notation for lookup as well.
  */
 function get(payload: RawPayload, key: string): string {
   if (!key) return '';
 
-  // 1. Exact key match (flat string or bracket-notation literal key)
+  // ── Strategy 1: Exact flat key ────────────────────────────────────────────
   const direct = payload[key];
   if (direct !== undefined && direct !== null) {
     if (typeof direct === 'string') return direct.trim();
     if (typeof direct === 'object') {
+      // Whole nested object — join non-empty values (e.g. name → "Jane Smith")
       return Object.values(direct as Record<string, string>)
         .filter(Boolean)
         .join(' ')
@@ -38,27 +51,49 @@ function get(payload: RawPayload, key: string): string {
     return String(direct).trim();
   }
 
-  // 2. Dot-notation: split on LAST dot only to handle long keys like
-  //    "q38_addresshttpswwwjotformcomhelp71-Prepopulating-Fiel.state"
+  // ── Strategy 2 & 3: Key contains a sub-field separator ───────────────────
+  // Supports both dot-notation ("q3_fullName.first") and
+  // bracket-notation ("q3_fullName[first]") as mapping keys.
+  // Split on the LAST separator to handle long keys like:
+  //   "q38_addresshttpswwwjotformcomhelp71-Prepopulating-Fiel.state"
+
+  let parent: string | null = null;
+  let child: string | null = null;
+
   const lastDot = key.lastIndexOf('.');
   if (lastDot !== -1) {
-    const parent = key.substring(0, lastDot);
-    const child  = key.substring(lastDot + 1);
-    const parentVal = payload[parent];
-    if (parentVal && typeof parentVal === 'object') {
-      const childVal = (parentVal as Record<string, unknown>)[child];
-      if (childVal !== undefined && childVal !== null) return String(childVal).trim();
+    parent = key.substring(0, lastDot);
+    child  = key.substring(lastDot + 1);
+  } else {
+    const bracketMatch = key.match(/^(.+?)\[(.+?)\]$/);
+    if (bracketMatch) {
+      parent = bracketMatch[1];
+      child  = bracketMatch[2];
     }
   }
 
-  // 3. Bracket-notation: "q3_name[first]" → payload["q3_name"]["first"]
-  const bracketMatch = key.match(/^(.+?)\[(.+?)\]$/);
-  if (bracketMatch) {
-    const [, parent, child] = bracketMatch;
+  if (parent && child) {
+    // 2a. Try bracket-notation literal key: payload["q3_fullName[first]"]
+    const bracketKey = `${parent}[${child}]`;
+    const bracketVal = payload[bracketKey];
+    if (bracketVal !== undefined && bracketVal !== null) {
+      return String(bracketVal).trim();
+    }
+
+    // 2b. Try nested object: payload["q3_fullName"]["first"]
     const parentVal = payload[parent];
     if (parentVal && typeof parentVal === 'object') {
       const childVal = (parentVal as Record<string, unknown>)[child];
-      if (childVal !== undefined && childVal !== null) return String(childVal).trim();
+      if (childVal !== undefined && childVal !== null) {
+        return String(childVal).trim();
+      }
+    }
+
+    // 2c. Try dot-notation literal key: payload["q3_fullName.first"]
+    const dotKey = `${parent}.${child}`;
+    const dotVal = payload[dotKey];
+    if (dotVal !== undefined && dotVal !== null) {
+      return String(dotVal).trim();
     }
   }
 
@@ -86,33 +121,40 @@ function extractMedia(payload: RawPayload): string[] {
 /**
  * Normalize a raw Jotform webhook payload into the canonical CanonicalIntake model.
  *
- * Live field mapping (from real Jotform payload 2026-03-13):
- *   firstName       ← q3_fullName.first
- *   lastName        ← q3_fullName.last
- *   email           ← q4_email
- *   phone           ← q79_phoneNumber79.full  (fallback: q5_phoneNumber.full)
- *   addressLine1    ← q6_streetNumberstreet.addr_line1
- *   city            ← q26_typeA26
- *   state           ← q38_address...Fiel.state
- *   postalCode      ← q38_address...Fiel.postal
- *   serviceType     ← q7_serviceNeeded
- *   rushRequested   ← q48_typeA48
- *   appointmentDate ← q9_preferredDate
- *   appointmentWindow ← q11_preferredTime
- *   customDetails   ← q13_notesFor
- *   totalAmount     ← q58_totalamount
+ * Live field mapping (real Jotform form, direct webhook, 2026-03-13):
+ *   firstName          ← q3_fullName.first  (or q3_fullName[first])
+ *   lastName           ← q3_fullName.last   (or q3_fullName[last])
+ *   email              ← q4_email
+ *   phone              ← q79_phoneNumber79.full  fallback: q5_phoneNumber.full
+ *   addressLine1       ← q6_streetNumberstreet.addr_line1
+ *   city               ← q26_typeA26
+ *   state              ← q38_address...Fiel.state
+ *   postalCode         ← q38_address...Fiel.postal
+ *   serviceType        ← q7_serviceNeeded
+ *   rushRequested      ← q48_typeA48
+ *   appointmentDate    ← q9_preferredDate
+ *   appointmentWindow  ← q11_preferredTime
+ *   customDetails      ← q13_notesFor
+ *   totalAmount        ← q58_totalamount
  *   amountChargedToday ← q59_amountchargedtoday
- *   remainingBalance ← q60_remainingbalance
- *   paymentType     ← q83_paymentType
+ *   remainingBalance   ← q60_remainingbalance
+ *   paymentType        ← q83_paymentType
  *   paymentMethodLabel ← q43_typeA43
- *   stripeKey       ← q87_stripekey
- *   uniqueId        ← q20_uniqueId
- *   areaTag         ← q52_areaTag
+ *   stripeKey          ← q87_stripekey
+ *   uniqueId           ← q20_uniqueId
+ *   areaTag            ← q52_areaTag
  */
 export function normalizeJotformPayload(
   rawPayload: RawPayload,
   mapping: JotformFieldMapping = DEFAULT_JOTFORM_FIELD_MAPPING,
 ): CanonicalIntake {
+
+  // ── DEBUG: log raw payload keys so we can see exactly what arrived ────────
+  logger.info(
+    { rawPayloadKeys: Object.keys(rawPayload) },
+    '[Normalizer] Raw Jotform payload keys received',
+  );
+
   // ── Submission identity ──────────────────────────────────────────────────
   const submissionId =
     (rawPayload['submissionID'] as string) ||
@@ -151,9 +193,8 @@ export function normalizeJotformPayload(
   const typeCode = normalizeServiceTypeCode(rawServiceType);
 
   // ── Rush ─────────────────────────────────────────────────────────────────
-  const rawRush    = mapping.rushRequested ? rawPayload[mapping.rushRequested] : undefined;
-  const rushType   = mapping.rushRequested ? get(rawPayload, mapping.rushRequested) : undefined;
-  const rushRequested = normalizeRushFlag(rawRush as string | boolean | undefined);
+  const rushType      = mapping.rushRequested ? get(rawPayload, mapping.rushRequested) : undefined;
+  const rushRequested = normalizeRushFlag(rushType);
 
   // ── Appointment ──────────────────────────────────────────────────────────
   const appointmentDate   = mapping.appointmentDate   ? get(rawPayload, mapping.appointmentDate)   || undefined : undefined;
@@ -162,7 +203,7 @@ export function normalizeJotformPayload(
   // ── Notes / custom details ───────────────────────────────────────────────
   const customJobDetails = mapping.customDetails ? get(rawPayload, mapping.customDetails) || undefined : undefined;
 
-  // ── Financial fields (Jotform-calculated, passed through for reference) ──
+  // ── Financial fields ─────────────────────────────────────────────────────
   const totalAmount        = mapping.totalAmount        ? get(rawPayload, mapping.totalAmount)        || undefined : undefined;
   const amountChargedToday = mapping.amountChargedToday ? get(rawPayload, mapping.amountChargedToday) || undefined : undefined;
   const remainingBalance   = mapping.remainingBalance   ? get(rawPayload, mapping.remainingBalance)   || undefined : undefined;
