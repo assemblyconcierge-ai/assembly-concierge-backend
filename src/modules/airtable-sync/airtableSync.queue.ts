@@ -82,25 +82,51 @@ async function processSyncJob(jobId: string, correlationId: string): Promise<voi
       rush_requested: boolean;
       total_amount_cents: number;
       deposit_amount_cents: number;
+      remainder_amount_cents: number;
+      payment_mode: string;
       status: string;
       appointment_date: Date | null;
       appointment_window: string | null;
+      custom_job_details: string | null;
       airtable_record_id: string | null;
       created_at: Date;
       customer_full_name: string;
       customer_email: string;
       customer_phone: string;
       service_type_code: string;
+      // Address fields
+      addr_line1: string | null;
+      addr_state: string | null;
+      addr_postal: string | null;
+      // Payment fields (from most recent payment record)
+      stripe_session_id: string | null;
+      stripe_intent_id: string | null;
+      // Intake raw payload (for photos and payment type from Jotform)
+      raw_payload_json: unknown;
     }>(
       `SELECT
          j.id, j.job_key, j.city_detected, j.service_area_status, j.rush_requested,
-         j.total_amount_cents, j.deposit_amount_cents, j.status,
-         j.appointment_date, j.appointment_window, j.airtable_record_id, j.created_at,
+         j.total_amount_cents, j.deposit_amount_cents, j.remainder_amount_cents,
+         j.payment_mode, j.status,
+         j.appointment_date, j.appointment_window, j.custom_job_details,
+         j.airtable_record_id, j.created_at,
          c.full_name AS customer_full_name, c.email AS customer_email, c.phone_e164 AS customer_phone,
-         COALESCE(st.code, 'unknown') AS service_type_code
+         COALESCE(st.code, 'unknown') AS service_type_code,
+         a.line1 AS addr_line1, a.state AS addr_state, a.postal_code AS addr_postal,
+         p.provider_session_id AS stripe_session_id,
+         p.provider_payment_intent_id AS stripe_intent_id,
+         s.raw_payload_json
        FROM jobs j
        JOIN customers c ON c.id = j.customer_id
+       JOIN addresses a ON a.id = j.address_id
        LEFT JOIN service_types st ON st.id = j.service_type_id
+       LEFT JOIN LATERAL (
+         SELECT provider_session_id, provider_payment_intent_id
+         FROM payments
+         WHERE job_id = j.id
+         ORDER BY created_at DESC LIMIT 1
+       ) p ON TRUE
+       LEFT JOIN intake_submissions s ON s.id = j.intake_submission_id
        WHERE j.id = $1`,
       [jobId],
     );
@@ -110,21 +136,56 @@ async function processSyncJob(jobId: string, correlationId: string): Promise<voi
       return;
     }
 
+    // Extract photo URLs from raw Jotform payload (upload fields)
+    const rawPayload = (row.raw_payload_json ?? {}) as Record<string, unknown>;
+    const photoUrls: string[] = [];
+    for (const [key, val] of Object.entries(rawPayload)) {
+      if (!key.toLowerCase().includes('upload') && !key.toLowerCase().includes('photo')) continue;
+      if (typeof val === 'string' && val.startsWith('http')) photoUrls.push(val);
+      if (Array.isArray(val)) {
+        for (const item of val) {
+          if (typeof item === 'string' && item.startsWith('http')) photoUrls.push(item);
+          if (typeof item === 'object' && item !== null && 'url' in item) {
+            photoUrls.push((item as { url: string }).url);
+          }
+        }
+      }
+    }
+
+    // Extract payment type label from raw payload (q83_paymentType)
+    const rawPaymentType =
+      (rawPayload['q83_paymentType'] as string) ||
+      (rawPayload['paymentType'] as string) ||
+      undefined;
+
     const record = {
+      // Core identity
       jobKey: row.job_key,
       customerName: row.customer_full_name,
       customerEmail: row.customer_email,
       customerPhone: row.customer_phone,
       city: row.city_detected || '',
       serviceType: row.service_type_code,
+      serviceTypeCode: row.service_type_code,
       areaStatus: row.service_area_status,
       rushRequested: row.rush_requested,
       totalAmountCents: row.total_amount_cents,
       depositAmountCents: row.deposit_amount_cents,
+      remainingBalanceCents: row.remainder_amount_cents,
       status: row.status,
       appointmentDate: row.appointment_date?.toISOString().split('T')[0],
       appointmentWindow: row.appointment_window ?? undefined,
       createdAt: row.created_at.toISOString(),
+      // Extended fields
+      addressLine1: row.addr_line1 ?? undefined,
+      state: row.addr_state ?? undefined,
+      postalCode: row.addr_postal ?? undefined,
+      customerNotes: row.custom_job_details ?? undefined,
+      jobPhotos: photoUrls.length > 0 ? photoUrls : undefined,
+      paymentType: rawPaymentType,
+      stripeCheckoutSessionId: row.stripe_session_id ?? undefined,
+      stripePaymentIntentId: row.stripe_intent_id ?? undefined,
+      dispatchStatus: 'pending',   // always "Pending Dispatch" at intake
     };
 
     if (row.airtable_record_id) {

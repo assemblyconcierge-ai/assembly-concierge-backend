@@ -101,9 +101,34 @@ function mapAreaStatus(status: string): string {
   return mapped;
 }
 
+/** Maps internal dispatch_status enum → Airtable "Dispatch Status" Single Select option */
+const DISPATCH_STATUS_MAP: Record<string, string> = {
+  pending:    'Pending Dispatch',
+  sent:       'Dispatch Sent',
+  accepted:   'Accepted',
+  declined:   'Declined',
+  completed:  'Completed',
+  cancelled:  'Cancelled',
+};
+const DISPATCH_STATUS_FALLBACK = 'Pending Dispatch';
+
+function mapDispatchStatus(status?: string): string {
+  if (!status) return DISPATCH_STATUS_FALLBACK;
+  const mapped = DISPATCH_STATUS_MAP[status?.toLowerCase?.()];
+  if (!mapped) {
+    logger.warn(
+      { internalValue: status, fallback: DISPATCH_STATUS_FALLBACK, field: 'Dispatch Status' },
+      '[Airtable] Unrecognised dispatch_status — using fallback',
+    );
+    return DISPATCH_STATUS_FALLBACK;
+  }
+  return mapped;
+}
+
 // ── Public interface ─────────────────────────────────────────────────────────
 
 export interface AirtableJobRecord {
+  // Core identity
   jobKey: string;
   customerName: string;
   customerEmail: string;
@@ -118,6 +143,18 @@ export interface AirtableJobRecord {
   appointmentDate?: string;
   appointmentWindow?: string;
   createdAt: string;
+  // Extended fields (new Airtable columns)
+  addressLine1?: string;
+  state?: string;
+  postalCode?: string;
+  customerNotes?: string;
+  jobPhotos?: string[];          // array of photo URLs from Jotform upload fields
+  remainingBalanceCents?: number;
+  paymentType?: string;          // e.g. "Pay in Full" / "$25 Deposit"
+  stripeCheckoutSessionId?: string;
+  stripePaymentIntentId?: string;
+  serviceTypeCode?: string;      // raw code for reference (e.g. "small")
+  dispatchStatus?: string;       // defaults to "Pending Dispatch" at intake
 }
 
 /** Push a job record to Airtable. Returns the Airtable record ID. */
@@ -152,6 +189,43 @@ export async function syncJobToAirtable(record: AirtableJobRecord): Promise<stri
 
   if (record.appointmentDate)   fields['Appointment Date']   = record.appointmentDate;
   if (record.appointmentWindow) fields['Appointment Window'] = record.appointmentWindow;
+
+  // ── Extended fields ────────────────────────────────────────────────────────
+  // Address detail
+  if (record.addressLine1) fields['Address Line 1'] = record.addressLine1;
+  if (record.state)        fields['State']          = record.state;
+  if (record.postalCode)   fields['Postal Code']    = record.postalCode;
+
+  // Notes
+  if (record.customerNotes) fields['Customer Notes'] = record.customerNotes;
+
+  // Job photos — Airtable attachment field expects array of { url } objects
+  if (record.jobPhotos && record.jobPhotos.length > 0) {
+    fields['Job Photos'] = record.jobPhotos.map((url) => ({ url }));
+  }
+
+  // Financial
+  if (record.remainingBalanceCents !== undefined) {
+    fields['Remaining Balance'] = record.remainingBalanceCents / 100;
+  }
+  if (record.paymentType) fields['Payment Type'] = record.paymentType;
+
+  // Stripe identifiers
+  if (record.stripeCheckoutSessionId) {
+    fields['Stripe Checkout Session ID'] = record.stripeCheckoutSessionId;
+  }
+  if (record.stripePaymentIntentId) {
+    fields['Stripe Payment Intent ID'] = record.stripePaymentIntentId;
+  }
+
+  // Service type code (raw, for reference)
+  if (record.serviceTypeCode) fields['Service Type Code'] = record.serviceTypeCode;
+
+  // Dispatch status — always set at intake (defaults to Pending Dispatch)
+  fields['Dispatch Status'] = mapDispatchStatus(record.dispatchStatus);
+
+  // Assigned Contractor — intentionally left blank at intake (filled by dispatcher)
+  // fields['Assigned Contractor'] = '';  // omitted — do not send empty values to Airtable
 
   const response = await fetch(url, {
     method: 'POST',
