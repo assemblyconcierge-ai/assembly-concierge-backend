@@ -369,4 +369,41 @@ INSERT INTO config_entries (config_group, config_key, config_value_json) VALUES
 ON CONFLICT (config_group, config_key) DO NOTHING;
 `,
   },
+  {
+    filename: '003_fix_pricing.sql',
+    sql: `
+-- Assembly Concierge Backend -- Pricing Corrections
+-- Migration 003: Fix seeded pricing_rules to match Airtable financial spec (2026-03-13)
+--
+-- Fix 1: Small Assembly contractor payout was $60, must be $55
+-- Fix 2: Treadmill Assembly base price was $149, must be $189
+--        Treadmill deposit was $74.50 (50% of wrong $149), must be $94.50 (50% of $189)
+--        Treadmill contractor payout was $80, must be $130
+-- Fix 3: All non-custom deposit amounts set to fixed $25 (was 50% of base)
+--
+-- These UPDATE statements are idempotent -- safe to re-run.
+
+UPDATE pricing_rules
+  SET payout_cents = 5500
+  WHERE service_type_code = 'small'
+    AND is_active = TRUE;
+
+UPDATE pricing_rules
+  SET base_price_cents      = 18900,
+      default_deposit_cents = 9450,
+      payout_cents          = 13000
+  WHERE service_type_code = 'treadmill'
+    AND is_active = TRUE;
+
+UPDATE pricing_rules
+  SET default_deposit_cents = 2500
+  WHERE service_type_code IN ('small', 'medium', 'large', 'treadmill')
+    AND is_active = TRUE;
+
+UPDATE config_entries
+  SET config_value_json = '25'
+  WHERE config_group = 'pricing'
+    AND config_key    = 'deposit_percentage';
+`,
+  },
 ];
