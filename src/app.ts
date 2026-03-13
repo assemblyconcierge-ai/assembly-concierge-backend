@@ -3,6 +3,7 @@ import cors from 'cors';
 import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 import { correlationIdMiddleware } from './common/middleware/correlationId';
+import { jotformBodyParser } from './common/middleware/jotformBodyParser';
 import { globalErrorHandler } from './common/errors/errorHandler';
 import { stripeWebhookRouter } from './modules/payments/stripe.webhook';
 import { intakeRouter } from './modules/intake/intake.routes';
@@ -111,6 +112,12 @@ export function createApp(): express.Application {
 
   // ─── Schema reset (one-time recovery — no schema guard, requires ALLOW_SCHEMA_RESET=true) ──
   app.use('/admin', schemaResetRouter);
+
+  // ─── Jotform body parser ─────────────────────────────────────────────
+  // Handles multipart/form-data, text/plain, and any content-type Jotform sends.
+  // Also emits a debug log with content-type, content-length, user-agent, and body keys.
+  // Runs after express.json/urlencoded so already-parsed bodies pass straight through.
+  app.use('/webhooks/jotform', jotformBodyParser);
 
   // ─── Intake webhooks (schema guard applied) ───────────────────────────────
   app.use('/', schemaGuard, intakeRouter);
