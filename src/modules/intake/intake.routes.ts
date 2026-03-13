@@ -96,9 +96,33 @@ intakeRouter.post('/webhooks/jotform', async (req: Request, res: Response, next:
       try {
         await markProcessing(submission.id);
         const normalized = normalizeJotformPayload(rawPayload);
+
+        // Structured log of normalized intake — confirms field mapping is working
+        log.info({
+          normalizedIntake: {
+            customerName:     normalized.customer.fullName,
+            customerEmail:    normalized.customer.email,
+            customerPhone:    normalized.customer.phone,
+            city:             normalized.address.city,
+            state:            normalized.address.state,
+            postalCode:       normalized.address.postalCode,
+            serviceTypeCode:  normalized.service.typeCode,
+            rushRequested:    normalized.service.rushRequested,
+            rushType:         normalized.service.rushType,
+            appointmentDate:  normalized.appointment.date,
+            appointmentWindow: normalized.appointment.window,
+            totalAmount:      normalized.financials?.totalAmount,
+            depositAmount:    normalized.financials?.amountChargedToday,
+            remainingBalance: normalized.financials?.remainingBalance,
+            paymentType:      normalized.financials?.paymentType,
+            areaTag:          normalized.meta?.areaTag,
+            uniqueId:         normalized.meta?.uniqueId,
+          },
+        }, 'Normalized intake object');
+
         const result = await processIntake(submission.id, normalized, correlationId);
         await markProcessed(submission.id, normalized);
-        log.info({ jobId: result.jobId, jobKey: result.jobKey }, 'Intake processed successfully');
+        log.info({ jobId: result.jobId, jobKey: result.jobKey, serviceAreaStatus: result.serviceAreaStatus }, 'Intake processed successfully');
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         log.error({ err, submissionId: submission.id }, 'Intake processing failed');
