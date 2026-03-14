@@ -188,7 +188,7 @@ export async function syncJobToAirtable(record: AirtableJobRecord): Promise<stri
     'Rush Requested': record.rushRequested,
     'Total Amount':   record.totalAmountCents / 100,
     'Deposit Amount': record.depositAmountCents / 100,
-    'Status':         mapJobStatus(record.status),
+    // 'Status' field omitted — not present in Backend Intake Sandbox V2
     'Created At':     record.createdAt,
   };
 
@@ -309,13 +309,15 @@ export async function updateAirtableStatus(
   internalStatus: string,
   totalAmountCents?: number,
 ): Promise<void> {
-  const fields: Record<string, unknown> = {
-    'Status': mapJobStatus(internalStatus),
-  };
+  const fields: Record<string, unknown> = {};
+  // 'Status' field omitted — not present in Backend Intake Sandbox V2
+  // To re-enable: fields['Status'] = mapJobStatus(internalStatus);
   if (totalAmountCents !== undefined) {
     fields['Total Amount'] = totalAmountCents / 100;
   }
-  await updateAirtableRecord(recordId, fields);
+  if (Object.keys(fields).length > 0) {
+    await updateAirtableRecord(recordId, fields);
+  }
 }
 
 /** Log an integration failure for retry */
