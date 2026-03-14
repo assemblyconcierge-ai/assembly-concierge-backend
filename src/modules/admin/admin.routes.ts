@@ -145,6 +145,28 @@ adminRouter.post('/payments/:paymentId/refund', requireAdmin, async (req: Reques
 });
 
 // ─────────────────────────────────────────────
+// AIRTABLE SCHEMA DUMP (temporary audit endpoint)
+// ─────────────────────────────────────────────
+
+adminRouter.get('/airtable-schema', requireAdmin, async (_req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { config } = await import('../../common/config');
+    const apiKey = (config as any).AIRTABLE_API_KEY;
+    const baseId = (config as any).AIRTABLE_BASE_ID;
+    if (!apiKey || !baseId) {
+      res.status(503).json({ error: 'AIRTABLE_NOT_CONFIGURED', message: 'AIRTABLE_API_KEY or AIRTABLE_BASE_ID not set' });
+      return;
+    }
+    const url = `https://api.airtable.com/v0/meta/bases/${baseId}/tables`;
+    const airtableRes = await fetch(url, { headers: { Authorization: `Bearer ${apiKey}` } });
+    const body = await airtableRes.json();
+    res.status(airtableRes.status).json(body);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ─────────────────────────────────────────────
 // INTEGRATION FAILURES
 // ─────────────────────────────────────────────
 
