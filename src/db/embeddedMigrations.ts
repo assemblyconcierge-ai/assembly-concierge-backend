@@ -406,4 +406,35 @@ UPDATE config_entries
     AND config_key    = 'deposit_percentage';
 `,
   },
+  {
+    filename: '004_rush_tier.sql',
+    sql: `
+-- Assembly Concierge Backend -- Rush Tier Support
+-- Migration 004: Add rush_type to jobs table and next-day rush pricing to pricing_rules
+--
+-- rush_type stores the exact Jotform label, e.g. "Same-day (+30)" / "Next-day (+20)" / "No Rush"
+-- next_day_rush_price_cents is the customer fee for next-day rush (default $20)
+-- contractor_rush_bonus_cents is the bonus added to contractor payout for any rush job
+
+-- 1. Add rush_type column to jobs table (nullable TEXT)
+ALTER TABLE jobs
+  ADD COLUMN IF NOT EXISTS rush_type TEXT;
+
+-- 2. Add next-day rush price and contractor rush bonus columns to pricing_rules
+ALTER TABLE pricing_rules
+  ADD COLUMN IF NOT EXISTS next_day_rush_price_cents INTEGER NOT NULL DEFAULT 2000,
+  ADD COLUMN IF NOT EXISTS contractor_rush_bonus_cents INTEGER NOT NULL DEFAULT 0;
+
+-- 3. Seed contractor rush bonus per service type (same for all — $20 same-day, $14 next-day)
+--    We store the same-day bonus here; next-day is calculated as (next_day_rush_price_cents - 6)
+--    Per Airtable spec: same-day contractor bonus = 20, next-day = 14
+UPDATE pricing_rules
+  SET contractor_rush_bonus_cents = 2000
+  WHERE service_type_code IN ('small', 'medium', 'large', 'treadmill')
+    AND is_active = TRUE;
+
+-- 4. Confirm rush_price_cents (same-day) = 3000 for all non-custom types (already correct)
+--    next_day_rush_price_cents defaults to 2000 (set above via ADD COLUMN DEFAULT)
+`,
+  },
 ];

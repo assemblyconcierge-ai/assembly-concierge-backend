@@ -155,6 +155,7 @@ export interface AirtableJobRecord {
   stripePaymentIntentId?: string;
   serviceTypeCode?: string;      // raw code for reference (e.g. "small")
   dispatchStatus?: string;       // defaults to "Pending Dispatch" at intake
+  rushType?: string;             // "No Rush" | "Same-day (+30)" | "Next-day (+20)"
 }
 
 /** Push a job record to Airtable. Returns the Airtable record ID. */
@@ -220,6 +221,9 @@ export async function syncJobToAirtable(record: AirtableJobRecord): Promise<stri
 
   // Service type code (raw, for reference)
   if (record.serviceTypeCode) fields['Service Type Code'] = record.serviceTypeCode;
+
+  // Rush Type — exact label from Jotform / normalizer
+  if (record.rushType) fields['Rush Type'] = record.rushType;
 
   // Dispatch status — always set at intake (defaults to Pending Dispatch)
   fields['Dispatch Status'] = mapDispatchStatus(record.dispatchStatus);

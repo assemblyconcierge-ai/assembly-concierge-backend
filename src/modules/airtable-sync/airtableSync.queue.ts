@@ -94,6 +94,7 @@ async function processSyncJob(jobId: string, correlationId: string): Promise<voi
       customer_email: string;
       customer_phone: string;
       service_type_code: string;
+      rush_type: string | null;   // stored by migration 004
       // Address fields
       addr_line1: string | null;
       addr_state: string | null;
@@ -107,7 +108,7 @@ async function processSyncJob(jobId: string, correlationId: string): Promise<voi
       `SELECT
          j.id, j.job_key, j.city_detected, j.service_area_status, j.rush_requested,
          j.total_amount_cents, j.deposit_amount_cents, j.remainder_amount_cents,
-         j.payment_mode, j.status,
+         j.payment_mode, j.rush_type, j.status,
          j.appointment_date, j.appointment_window, j.custom_job_details,
          j.airtable_record_id, j.created_at,
          c.full_name AS customer_full_name, c.email AS customer_email, c.phone_e164 AS customer_phone,
@@ -186,6 +187,7 @@ async function processSyncJob(jobId: string, correlationId: string): Promise<voi
       stripeCheckoutSessionId: row.stripe_session_id ?? undefined,
       stripePaymentIntentId: row.stripe_intent_id ?? undefined,
       dispatchStatus: 'pending',   // always "Pending Dispatch" at intake
+      rushType: row.rush_type ?? undefined,
     };
 
     if (row.airtable_record_id) {

@@ -14,6 +14,7 @@ export interface JobRow {
   service_area_status: string;
   city_detected: string | null;
   rush_requested: boolean;
+  rush_type: string | null;   // "No Rush" | "Same-day (+30)" | "Next-day (+20)"
   payment_mode: string;
   subtotal_amount_cents: number;
   rush_amount_cents: number;
@@ -42,6 +43,7 @@ export async function createJob(
     serviceAreaStatus: string;
     cityDetected?: string;
     rushRequested: boolean;
+    rushType?: string;       // human label: "No Rush" | "Same-day (+30)" | "Next-day (+20)"
     paymentMode: string;
     subtotalAmountCents: number;
     rushAmountCents: number;
@@ -60,13 +62,13 @@ export async function createJob(
   const { rows } = await client.query<JobRow>(
     `INSERT INTO jobs (
       id, job_key, customer_id, address_id, intake_submission_id, service_type_id,
-      source_channel, service_area_status, city_detected, rush_requested, payment_mode,
+      source_channel, service_area_status, city_detected, rush_requested, rush_type, payment_mode,
       subtotal_amount_cents, rush_amount_cents, deposit_amount_cents, remainder_amount_cents,
       total_amount_cents, status, appointment_date, appointment_window,
       special_instructions, custom_job_details, public_pay_token
     ) VALUES (
-      $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
-      $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22
+      $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+      $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23
     ) RETURNING *`,
     [
       uuidv4(),
@@ -79,6 +81,7 @@ export async function createJob(
       params.serviceAreaStatus,
       params.cityDetected ?? null,
       params.rushRequested,
+      params.rushType ?? null,
       params.paymentMode,
       params.subtotalAmountCents,
       params.rushAmountCents,

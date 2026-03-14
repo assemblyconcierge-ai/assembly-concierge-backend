@@ -1,7 +1,7 @@
 import { withTransaction } from '../../db/pool';
 import { CanonicalIntake } from './intake.types';
 import { classifyServiceArea } from '../service-areas/serviceArea.service';
-import { calculatePricing } from '../pricing/pricing.service';
+import { calculatePricing, normalizeRushTier, rushTierLabel } from '../pricing/pricing.service';
 import { upsertCustomer, createAddress } from '../customers/customer.repository';
 import { createJob } from '../jobs/job.repository';
 import { recordAuditEvent } from '../audit/audit.service';
@@ -50,7 +50,8 @@ export async function processIntake(
 
   if (areaResult.status === 'in_area' && intake.service.typeCode !== 'custom') {
     try {
-      pricing = await calculatePricing(intake.service.typeCode, intake.service.rushRequested);
+      const rushTier = normalizeRushTier(intake.service.rushType ?? intake.service.rushRequested);
+      pricing = await calculatePricing(intake.service.typeCode, rushTier);
       // Lookup service_type_id
       const stRows = await query<{ id: string }>(
         'SELECT id FROM service_types WHERE code = $1 AND is_active = TRUE LIMIT 1',
@@ -120,6 +121,7 @@ export async function processIntake(
         serviceAreaStatus: areaResult.status,
         cityDetected: intake.address.city,
         rushRequested: intake.service.rushRequested,
+        rushType: rushTierLabel(normalizeRushTier(intake.service.rushType ?? intake.service.rushRequested)),
         paymentMode,
         subtotalAmountCents: pricing?.subtotalCents ?? 0,
         rushAmountCents: pricing?.rushAmountCents ?? 0,
@@ -146,6 +148,7 @@ export async function processIntake(
         serviceAreaStatus: areaResult.status,
         serviceTypeCode: intake.service.typeCode,
         rushRequested: intake.service.rushRequested,
+        rushType: rushTierLabel(normalizeRushTier(intake.service.rushType ?? intake.service.rushRequested)),
         totalAmountCents: pricing?.totalCents ?? 0,
         initialStatus,
       },
