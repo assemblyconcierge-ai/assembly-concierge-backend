@@ -156,6 +156,15 @@ export interface AirtableJobRecord {
   serviceTypeCode?: string;      // raw code for reference (e.g. "small")
   dispatchStatus?: string;       // defaults to "Pending Dispatch" at intake
   rushType?: string;             // "No Rush" | "Same-day (+30)" | "Next-day (+20)"
+  // Financial split fields
+  basePriceCents?: number;
+  rushFeeAmountCents?: number;          // = rushAmountCents
+  contractorFlatPayoutCents?: number;
+  contractorRushBonusCents?: number;
+  contractorTotalPayoutCents?: number;
+  stripeFeeCents?: number;
+  rushPlatformShareCents?: number;
+  jobMarginCents?: number;
 }
 
 /** Push a job record to Airtable. Returns the Airtable record ID. */
@@ -224,6 +233,25 @@ export async function syncJobToAirtable(record: AirtableJobRecord): Promise<stri
 
   // Rush Type — exact label from Jotform / normalizer
   if (record.rushType) fields['Rush Type'] = record.rushType;
+
+  // ── Financial split fields ─────────────────────────────────────────────────
+  // All currency fields sent as dollars (not cents) to Airtable Currency/Number fields
+  if (record.basePriceCents !== undefined)
+    fields['Base Price'] = record.basePriceCents / 100;
+  if (record.rushFeeAmountCents !== undefined)
+    fields['Rush Fee Amount'] = record.rushFeeAmountCents / 100;
+  if (record.contractorFlatPayoutCents !== undefined)
+    fields['Contractor Flat Payout'] = record.contractorFlatPayoutCents / 100;
+  if (record.contractorRushBonusCents !== undefined)
+    fields['Contractor Rush Bonus'] = record.contractorRushBonusCents / 100;
+  if (record.contractorTotalPayoutCents !== undefined)
+    fields['Contractor Total Payout'] = record.contractorTotalPayoutCents / 100;
+  if (record.stripeFeeCents !== undefined)
+    fields['Stripe Fee'] = record.stripeFeeCents / 100;
+  if (record.rushPlatformShareCents !== undefined)
+    fields['Rush Platform Share'] = record.rushPlatformShareCents / 100;
+  if (record.jobMarginCents !== undefined)
+    fields['Job Margin'] = record.jobMarginCents / 100;
 
   // Dispatch status — always set at intake (defaults to Pending Dispatch)
   fields['Dispatch Status'] = mapDispatchStatus(record.dispatchStatus);

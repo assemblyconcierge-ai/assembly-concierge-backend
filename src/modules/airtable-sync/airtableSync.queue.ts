@@ -95,6 +95,14 @@ async function processSyncJob(jobId: string, correlationId: string): Promise<voi
       customer_phone: string;
       service_type_code: string;
       rush_type: string | null;   // stored by migration 004
+      // Financial split columns (added by migration 005)
+      base_price_cents: number;
+      flat_payout_cents: number;
+      contractor_rush_bonus_cents: number;
+      contractor_total_payout_cents: number;
+      rush_platform_share_cents: number;
+      stripe_fee_cents: number;
+      job_margin_cents: number;
       // Address fields
       addr_line1: string | null;
       addr_state: string | null;
@@ -109,6 +117,9 @@ async function processSyncJob(jobId: string, correlationId: string): Promise<voi
          j.id, j.job_key, j.city_detected, j.service_area_status, j.rush_requested,
          j.total_amount_cents, j.deposit_amount_cents, j.remainder_amount_cents,
          j.payment_mode, j.rush_type, j.status,
+         j.base_price_cents, j.flat_payout_cents, j.contractor_rush_bonus_cents,
+         j.contractor_total_payout_cents, j.rush_platform_share_cents,
+         j.stripe_fee_cents, j.job_margin_cents,
          j.appointment_date, j.appointment_window, j.custom_job_details,
          j.airtable_record_id, j.created_at,
          c.full_name AS customer_full_name, c.email AS customer_email, c.phone_e164 AS customer_phone,
@@ -188,6 +199,15 @@ async function processSyncJob(jobId: string, correlationId: string): Promise<voi
       stripePaymentIntentId: row.stripe_intent_id ?? undefined,
       dispatchStatus: 'pending',   // always "Pending Dispatch" at intake
       rushType: row.rush_type ?? undefined,
+      // Financial split fields (from jobs table columns added by migration 005)
+      basePriceCents: row.base_price_cents,
+      rushFeeAmountCents: row.total_amount_cents - row.base_price_cents,  // = rush_amount_cents
+      contractorFlatPayoutCents: row.flat_payout_cents,
+      contractorRushBonusCents: row.contractor_rush_bonus_cents,
+      contractorTotalPayoutCents: row.contractor_total_payout_cents,
+      stripeFeeCents: row.stripe_fee_cents,
+      rushPlatformShareCents: row.rush_platform_share_cents,
+      jobMarginCents: row.job_margin_cents,
     };
 
     if (row.airtable_record_id) {

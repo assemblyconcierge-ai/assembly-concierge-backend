@@ -21,6 +21,13 @@ export interface JobRow {
   deposit_amount_cents: number;
   remainder_amount_cents: number;
   total_amount_cents: number;
+  base_price_cents: number;
+  flat_payout_cents: number;
+  contractor_rush_bonus_cents: number;
+  contractor_total_payout_cents: number;
+  rush_platform_share_cents: number;
+  stripe_fee_cents: number;
+  job_margin_cents: number;
   status: JobStatus;
   appointment_date: Date | null;
   appointment_window: string | null;
@@ -50,6 +57,13 @@ export async function createJob(
     depositAmountCents: number;
     remainderAmountCents: number;
     totalAmountCents: number;
+    basePriceCents?: number;
+    flatPayoutCents?: number;
+    contractorRushBonusCents?: number;
+    contractorTotalPayoutCents?: number;
+    rushPlatformShareCents?: number;
+    stripeFeeCents?: number;
+    jobMarginCents?: number;
     status: JobStatus;
     appointmentDate?: string;
     appointmentWindow?: string;
@@ -64,11 +78,17 @@ export async function createJob(
       id, job_key, customer_id, address_id, intake_submission_id, service_type_id,
       source_channel, service_area_status, city_detected, rush_requested, rush_type, payment_mode,
       subtotal_amount_cents, rush_amount_cents, deposit_amount_cents, remainder_amount_cents,
-      total_amount_cents, status, appointment_date, appointment_window,
+      total_amount_cents,
+      base_price_cents, flat_payout_cents, contractor_rush_bonus_cents,
+      contractor_total_payout_cents, rush_platform_share_cents,
+      stripe_fee_cents, job_margin_cents,
+      status, appointment_date, appointment_window,
       special_instructions, custom_job_details, public_pay_token
     ) VALUES (
       $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
-      $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23
+      $13, $14, $15, $16, $17, $18,
+      $19, $20, $21, $22, $23, $24, $25,
+      $26, $27, $28, $29, $30
     ) RETURNING *`,
     [
       uuidv4(),
@@ -88,6 +108,13 @@ export async function createJob(
       params.depositAmountCents,
       params.remainderAmountCents,
       params.totalAmountCents,
+      params.basePriceCents ?? 0,
+      params.flatPayoutCents ?? 0,
+      params.contractorRushBonusCents ?? 0,
+      params.contractorTotalPayoutCents ?? 0,
+      params.rushPlatformShareCents ?? 0,
+      params.stripeFeeCents ?? 0,
+      params.jobMarginCents ?? 0,
       params.status,
       params.appointmentDate ?? null,
       params.appointmentWindow ?? null,

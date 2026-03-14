@@ -437,4 +437,24 @@ UPDATE pricing_rules
 --    next_day_rush_price_cents defaults to 2000 (set above via ADD COLUMN DEFAULT)
 `,
   },
+  {
+    filename: '005_job_financial_split.sql',
+    sql: `
+-- Assembly Concierge Backend -- Job Financial Split Storage
+-- Migration 005: Add financial split columns to jobs table
+--
+-- These columns store the full financial picture at the time of job creation.
+-- stripe_fee_cents is an estimate at intake; updated to actual after payment confirmation.
+-- job_margin_cents is recalculated whenever stripe_fee_cents is updated.
+
+ALTER TABLE jobs
+  ADD COLUMN IF NOT EXISTS base_price_cents           INTEGER NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS flat_payout_cents          INTEGER NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS contractor_rush_bonus_cents INTEGER NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS contractor_total_payout_cents INTEGER NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS rush_platform_share_cents  INTEGER NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS stripe_fee_cents           INTEGER NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS job_margin_cents           INTEGER NOT NULL DEFAULT 0;
+`,
+  },
 ];

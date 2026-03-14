@@ -25,9 +25,20 @@ export interface PricingResult {
   remainderCents: number;
   totalCents: number;                  // = subtotalCents
   flatPayoutCents: number;             // contractor flat payout (no rush)
-  payoutCents: number;                 // flatPayout + contractorRushBonus
+  payoutCents: number;                 // flatPayout + contractorRushBonus (contractor total)
   rushPlatformShareCents: number;      // rushAmount - contractorRushBonus (platform keeps this)
+  stripeFeeCents: number;              // estimated Stripe fee: (total * 2.9%) + $0.30
+  jobMarginCents: number;              // total - stripeFee - contractorTotalPayout
   rule: PricingRule;
+}
+
+/**
+ * Calculate estimated Stripe processing fee for a given charge amount.
+ * Formula: (amountCents * 0.029) + 30  (standard US card rate)
+ * This is an ESTIMATE at intake time. Actual fee is confirmed after Stripe webhook.
+ */
+export function estimateStripeFee(amountCents: number): number {
+  return Math.round(amountCents * 0.029) + 30;
 }
 
 /** Default deposit percentage if no explicit deposit is set on the rule */
@@ -137,6 +148,14 @@ export async function calculatePricing(
   // Platform keeps the difference between what customer pays for rush and what contractor gets
   const rushPlatformShareCents = Math.max(0, rushAmountCents - contractorRushBonusCents);
 
+  // Stripe fee estimate: (totalCents * 2.9%) + $0.30
+  // This is the Pay-in-Full estimate. For deposit flows, the fee is split across two charges.
+  // Updated to actual after Stripe payment.succeeded webhook.
+  const stripeFeeCents = estimateStripeFee(totalCents);
+
+  // Job margin: what the platform keeps after paying Stripe and the contractor
+  const jobMarginCents = Math.max(0, totalCents - stripeFeeCents - payoutCents);
+
   return {
     serviceTypeCode,
     rushTier: tier,
@@ -150,6 +169,8 @@ export async function calculatePricing(
     flatPayoutCents,
     payoutCents,
     rushPlatformShareCents,
+    stripeFeeCents,
+    jobMarginCents,
     rule,
   };
 }
