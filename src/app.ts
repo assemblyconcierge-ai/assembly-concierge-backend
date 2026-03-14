@@ -41,6 +41,11 @@ function schemaGuard(_req: Request, res: Response, next: NextFunction): void {
 export function createApp(): express.Application {
   const app = express();
 
+  // ─── Proxy trust (Render sits behind a load balancer) ───────────────────
+  // Must be set before any IP-based middleware (express-rate-limit, etc.)
+  // "1" = trust exactly one hop (the Render proxy) — prevents ERR_ERL_UNEXPECTED_X_FORWARDED_FOR
+  app.set('trust proxy', 1);
+
   // ─── Security headers ───────────────────────────────────────────────────
   app.use(helmet());
   app.use(cors({ origin: config.APP_BASE_URL || '*', credentials: true }));
