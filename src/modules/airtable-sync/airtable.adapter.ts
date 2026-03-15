@@ -188,7 +188,9 @@ export async function syncJobToAirtable(record: AirtableJobRecord): Promise<stri
     'Rush Requested': record.rushRequested,
     'Total Amount':   record.totalAmountCents / 100,
     'Deposit Amount': record.depositAmountCents / 100,
-    // 'Status' field omitted — not present in Backend Intake Sandbox V2
+    // 'Status' field intentionally omitted (redundant duplicate — do not write)
+    // Canonical lifecycle state written to the correct Airtable field name:
+    'Job Status (Canonical Lifecycle)': mapJobStatus(record.status ?? 'intake_received'),
     'Created At':     record.createdAt,
   };
 
@@ -303,21 +305,25 @@ export async function updateAirtableRecord(
   }
 }
 
-/** Convenience wrapper: update Status field only, mapping through safe labels */
+/** Convenience wrapper: update canonical lifecycle status and optional financial fields.
+ *  Writes to 'Job Status (Canonical Lifecycle)' — NOT to the redundant 'Status' field. */
 export async function updateAirtableStatus(
   recordId: string,
   internalStatus: string,
   totalAmountCents?: number,
+  stripePaymentIntentId?: string,
 ): Promise<void> {
-  const fields: Record<string, unknown> = {};
-  // 'Status' field omitted — not present in Backend Intake Sandbox V2
-  // To re-enable: fields['Status'] = mapJobStatus(internalStatus);
+  const fields: Record<string, unknown> = {
+    // Write to the correct canonical field name — 'Status' is intentionally omitted
+    'Job Status (Canonical Lifecycle)': mapJobStatus(internalStatus),
+  };
   if (totalAmountCents !== undefined) {
     fields['Total Amount'] = totalAmountCents / 100;
   }
-  if (Object.keys(fields).length > 0) {
-    await updateAirtableRecord(recordId, fields);
+  if (stripePaymentIntentId) {
+    fields['Stripe Payment Intent ID'] = stripePaymentIntentId;
   }
+  await updateAirtableRecord(recordId, fields);
 }
 
 /** Log an integration failure for retry */
