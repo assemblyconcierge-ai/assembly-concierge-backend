@@ -67,6 +67,11 @@ jobsRouter.post(
         paymentType,
         req.correlationId,
       );
+      // Enqueue Airtable sync so Stripe Checkout Session ID is written to Airtable
+      setImmediate(() =>
+        enqueueAirtableSync({ jobId: req.params.jobId, correlationId: req.correlationId })
+          .catch((err) => logger.error({ err }, '[Jobs] Airtable sync after checkout failed')),
+      );
       res.json(result);
     } catch (err) {
       next(err);
@@ -176,6 +181,11 @@ jobsRouter.post(
         req.params.jobId,
         'remainder',
         req.correlationId,
+      );
+      // Enqueue Airtable sync so Stripe Checkout Session ID is written to Airtable
+      setImmediate(() =>
+        enqueueAirtableSync({ jobId: req.params.jobId, correlationId: req.correlationId })
+          .catch((err) => logger.error({ err }, '[Jobs] Airtable sync after remainder checkout failed')),
       );
       res.json(result);
     } catch (err) {

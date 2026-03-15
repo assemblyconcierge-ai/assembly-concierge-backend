@@ -212,10 +212,12 @@ async function processSyncJob(jobId: string, correlationId: string): Promise<voi
 
     if (row.airtable_record_id) {
       // Update existing record — status mapped through safe label layer
+      // Also pass Stripe Payment Intent ID so it is written to Airtable after payment confirmation
       await updateAirtableStatus(
         row.airtable_record_id,
         record.status,
         record.totalAmountCents,
+        record.stripePaymentIntentId,
       );
       log.info({ airtableRecordId: row.airtable_record_id }, 'Airtable record updated');
     } else {
