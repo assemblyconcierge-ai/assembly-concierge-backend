@@ -135,7 +135,15 @@ const APPOINTMENT_WINDOW_MAP: Record<string, string> = {
 };
 function mapAppointmentWindow(raw?: string): string | undefined {
   if (!raw) return undefined;
-  return APPOINTMENT_WINDOW_MAP[raw] ?? raw;
+  const mapped = APPOINTMENT_WINDOW_MAP[raw];
+  if (!mapped) {
+    logger.warn(
+      { internalValue: raw, field: 'Appointment Window' },
+      '[Airtable] Unrecognised appointment_window — skipping field to prevent 422',
+    );
+    return undefined;
+  }
+  return mapped;
 }
 
 /** Maps internal dispatch_status enum → Airtable "Dispatch Status" Single Select option */
@@ -236,7 +244,10 @@ export async function syncJobToAirtable(record: AirtableJobRecord): Promise<stri
   }
 
   if (record.appointmentDate)   fields['Appointment Date']   = record.appointmentDate;
-  if (record.appointmentWindow) fields['Appointment Window'] = mapAppointmentWindow(record.appointmentWindow);
+  if (record.appointmentWindow) {
+    const mappedWindow = mapAppointmentWindow(record.appointmentWindow);
+    if (mappedWindow !== undefined) fields['Appointment Window'] = mappedWindow;
+  }
 
   // ── Extended fields ────────────────────────────────────────────────────────
   // Address detail
