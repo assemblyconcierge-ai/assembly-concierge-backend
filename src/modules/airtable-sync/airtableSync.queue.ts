@@ -21,6 +21,27 @@ let airtableQueue: any = null;
 /** True when BullMQ+Redis is active; false when falling back to in-process */
 export let redisQueueActive = false;
 
+// ── Owner alert throttle ────────────────────────────────────────────────────
+// In-process map: jobId → timestamp of last alert sent.
+// Prevents duplicate alerts for the same job within ALERT_THROTTLE_MS.
+// Resets on process restart (acceptable — restarts are infrequent and
+// a single duplicate alert on restart is not harmful).
+const ALERT_THROTTLE_MS = 15 * 60 * 1000; // 15 minutes
+const alertSentAt = new Map<string, number>();
+
+function shouldSendAlert(jobId: string): boolean {
+  const last = alertSentAt.get(jobId);
+  if (last !== undefined && Date.now() - last < ALERT_THROTTLE_MS) {
+    logger.info(
+      { jobId, suppressedFor: `${Math.round((ALERT_THROTTLE_MS - (Date.now() - last)) / 1000)}s` },
+      '[Alert] Duplicate owner alert suppressed (within 15-minute throttle window)',
+    );
+    return false;
+  }
+  alertSentAt.set(jobId, Date.now());
+  return true;
+}
+
 // ── Owner alert ──────────────────────────────────────────────────────────────
 
 async function sendOwnerAlert(payload: {
@@ -86,6 +107,10 @@ async function initQueue(): Promise<void> {
         '[Queue] Airtable sync exhausted all retries — sending owner alert',
       );
 
+      // Throttle: send at most one alert per job per 15 minutes
+      const alertJobId = job.data?.jobId ?? 'unknown';
+      if (!shouldSendAlert(alertJobId)) return;
+
       // Fetch minimal job info for the alert payload
       try {
         const row = await queryOne<{ job_key: string; customer_email: string }>(
@@ -93,10 +118,10 @@ async function initQueue(): Promise<void> {
              FROM jobs j
              JOIN customers c ON c.id = j.customer_id
             WHERE j.id = $1`,
-          [job.data?.jobId],
+          [alertJobId],
         );
         await sendOwnerAlert({
-          jobId: job.data?.jobId ?? 'unknown',
+          jobId: alertJobId,
           jobKey: row?.job_key ?? 'unknown',
           customerEmail: row?.customer_email ?? 'unknown',
           failureReason: err.message,
@@ -106,7 +131,7 @@ async function initQueue(): Promise<void> {
       } catch (lookupErr) {
         // Alert with partial info rather than silently dropping
         await sendOwnerAlert({
-          jobId: job.data?.jobId ?? 'unknown',
+          jobId: alertJobId,
           jobKey: 'lookup_failed',
           customerEmail: 'unknown',
           failureReason: err.message,
@@ -143,6 +168,8 @@ export async function enqueueAirtableSync(params: {
     setImmediate(() => {
       processSyncJob(params.jobId, params.correlationId).catch(async (err) => {
         logger.warn({ err, jobId: params.jobId }, '[Queue] In-process Airtable sync failed — sending owner alert');
+        // Throttle: send at most one alert per job per 15 minutes
+        if (!shouldSendAlert(params.jobId)) return;
         // Fetch minimal job info for the alert
         try {
           const row = await queryOne<{ job_key: string; customer_email: string }>(
