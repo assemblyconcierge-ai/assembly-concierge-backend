@@ -114,6 +114,30 @@ function mapAreaStatus(status: string): string {
   return mapped;
 }
 
+/**
+ * Maps appointment window strings → Airtable "Appointment Window" Single Select option.
+ *
+ * Airtable requires NO space before the parenthesis:
+ *   "Morning (8am-12pm)"   → "Morning(8am-12pm)"
+ *   "Afternoon (12pm-4pm)" → "Afternoon(12pm-4pm)"
+ *   "Evening (4pm-8pm)"    → "Evening(4pm-8pm)"
+ *
+ * Unknown values are passed through unchanged so future windows don't silently break.
+ */
+const APPOINTMENT_WINDOW_MAP: Record<string, string> = {
+  'Morning (8am-12pm)':   'Morning(8am-12pm)',
+  'Afternoon (12pm-4pm)': 'Afternoon(12pm-4pm)',
+  'Evening (4pm-8pm)':    'Evening(4pm-8pm)',
+  // Already-correct variants (no space) — idempotent
+  'Morning(8am-12pm)':    'Morning(8am-12pm)',
+  'Afternoon(12pm-4pm)':  'Afternoon(12pm-4pm)',
+  'Evening(4pm-8pm)':     'Evening(4pm-8pm)',
+};
+function mapAppointmentWindow(raw?: string): string | undefined {
+  if (!raw) return undefined;
+  return APPOINTMENT_WINDOW_MAP[raw] ?? raw;
+}
+
 /** Maps internal dispatch_status enum → Airtable "Dispatch Status" Single Select option */
 const DISPATCH_STATUS_MAP: Record<string, string> = {
   pending:    'Pending Dispatch',
@@ -212,7 +236,7 @@ export async function syncJobToAirtable(record: AirtableJobRecord): Promise<stri
   }
 
   if (record.appointmentDate)   fields['Appointment Date']   = record.appointmentDate;
-  if (record.appointmentWindow) fields['Appointment Window'] = record.appointmentWindow;
+  if (record.appointmentWindow) fields['Appointment Window'] = mapAppointmentWindow(record.appointmentWindow);
 
   // ── Extended fields ────────────────────────────────────────────────────────
   // Address detail
