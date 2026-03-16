@@ -3,9 +3,11 @@ import { z } from 'zod';
 import {
   getJobById,
   getJobByKey,
+  getJobByPublicPayToken,
   searchJobs,
   updateJobStatus,
 } from './job.repository';
+import { queryOne } from '../../db/pool';
 import { getPaymentsByJobId, createJobCheckoutSession } from '../payments/payment.service';
 import { getAuditEvents } from '../audit/audit.service';
 import { calculatePricing } from '../pricing/pricing.service';
@@ -16,6 +18,44 @@ import { requireAdmin } from '../../common/middleware/auth';
 import { logger } from '../../common/logger';
 
 export const jobsRouter = Router();
+
+// GET /jobs/pay/:token — public job summary for customer pay page (no auth required)
+// Returns only safe fields: no financial internals, no payout data
+jobsRouter.get('/pay/:token', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const job = await getJobByPublicPayToken(req.params.token);
+    if (!job) {
+      res.status(404).json({ error: 'NOT_FOUND', message: 'Job not found' });
+      return;
+    }
+
+    // Fetch customer name and service type label for display
+    const customer = await queryOne<{ full_name: string }>(
+      'SELECT full_name FROM customers WHERE id = $1',
+      [job.customer_id],
+    );
+    const serviceType = await queryOne<{ display_name: string; code: string }>(
+      'SELECT display_name, code FROM service_types WHERE id = $1',
+      [job.service_type_id],
+    );
+
+    res.json({
+      jobKey: job.job_key,
+      status: job.status,
+      customerName: customer?.full_name ?? '',
+      serviceType: serviceType?.display_name ?? serviceType?.code ?? 'Assembly Service',
+      rushRequested: job.rush_requested,
+      appointmentDate: job.appointment_date,
+      appointmentWindow: job.appointment_window,
+      totalAmountCents: job.total_amount_cents,
+      depositAmountCents: job.deposit_amount_cents,
+      remainderAmountCents: job.remainder_amount_cents,
+      paymentMode: job.payment_mode,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
 
 // GET /jobs — search/list jobs (admin)
 jobsRouter.get('/', requireAdmin, async (req: Request, res: Response, next: NextFunction) => {

@@ -4,6 +4,9 @@
  * Uses BullMQ when REDIS_URL is configured.
  * Falls back to a simple in-process queue when Redis is not available.
  * Airtable sync failures are logged to integration_failures for retry.
+ *
+ * On final BullMQ failure (all retries exhausted), fires an HTTP POST to
+ * ALERT_WEBHOOK_URL so the owner is notified immediately.
  */
 
 import { logger } from '../../common/logger';
@@ -14,6 +17,38 @@ import { syncJobToAirtable, updateAirtableStatus, logIntegrationFailure } from '
 let Queue: any = null;
 let Worker: any = null;
 let airtableQueue: any = null;
+
+/** True when BullMQ+Redis is active; false when falling back to in-process */
+export let redisQueueActive = false;
+
+// ── Owner alert ──────────────────────────────────────────────────────────────
+
+async function sendOwnerAlert(payload: {
+  jobId: string;
+  jobKey: string;
+  customerEmail: string;
+  failureReason: string;
+  retryCount: number;
+  timestamp: string;
+}): Promise<void> {
+  if (!config.ALERT_WEBHOOK_URL) return;
+  try {
+    await fetch(config.ALERT_WEBHOOK_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        source: 'assembly-concierge-backend',
+        event: 'airtable_sync_final_failure',
+        ...payload,
+      }),
+    });
+    logger.info({ jobId: payload.jobId }, '[Alert] Owner alert sent for final Airtable sync failure');
+  } catch (alertErr) {
+    logger.error({ alertErr, jobId: payload.jobId }, '[Alert] Failed to send owner alert');
+  }
+}
+
+// ── Queue initialisation ─────────────────────────────────────────────────────
 
 async function initQueue(): Promise<void> {
   if (!config.REDIS_URL) return;
@@ -26,7 +61,7 @@ async function initQueue(): Promise<void> {
     const connection = { url: config.REDIS_URL };
     airtableQueue = new Queue('airtable-sync', { connection });
 
-    new Worker(
+    const worker = new Worker(
       'airtable-sync',
       async (job: any) => {
         await processSyncJob(job.data.jobId, job.data.correlationId);
@@ -38,7 +73,51 @@ async function initQueue(): Promise<void> {
       },
     );
 
-    logger.info('[Queue] Airtable sync queue initialized with Redis');
+    // ── Final failure alert ──────────────────────────────────────────────────
+    // BullMQ emits 'failed' on every attempt failure.
+    // We only alert when all retries are exhausted (job.attemptsMade >= maxAttempts).
+    worker.on('failed', async (job: any, err: Error) => {
+      if (!job) return;
+      const maxAttempts: number = job.opts?.attempts ?? 5;
+      if (job.attemptsMade < maxAttempts) return; // still retrying — do not alert yet
+
+      logger.error(
+        { jobId: job.data?.jobId, attempt: job.attemptsMade, maxAttempts },
+        '[Queue] Airtable sync exhausted all retries — sending owner alert',
+      );
+
+      // Fetch minimal job info for the alert payload
+      try {
+        const row = await queryOne<{ job_key: string; customer_email: string }>(
+          `SELECT j.job_key, c.email AS customer_email
+             FROM jobs j
+             JOIN customers c ON c.id = j.customer_id
+            WHERE j.id = $1`,
+          [job.data?.jobId],
+        );
+        await sendOwnerAlert({
+          jobId: job.data?.jobId ?? 'unknown',
+          jobKey: row?.job_key ?? 'unknown',
+          customerEmail: row?.customer_email ?? 'unknown',
+          failureReason: err.message,
+          retryCount: job.attemptsMade,
+          timestamp: new Date().toISOString(),
+        });
+      } catch (lookupErr) {
+        // Alert with partial info rather than silently dropping
+        await sendOwnerAlert({
+          jobId: job.data?.jobId ?? 'unknown',
+          jobKey: 'lookup_failed',
+          customerEmail: 'unknown',
+          failureReason: err.message,
+          retryCount: job.attemptsMade,
+          timestamp: new Date().toISOString(),
+        });
+      }
+    });
+
+    redisQueueActive = true;
+    logger.info('[Queue] Airtable sync queue initialized with Redis (retry: 5×, backoff: exponential)');
   } catch (err) {
     logger.warn({ err }, '[Queue] BullMQ init failed — falling back to in-process queue');
   }
@@ -60,10 +139,37 @@ export async function enqueueAirtableSync(params: {
       removeOnFail: 500,
     });
   } else {
-    // In-process fallback — run immediately in background
+    // In-process fallback — run immediately in background, alert on failure
     setImmediate(() => {
-      processSyncJob(params.jobId, params.correlationId).catch((err) => {
-        logger.warn({ err, jobId: params.jobId }, '[Queue] In-process Airtable sync failed');
+      processSyncJob(params.jobId, params.correlationId).catch(async (err) => {
+        logger.warn({ err, jobId: params.jobId }, '[Queue] In-process Airtable sync failed — sending owner alert');
+        // Fetch minimal job info for the alert
+        try {
+          const row = await queryOne<{ job_key: string; customer_email: string }>(
+            `SELECT j.job_key, c.email AS customer_email
+               FROM jobs j
+               JOIN customers c ON c.id = j.customer_id
+              WHERE j.id = $1`,
+            [params.jobId],
+          );
+          await sendOwnerAlert({
+            jobId: params.jobId,
+            jobKey: row?.job_key ?? 'unknown',
+            customerEmail: row?.customer_email ?? 'unknown',
+            failureReason: err instanceof Error ? err.message : String(err),
+            retryCount: 1,
+            timestamp: new Date().toISOString(),
+          });
+        } catch {
+          await sendOwnerAlert({
+            jobId: params.jobId,
+            jobKey: 'lookup_failed',
+            customerEmail: 'unknown',
+            failureReason: err instanceof Error ? err.message : String(err),
+            retryCount: 1,
+            timestamp: new Date().toISOString(),
+          });
+        }
       });
     });
   }
@@ -72,7 +178,6 @@ export async function enqueueAirtableSync(params: {
 /** Core sync logic — fetch job + customer data and push to Airtable */
 async function processSyncJob(jobId: string, correlationId: string): Promise<void> {
   const log = logger.child({ correlationId, jobId, worker: 'airtable-sync' });
-
   try {
     const row = await queryOne<{
       id: string;

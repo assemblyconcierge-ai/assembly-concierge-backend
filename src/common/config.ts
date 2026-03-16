@@ -41,6 +41,10 @@ const envSchema = z.object({
   // Webhook security
   JOTFORM_WEBHOOK_SECRET: z.string().optional(),
   MAKE_WEBHOOK_SECRET: z.string().optional(),
+
+  // Owner alerting — POST alert payload here on final async failure
+  // Accepts any HTTPS URL (Make.com scenario webhook, Zapier, Slack incoming webhook, etc.)
+  ALERT_WEBHOOK_URL: z.string().url().optional(),
 });
 
 function loadConfig() {
