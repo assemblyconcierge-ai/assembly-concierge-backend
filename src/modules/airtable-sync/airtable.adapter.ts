@@ -31,31 +31,44 @@ const SERVICE_TYPE_MAP: Record<string, string> = {
 };
 const SERVICE_TYPE_FALLBACK = 'Custom Job';
 
-/** Maps internal job_status enum → Airtable "Status" Single Select option */
+/**
+ * Maps internal job_status enum → Airtable "Status" Single Select option.
+ *
+ * Confirmed allowed values in Airtable "Status" field (2026-03-15):
+ *   pending_payment | paid | dispatch_ready | assigned | in_progress | completed | cancelled
+ *
+ * Multiple internal states collapse to the same Airtable label because the
+ * Airtable field represents a coarser operational view than the internal lifecycle.
+ */
 const JOB_STATUS_MAP: Record<string, string> = {
-  intake_received:           'Intake Received',
-  intake_validated:          'Intake Validated',
-  quoted_outside_area:       'Quoted — Outside Area',
-  awaiting_payment:          'Awaiting Payment',
-  deposit_paid:              'Deposit Paid',
-  paid_in_full:              'Paid in Full',
-  ready_for_dispatch:        'Ready for Dispatch',
-  dispatch_in_progress:      'Dispatch in Progress',
-  assigned:                  'Assigned',
-  scheduled:                 'Scheduled',
-  work_completed:            'Work Completed',
-  awaiting_remainder_payment: 'Awaiting Remainder Payment',
-  closed_paid:               'Closed — Paid',
-  cancelled:                 'Cancelled',
-  error_review:              'Error Review',
+  intake_received:            'pending_payment',
+  intake_validated:           'pending_payment',
+  quoted_outside_area:        'pending_payment',
+  awaiting_payment:           'pending_payment',
+  deposit_paid:               'paid',
+  paid_in_full:               'paid',
+  ready_for_dispatch:         'dispatch_ready',
+  dispatch_in_progress:       'dispatch_ready',
+  assigned:                   'assigned',
+  scheduled:                  'assigned',
+  work_completed:             'completed',
+  awaiting_remainder_payment: 'paid',
+  closed_paid:                'completed',
+  cancelled:                  'cancelled',
+  error_review:               'pending_payment',
 };
-const JOB_STATUS_FALLBACK = 'Intake Received';
+const JOB_STATUS_FALLBACK = 'pending_payment';
 
-/** Maps internal service_area_status enum → Airtable "Area Status" Single Select option */
+/**
+ * Maps internal service_area_status enum → Airtable "Area Status" Single Select option.
+ *
+ * Confirmed allowed values in Airtable "Area Status" field (2026-03-15):
+ *   Inside Service Area | Quote Only | Outside Service Area
+ */
 const AREA_STATUS_MAP: Record<string, string> = {
-  in_area:    'Inside Service Area',
-  quote_only: 'Quote Only',
-  blocked:    'Outside Service Area',
+  in_area:      'Inside Service Area',
+  quote_only:   'Quote Only',
+  blocked:      'Outside Service Area',
   // Legacy / alternate spellings that have appeared in logs
   inside_area:  'Inside Service Area',
   outside_area: 'Outside Service Area',
@@ -188,13 +201,12 @@ export async function syncJobToAirtable(record: AirtableJobRecord): Promise<stri
     'Rush Requested': record.rushRequested,
     'Total Amount':   record.totalAmountCents / 100,
     'Deposit Amount': record.depositAmountCents / 100,
-    // 'Status' field intentionally omitted (redundant duplicate — do not write)
-    // Canonical lifecycle state written to the correct Airtable field name:
-    'Job Status (Canonical Lifecycle)': mapJobStatus(record.status ?? 'intake_received'),
+    // Lifecycle status → Airtable "Status" field (confirmed allowed values: pending_payment, paid, etc.)
+    'Status':         mapJobStatus(record.status ?? 'intake_received'),
     'Created At':     record.createdAt,
   };
 
-  // Area Status is optional — only include if the field exists in the Airtable table
+  // Area Status — geographic classification written to its own separate field
   if (record.areaStatus) {
     fields['Area Status'] = mapAreaStatus(record.areaStatus);
   }
@@ -305,8 +317,9 @@ export async function updateAirtableRecord(
   }
 }
 
-/** Convenience wrapper: update canonical lifecycle status and optional financial fields.
- *  Writes to 'Job Status (Canonical Lifecycle)' — NOT to the redundant 'Status' field. */
+/** Convenience wrapper: update lifecycle status and optional financial fields.
+ *  Writes to Airtable "Status" field using confirmed allowed values.
+ *  Does NOT write to the legacy "Job Status (Canonical Lifecycle)" field. */
 export async function updateAirtableStatus(
   recordId: string,
   internalStatus: string,
@@ -314,8 +327,7 @@ export async function updateAirtableStatus(
   stripePaymentIntentId?: string,
 ): Promise<void> {
   const fields: Record<string, unknown> = {
-    // Write to the correct canonical field name — 'Status' is intentionally omitted
-    'Job Status (Canonical Lifecycle)': mapJobStatus(internalStatus),
+    'Status': mapJobStatus(internalStatus),
   };
   if (totalAmountCents !== undefined) {
     fields['Total Amount'] = totalAmountCents / 100;
