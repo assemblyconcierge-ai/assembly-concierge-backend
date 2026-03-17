@@ -142,7 +142,9 @@ export function normalizeServiceTypeCode(raw: string): string {
   if (lower.includes('custom'))    return 'custom';
   // Handle common Jotform label variations
   if (lower.includes('standard'))  return 'medium';
-  if (lower.includes('exercise') || lower.includes('fitness')) return 'treadmill';
+  // Fitness Equipment is a DISTINCT service type — not an alias for treadmill.
+  // Checked AFTER treadmill so 'Treadmill Assembly' is never mis-classified.
+  if (lower.includes('fitness') || lower.includes('exercise')) return 'fitness_equipment';
   // Fallback: slugify the raw value so it is at least readable in logs
   return lower.replace(/\s+/g, '_') || 'unknown';
 }

@@ -457,4 +457,27 @@ ALTER TABLE jobs
   ADD COLUMN IF NOT EXISTS job_margin_cents           INTEGER NOT NULL DEFAULT 0;
 `,
   },
+  {
+    filename: '006_fitness_equipment_service_type.sql',
+    sql: `
+-- Assembly Concierge Backend -- Fitness Equipment Service Type
+-- Migration 006: Add fitness_equipment as a distinct service type with pricing
+--
+-- Fitness Equipment is NOT an alias for Treadmill Assembly.
+-- It is a separate quote-only service type for gym/fitness gear.
+-- Base price is 0 (quote_only path) until real pricing is confirmed.
+INSERT INTO service_types (id, code, display_name, is_active)
+VALUES (gen_random_uuid(), 'fitness_equipment', 'Fitness Equipment', TRUE)
+ON CONFLICT (code) DO NOTHING;
+
+INSERT INTO pricing_rules (
+  id, service_type_code, base_price_cents, rush_price_cents,
+  default_deposit_cents, payout_cents, is_active
+)
+VALUES (
+  gen_random_uuid(), 'fitness_equipment', 0, 0, 0, 0, TRUE
+)
+ON CONFLICT DO NOTHING;
+`,
+  },
 ];

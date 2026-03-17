@@ -23,11 +23,12 @@ import { v4 as uuidv4 } from 'uuid';
 
 /** Maps internal service_type.code → Airtable "Service Type" Single Select option */
 const SERVICE_TYPE_MAP: Record<string, string> = {
-  small:     'Small Assembly',
-  medium:    'Medium Assembly',
-  large:     'Large Assembly',
-  treadmill: 'Treadmill Assembly',
-  custom:    'Custom Job',
+  small:             'Small Assembly',
+  medium:            'Medium Assembly',
+  large:             'Large Assembly',
+  treadmill:         'Treadmill Assembly',
+  fitness_equipment: 'Fitness Equipment',
+  custom:            'Custom Job',
 };
 const SERVICE_TYPE_FALLBACK = 'Custom Job';
 
