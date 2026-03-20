@@ -22,7 +22,7 @@ export const stripeWebhookRouter = Router();
  * Validates Stripe signature, processes relevant events idempotently.
  */
 stripeWebhookRouter.post(
-  '/webhooks/stripe',
+  '/',
   async (req: Request, res: Response, next: NextFunction) => {
     const correlationId = req.correlationId || uuidv4();
     const log = logger.child({ correlationId, handler: 'stripe-webhook' });
