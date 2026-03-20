@@ -113,7 +113,7 @@ export async function createJobCheckoutSession(
   const customer = customerRows[0];
   if (!customer) throw new Error(`Customer not found for job ${jobId}`);
 
-  const baseUrl = config.APP_BASE_URL;
+  const baseUrl = config.FRONTEND_BASE_URL ?? config.APP_BASE_URL;
   const session = await createCheckoutSession({
     jobId: job.id,
     jobKey: job.job_key,

@@ -36,6 +36,10 @@ const envSchema = z.object({
 
   // App
   APP_BASE_URL: z.string().default('http://localhost:3000'),
+  // Frontend public URL — used for Stripe checkout redirect URLs.
+  // Set to the customer-facing website domain (not the API domain).
+  // Falls back to APP_BASE_URL if not set.
+  FRONTEND_BASE_URL: z.string().optional(),
   ADMIN_JWT_SECRET: z.string().default('change-me-in-production'),
 
   // Webhook security
