@@ -15,11 +15,11 @@
  *   Payment ID            — text
  *   Job                   — linked record to Backend Intake Sandbox V2
  *   Payment Type          — single select: "deposit" | "remainder" | "full"
- *   Payment Status        — single select: "checkout_created" | "paid" | "payment_failed" | "refunded"
+ *   Payment Status        — single select: "pending" | "checkout_created" | "paid" | "failed" | "expired" | "cancelled"
  *   Amount Due            — currency (dollars, not cents)
  *   Amount Paid           — currency (dollars, not cents)
  *   Currency              — text (e.g. "usd")
- *   Stripe Session ID     — text
+ *   Stripe Checkout Session ID — text
  *   Checkout URL          — url
  *   Stripe Payment Intent ID — text
  *   Stripe Event ID       — text
@@ -34,12 +34,23 @@ import { logger } from '../../common/logger';
 
 // ── Payment Status Single Select allowlist ───────────────────────────────────
 // Must match the exact option labels in the Airtable Payments table.
+// Confirmed Airtable options: pending | checkout_created | paid | failed | expired | cancelled
+// NOTE: Airtable does not have a "refunded" option. Refunded payments are left at
+// their last status ("paid") and the refund is visible via Stripe. If you want
+// Airtable to reflect refunds, add "refunded" as a Payment Status option in Airtable
+// and the mapping below will activate automatically.
 const PAYMENT_STATUS_MAP: Record<string, string> = {
+  pending:          'pending',
   checkout_created: 'checkout_created',
   paid:             'paid',
   paid_in_full:     'paid',       // internal alias → Airtable "paid"
-  payment_failed:   'payment_failed',
-  refunded:         'refunded',
+  payment_failed:   'failed',     // internal enum → Airtable "failed"
+  failed:           'failed',
+  expired:          'expired',
+  cancelled:        'cancelled',
+  // Refunded: no Airtable option exists yet — falls through to fallback (checkout_created).
+  // Add "refunded" to Airtable Payment Status options to enable this mapping.
+  // refunded:      'refunded',
 };
 const PAYMENT_STATUS_FALLBACK = 'checkout_created';
 
@@ -141,7 +152,7 @@ export async function createAirtablePaymentRow(
     'Payment Status': mapPaymentStatus('checkout_created'),
     'Amount Due':     params.amountDueCents / 100,
     'Currency':       params.currency.toUpperCase(),
-    'Stripe Session ID': params.stripeSessionId,
+    'Stripe Checkout Session ID': params.stripeSessionId,
     'Correlation ID': params.correlationId,
     'Created At':     params.createdAt,
   };
@@ -193,7 +204,7 @@ export async function findAirtablePaymentRowBySessionId(
 
   const log = logger.child({ correlationId, stripeSessionId });
 
-  const filter = encodeURIComponent(`{Stripe Session ID} = "${stripeSessionId}"`);
+  const filter = encodeURIComponent(`{Stripe Checkout Session ID} = "${stripeSessionId}"`);
   const url = `${paymentsTableUrl()}?filterByFormula=${filter}&maxRecords=1`;
 
   try {
