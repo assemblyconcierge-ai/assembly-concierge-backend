@@ -11,6 +11,10 @@ import { getJobById, updateJobStatus } from '../jobs/job.repository';
 import { assertTransition } from '../jobs/job.stateMachine';
 import { recordAuditEvent } from '../audit/audit.service';
 import { enqueueAirtableSync } from '../airtable-sync/airtableSync.queue';
+import {
+  findAirtablePaymentRowBySessionId,
+  updateAirtablePaymentRow,
+} from '../airtable-sync/airtable.payments.adapter';
 
 type Log = pino.Logger;
 
@@ -191,12 +195,45 @@ async function handleCheckoutCompleted(
     });
   });
 
-  // Enqueue Airtable sync
+  // Enqueue Airtable sync (updates parent Backend Intake Sandbox V2 row)
   try {
     await enqueueAirtableSync({ jobId: job.id, correlationId });
   } catch (err) {
     log.warn({ err }, 'Airtable sync enqueue failed after payment');
   }
+
+  // ── Update Airtable Payments child row (idempotent PATCH) ──
+  // Look up the Payments row by Stripe session ID, then PATCH it to paid.
+  // This is fire-and-forget: failures are logged but do not affect the 200 already sent.
+  setImmediate(async () => {
+    const now = new Date().toISOString();
+    try {
+      const airtablePaymentRecordId = await findAirtablePaymentRowBySessionId(session.id, correlationId);
+      if (!airtablePaymentRecordId) {
+        log.warn(
+          { sessionId: session.id, jobId: job.id, paymentId: payment.id },
+          '[AirtablePayments] No Payments row found for session ID — cannot update to paid',
+        );
+        return;
+      }
+      await updateAirtablePaymentRow(
+        {
+          airtablePaymentRecordId,
+          amountPaidCents: amountPaid,
+          stripePaymentIntentId: (session.payment_intent as string) ?? '',
+          stripeEventId: event.id,
+          paidAt: now,
+          lastWebhookAt: now,
+        },
+        correlationId,
+      );
+    } catch (err) {
+      log.error(
+        { err, sessionId: session.id, jobId: job.id, paymentId: payment.id },
+        '[AirtablePayments] Exception updating Payments row after checkout.session.completed',
+      );
+    }
+  });
 
   log.info({ jobId: job.id, paymentId: payment.id, amountPaid }, 'Checkout completed');
 }

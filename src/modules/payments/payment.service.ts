@@ -7,6 +7,7 @@ import { recordAuditEvent } from '../audit/audit.service';
 import { createCheckoutSession } from './stripe.adapter';
 import { config } from '../../common/config';
 import { logger } from '../../common/logger';
+import { createAirtablePaymentRow } from '../airtable-sync/airtable.payments.adapter';
 
 export interface PaymentRow {
   id: string;
@@ -154,6 +155,41 @@ export async function createJobCheckoutSession(
   });
 
   logger.info({ jobId, paymentId: payment.id, paymentType, amountCents }, 'Checkout session created');
+
+  // ── Airtable Payments child-table write (fire-and-forget, must not break checkout response) ──
+  // Requires the parent job to have an airtable_record_id (set during intake sync).
+  setImmediate(async () => {
+    try {
+      const jobRow = await queryOne<{ airtable_record_id: string | null }>(
+        'SELECT airtable_record_id FROM jobs WHERE id = $1',
+        [job.id],
+      );
+      const parentId = jobRow?.airtable_record_id;
+      if (!parentId) {
+        logger.warn(
+          { jobId: job.id, paymentId: payment.id, sessionId: session.id, correlationId },
+          '[AirtablePayments] Parent airtable_record_id missing — cannot create Payments row',
+        );
+        return;
+      }
+      await createAirtablePaymentRow({
+        paymentId: payment.id,
+        parentAirtableRecordId: parentId,
+        paymentType,
+        amountDueCents: amountCents,
+        currency: 'usd',
+        stripeSessionId: session.id,
+        checkoutUrl: session.url ?? undefined,
+        correlationId,
+        createdAt: new Date().toISOString(),
+      });
+    } catch (err) {
+      logger.error(
+        { err, jobId: job.id, paymentId: payment.id, sessionId: session.id, correlationId },
+        '[AirtablePayments] Exception during Payments row creation after checkout',
+      );
+    }
+  });
 
   return {
     checkoutUrl: session.url!,

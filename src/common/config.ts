@@ -18,7 +18,9 @@ const envSchema = z.object({
   // Airtable
   AIRTABLE_API_KEY: z.string().optional(),
   AIRTABLE_BASE_ID: z.string().optional(),
-  AIRTABLE_TABLE_JOBS: z.string().default('Jobs'),
+  AIRTABLE_TABLE_JOBS: z.string().default('Backend Intake Sandbox V2'),
+  // Child table for payment transaction rows linked to the jobs parent table
+  AIRTABLE_TABLE_PAYMENTS: z.string().default('Payments'),
 
   // Email
   EMAIL_PROVIDER_API_KEY: z.string().optional(),
