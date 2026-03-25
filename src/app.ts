@@ -10,6 +10,7 @@ import { intakeRouter } from './modules/intake/intake.routes';
 import { jobsRouter } from './modules/jobs/jobs.routes';
 import { adminRouter } from './modules/admin/admin.routes';
 import { schemaResetRouter } from './modules/admin/schemaReset.routes';
+import { testJobsRouter } from './modules/admin/testJobs.routes';
 import { config } from './common/config';
 
 // ---------------------------------------------------------------------------
@@ -117,6 +118,9 @@ export function createApp(): express.Application {
 
   // ─── Schema reset (one-time recovery — no schema guard, requires ALLOW_SCHEMA_RESET=true) ──
   app.use('/admin', schemaResetRouter);
+
+  // ─── Test/validation job seeding (admin-only, safe to remove post-launch) ──
+  app.use('/admin', testJobsRouter);
 
   // ─── Jotform body parser ─────────────────────────────────────────────
   // Handles multipart/form-data, text/plain, and any content-type Jotform sends.
