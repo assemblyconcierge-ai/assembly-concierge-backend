@@ -48,6 +48,9 @@ const envSchema = z.object({
   JOTFORM_WEBHOOK_SECRET: z.string().optional(),
   MAKE_WEBHOOK_SECRET: z.string().optional(),
 
+  // Validation / test routes — must be explicitly enabled; never expose in production without intent
+  ENABLE_TEST_ROUTES: z.string().optional(),
+
   // Owner alerting — POST alert payload here on final async failure
   // Accepts any HTTPS URL (Make.com scenario webhook, Zapier, Slack incoming webhook, etc.)
   ALERT_WEBHOOK_URL: z.string().url().optional(),
