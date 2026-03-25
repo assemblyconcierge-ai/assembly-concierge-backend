@@ -355,15 +355,23 @@ export async function updateAirtableRecord(
 
 /** Convenience wrapper: update lifecycle status and optional financial fields.
  *  Writes to Airtable "Status" field using confirmed allowed values.
+ *  Also writes the four backend mirror fields:
+ *    Backend Job Status, Backend Updated At, Last Backend Sync At, Backend Sync Error
  *  Does NOT write to the legacy "Job Status (Canonical Lifecycle)" field. */
 export async function updateAirtableStatus(
   recordId: string,
   internalStatus: string,
   totalAmountCents?: number,
   stripePaymentIntentId?: string,
+  jobUpdatedAt?: Date,
+  syncError?: string,
 ): Promise<void> {
+  const now = new Date().toISOString();
   const fields: Record<string, unknown> = {
     'Status': mapJobStatus(internalStatus),
+    // Backend mirror fields — raw internal values for reconciliation formulas
+    'Backend Job Status':  internalStatus,
+    'Last Backend Sync At': now,
   };
   if (totalAmountCents !== undefined) {
     fields['Total Amount'] = totalAmountCents / 100;
@@ -371,6 +379,13 @@ export async function updateAirtableStatus(
   if (stripePaymentIntentId) {
     fields['Stripe Payment Intent ID'] = stripePaymentIntentId;
   }
+  if (jobUpdatedAt) {
+    fields['Backend Updated At'] = jobUpdatedAt instanceof Date
+      ? jobUpdatedAt.toISOString()
+      : jobUpdatedAt;
+  }
+  // Backend Sync Error: write empty string on success to clear any previous error
+  fields['Backend Sync Error'] = syncError ?? '';
   await updateAirtableRecord(recordId, fields);
 }
 

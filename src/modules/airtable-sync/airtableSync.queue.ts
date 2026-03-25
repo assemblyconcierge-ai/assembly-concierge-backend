@@ -244,6 +244,8 @@ async function processSyncJob(jobId: string, correlationId: string): Promise<voi
       stripe_intent_id: string | null;
       // Intake raw payload (for photos and payment type from Jotform)
       raw_payload_json: unknown;
+      // Backend mirror fields
+      updated_at: Date;
     }>(
       `SELECT
          j.id, j.job_key, j.city_detected, j.service_area_status, j.rush_requested,
@@ -253,7 +255,7 @@ async function processSyncJob(jobId: string, correlationId: string): Promise<voi
          j.contractor_total_payout_cents, j.rush_platform_share_cents,
          j.stripe_fee_cents, j.job_margin_cents,
          j.appointment_date, j.appointment_window, j.custom_job_details,
-         j.airtable_record_id, j.created_at,
+         j.airtable_record_id, j.created_at, j.updated_at,
          c.full_name AS customer_full_name, c.email AS customer_email, c.phone_e164 AS customer_phone,
          COALESCE(st.code, 'unknown') AS service_type_code,
          a.line1 AS addr_line1, a.state AS addr_state, a.postal_code AS addr_postal,
@@ -350,6 +352,7 @@ async function processSyncJob(jobId: string, correlationId: string): Promise<voi
         record.status,
         record.totalAmountCents,
         record.stripePaymentIntentId,
+        row.updated_at,
       );
       log.info({ airtableRecordId: row.airtable_record_id }, 'Airtable record updated');
     } else {
@@ -366,6 +369,26 @@ async function processSyncJob(jobId: string, correlationId: string): Promise<voi
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     log.error({ err }, 'Airtable sync failed');
+    // Write sync error to Airtable mirror field if we already have the record ID
+    // (best-effort: do not throw if this secondary write also fails)
+    try {
+      const jobRow = await queryOne<{ airtable_record_id: string | null; status: string; updated_at: Date }>(
+        'SELECT airtable_record_id, status, updated_at FROM jobs WHERE id = $1',
+        [jobId],
+      );
+      if (jobRow?.airtable_record_id) {
+        await updateAirtableStatus(
+          jobRow.airtable_record_id,
+          jobRow.status,
+          undefined,
+          undefined,
+          jobRow.updated_at,
+          msg.slice(0, 255), // Airtable text field limit
+        );
+      }
+    } catch (mirrorErr) {
+      log.warn({ mirrorErr }, 'Failed to write Backend Sync Error to Airtable');
+    }
     await logIntegrationFailure({
       integrationName: 'airtable',
       relatedEntityType: 'job',

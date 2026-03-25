@@ -164,15 +164,35 @@ async function handleCheckoutCompleted(
     } else if (paymentType === 'deposit') {
       newJobStatus = 'deposit_paid';
     } else {
+      // remainder payment — target is closed_paid.
+      // The state machine does NOT have a direct deposit_paid → closed_paid edge.
+      // Valid path is: deposit_paid → awaiting_remainder_payment → closed_paid.
+      // If the job is still at deposit_paid (i.e. the admin never manually advanced it
+      // to awaiting_remainder_payment before collecting the remainder), we step through
+      // the intermediate state in the same transaction so the final persisted status
+      // is always closed_paid.
       newJobStatus = 'closed_paid';
     }
-
     try {
-      assertTransition(job.status, newJobStatus as any);
-      await client.query(
-        'UPDATE jobs SET status = $2, updated_at = NOW() WHERE id = $1',
-        [job.id, newJobStatus],
-      );
+      if (paymentType === 'remainder' && job.status === 'deposit_paid') {
+        // Two-step transition: deposit_paid → awaiting_remainder_payment → closed_paid
+        assertTransition(job.status, 'awaiting_remainder_payment');
+        assertTransition('awaiting_remainder_payment', 'closed_paid');
+        await client.query(
+          'UPDATE jobs SET status = $2, updated_at = NOW() WHERE id = $1',
+          [job.id, 'closed_paid'],
+        );
+        log.info(
+          { jobId: job.id, from: job.status, via: 'awaiting_remainder_payment', to: 'closed_paid' },
+          'Job stepped through awaiting_remainder_payment → closed_paid',
+        );
+      } else {
+        assertTransition(job.status, newJobStatus as any);
+        await client.query(
+          'UPDATE jobs SET status = $2, updated_at = NOW() WHERE id = $1',
+          [job.id, newJobStatus],
+        );
+      }
     } catch (err) {
       log.warn({ err, from: job.status, to: newJobStatus }, 'Job state transition skipped');
     }
