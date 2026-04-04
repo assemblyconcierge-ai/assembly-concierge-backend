@@ -4,13 +4,7 @@ import { config } from './common/config';
 import { logger } from './common/logger';
 import { getPool, closePool } from './db/pool';
 import { MIGRATIONS } from './db/embeddedMigrations';
-
-// ---------------------------------------------------------------------------
-// Schema readiness flag — set to true only after migrations AND verification
-// pass. Used by /ready and the intake webhook route to refuse requests when
-// the database schema is not in the expected state.
-// ---------------------------------------------------------------------------
-export let schemaReady = false;
+import { schemaReady, setSchemaReady } from './common/schemaState';
 
 // ---------------------------------------------------------------------------
 // SCHEMA CONTRACT
@@ -247,17 +241,17 @@ async function start(): Promise<void> {
       logger.error(
         '[AC-API] Server will start but /ready will return 503 and webhook routes will reject requests.',
       );
-      schemaReady = false;
+      setSchemaReady(false);
     } else {
       logger.info('[AC-API] Schema verification passed — all required tables, columns, and indexes present');
-      schemaReady = true;
+      setSchemaReady(true);
     }
   } catch (migrationErr) {
     logger.error(
       { err: migrationErr },
       '[AC-API] Migration/verification failed — server will start but DB may be unavailable.',
     );
-    schemaReady = false;
+    setSchemaReady(false);
   }
 
   const app = createApp();

@@ -131,6 +131,15 @@ jobsRouter.post(
         return;
       }
 
+      const RECALC_BLOCKED: ReadonlySet<string> = new Set(['paid_in_full', 'deposit_paid', 'closed_paid']);
+      if (RECALC_BLOCKED.has(job.status)) {
+        res.status(409).json({
+          error: 'RECALCULATE_NOT_ALLOWED',
+          message: `Cannot recalculate pricing for a job with status '${job.status}'.`,
+        });
+        return;
+      }
+
       // Get service type code
       const stRows = await import('../../db/pool').then(({ query }) =>
         query<{ code: string }>(

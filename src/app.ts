@@ -12,24 +12,14 @@ import { adminRouter } from './modules/admin/admin.routes';
 import { schemaResetRouter } from './modules/admin/schemaReset.routes';
 import { testJobsRouter } from './modules/admin/testJobs.routes';
 import { config } from './common/config';
+import { schemaReady } from './common/schemaState';
 
 // ---------------------------------------------------------------------------
 // Schema readiness guard middleware
 // Rejects webhook and data-write requests when the schema is not ready.
-// Imported lazily to avoid circular dependency with server.ts.
 // ---------------------------------------------------------------------------
 function schemaGuard(_req: Request, res: Response, next: NextFunction): void {
-  // Dynamic import avoids circular dep; falls back to allowing if module
-  // hasn't exported yet (e.g. during tests where server.ts is not loaded).
-  let ready = true;
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const srv = require('./server') as { schemaReady?: boolean };
-    if (typeof srv.schemaReady === 'boolean') ready = srv.schemaReady;
-  } catch {
-    // server.ts not loaded (test environment) — allow through
-  }
-  if (!ready) {
+  if (!schemaReady) {
     res.status(503).json({
       error: 'SCHEMA_NOT_READY',
       message: 'Database schema is not ready. Check server logs for migration errors.',
@@ -87,17 +77,7 @@ export function createApp(): express.Application {
 
   // ─── Readiness (requires DB + schema) ────────────────────────────────────
   app.get('/ready', async (_req: Request, res: Response) => {
-    // Check schemaReady flag first
-    let ready = false;
-    try {
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
-      const srv = require('./server') as { schemaReady?: boolean };
-      if (typeof srv.schemaReady === 'boolean') ready = srv.schemaReady;
-    } catch {
-      ready = false;
-    }
-
-    if (!ready) {
+    if (!schemaReady) {
       res.status(503).json({
         status: 'not_ready',
         reason: 'schema_not_verified',
