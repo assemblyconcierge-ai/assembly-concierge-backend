@@ -7,6 +7,7 @@ import { createJob } from '../jobs/job.repository';
 import { recordAuditEvent } from '../audit/audit.service';
 import { generateJobKey, generatePublicPayToken } from '../../common/utils';
 import { enqueueAirtableSync } from '../airtable-sync/airtableSync.queue';
+import { createJobCheckoutSession } from '../payments/payment.service';
 import { logger } from '../../common/logger';
 import { query } from '../../db/pool';
 
@@ -17,6 +18,8 @@ export interface IntakeProcessResult {
   serviceAreaStatus: string;
   totalAmountCents: number;
   checkoutRequired: boolean;
+  checkoutUrl?: string;
+  sessionId?: string;
 }
 
 /**
@@ -178,6 +181,29 @@ export async function processIntake(
     await enqueueAirtableSync({ jobId: result.jobId, correlationId });
   } catch (err) {
     log.warn({ err, jobId: result.jobId }, 'Airtable sync enqueue failed — will retry');
+  }
+
+  // 6. Auto-trigger checkout session creation if payment is required (fire-and-forget)
+  // This ensures payment ownership remains with backend + Stripe, not Jotform or Make.
+  if (result.checkoutRequired) {
+    setImmediate(async () => {
+      try {
+        const { checkoutUrl, sessionId } = await createJobCheckoutSession(
+          result.jobId,
+          'deposit',
+          correlationId,
+        );
+        log.info(
+          { jobId: result.jobId, sessionId, checkoutUrl },
+          'Checkout session auto-created after intake',
+        );
+      } catch (err) {
+        log.error(
+          { err, jobId: result.jobId, correlationId },
+          'Auto-checkout creation failed — admin can retry via POST /jobs/:jobId/create-checkout-session',
+        );
+      }
+    });
   }
 
   return result;
