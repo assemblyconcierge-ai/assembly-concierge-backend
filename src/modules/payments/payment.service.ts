@@ -158,20 +158,51 @@ export async function createJobCheckoutSession(
 
   // ── Airtable Payments child-table write (fire-and-forget, must not break checkout response) ──
   // Requires the parent job to have an airtable_record_id (set during intake sync).
+  // When checkout is auto-triggered from processIntake(), the parent Airtable sync may
+  // still be in flight, so airtable_record_id can be null on the first attempt.
+  // Retry up to 10 times with 3-second delays (30s total window) to allow the sync to land.
   setImmediate(async () => {
+    const MAX_ATTEMPTS = 10;
+    const DELAY_MS = 3000;
+    const log = logger.child({
+      jobId: job.id, paymentId: payment.id, sessionId: session.id, correlationId,
+      component: 'AirtablePayments',
+    });
+
     try {
-      const jobRow = await queryOne<{ airtable_record_id: string | null }>(
-        'SELECT airtable_record_id FROM jobs WHERE id = $1',
-        [job.id],
-      );
-      const parentId = jobRow?.airtable_record_id;
+      let parentId: string | null = null;
+
+      for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+        const jobRow = await queryOne<{ airtable_record_id: string | null }>(
+          'SELECT airtable_record_id FROM jobs WHERE id = $1',
+          [job.id],
+        );
+        parentId = jobRow?.airtable_record_id ?? null;
+
+        if (parentId) {
+          if (attempt > 1) {
+            log.info({ attempt }, '[AirtablePayments] airtable_record_id available after retry');
+          }
+          break;
+        }
+
+        if (attempt < MAX_ATTEMPTS) {
+          log.info(
+            { attempt, maxAttempts: MAX_ATTEMPTS, nextRetryMs: DELAY_MS },
+            '[AirtablePayments] airtable_record_id not yet available — waiting to retry',
+          );
+          await new Promise((resolve) => setTimeout(resolve, DELAY_MS));
+        }
+      }
+
       if (!parentId) {
-        logger.warn(
-          { jobId: job.id, paymentId: payment.id, sessionId: session.id, correlationId },
-          '[AirtablePayments] Parent airtable_record_id missing — cannot create Payments row',
+        log.error(
+          { attempts: MAX_ATTEMPTS, totalWaitMs: MAX_ATTEMPTS * DELAY_MS },
+          '[AirtablePayments] airtable_record_id still null after all retries — Payments child row NOT created. Manual intervention required.',
         );
         return;
       }
+
       await createAirtablePaymentRow({
         paymentId: payment.id,
         parentAirtableRecordId: parentId,
@@ -184,8 +215,8 @@ export async function createJobCheckoutSession(
         createdAt: new Date().toISOString(),
       });
     } catch (err) {
-      logger.error(
-        { err, jobId: job.id, paymentId: payment.id, sessionId: session.id, correlationId },
+      log.error(
+        { err },
         '[AirtablePayments] Exception during Payments row creation after checkout',
       );
     }
