@@ -46,7 +46,7 @@ const JOB_STATUS_MAP: Record<string, string> = {
   intake_validated:           'pending_payment',
   quoted_outside_area:        'pending_payment',
   awaiting_payment:           'pending_payment',
-  deposit_paid:               'paid',
+  deposit_paid:               'dispatch_ready',
   paid_in_full:               'paid',
   ready_for_dispatch:         'dispatch_ready',
   dispatch_in_progress:       'dispatch_ready',
