@@ -16,7 +16,7 @@ smsWebhookRouter.post('/', async (req: Request, res: Response) => {
   const correlationId = req.correlationId;
   const log = logger.child({ correlationId, handler: 'sms-webhook' });
 
-  const body = req.body as Record<string, unknown>;
+  const body = (req.body ?? {}) as Record<string, unknown>;
 
   // Quo may use different field names — try common variants
   const rawPhone = (
