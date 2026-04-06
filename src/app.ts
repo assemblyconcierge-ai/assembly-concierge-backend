@@ -6,6 +6,7 @@ import { correlationIdMiddleware } from './common/middleware/correlationId';
 import { jotformBodyParser } from './common/middleware/jotformBodyParser';
 import { globalErrorHandler } from './common/errors/errorHandler';
 import { stripeWebhookRouter } from './modules/payments/stripe.webhook';
+import { smsWebhookRouter } from './modules/sms/sms.routes';
 import { intakeRouter } from './modules/intake/intake.routes';
 import { jobsRouter } from './modules/jobs/jobs.routes';
 import { adminRouter } from './modules/admin/admin.routes';
@@ -60,6 +61,9 @@ export function createApp(): express.Application {
     express.raw({ type: 'application/json' }),
     stripeWebhookRouter,
   );
+
+  // ─── SMS webhook (Quo inbound contractor messages) ────────────────────────
+  app.use('/webhooks/sms', smsWebhookRouter);
 
   // ─── JSON body parser for all other routes ───────────────────────────────
   app.use(express.json({ limit: '1mb' }));
