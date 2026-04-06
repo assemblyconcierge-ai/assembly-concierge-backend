@@ -18,6 +18,9 @@ smsWebhookRouter.post('/', async (req: Request, res: Response) => {
 
   const body = (req.body ?? {}) as Record<string, unknown>;
 
+  // TEMP DEBUG: log raw Quo payload to identify field names — remove after confirmed
+  log.info({ quoPayload: JSON.stringify(body) }, '[SMS] Raw webhook payload received');
+
   // Quo may use different field names — try common variants
   const rawPhone = (
     (body.from       as string) ||
