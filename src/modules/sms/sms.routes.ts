@@ -16,30 +16,21 @@ smsWebhookRouter.post('/', async (req: Request, res: Response) => {
   const correlationId = req.correlationId;
   const log = logger.child({ correlationId, handler: 'sms-webhook' });
 
-  const body = (req.body ?? {}) as Record<string, unknown>;
+  const obj = ((req.body ?? {}) as Record<string, unknown>)?.data as Record<string, unknown> | undefined;
+  const message = obj?.object as Record<string, unknown> | undefined;
 
-  // TEMP DEBUG: log raw Quo payload to identify field names — remove after confirmed
-  log.info({ quoPayload: JSON.stringify(body) }, '[SMS] Raw webhook payload received');
+  const direction = message?.direction as string | undefined;
+  if (direction !== 'incoming') {
+    log.info({ direction }, '[SMS] Ignoring non-incoming message');
+    res.status(200).json({ received: true });
+    return;
+  }
 
-  // Quo may use different field names — try common variants
-  const rawPhone = (
-    (body.from       as string) ||
-    (body.sender     as string) ||
-    (body.phone      as string) ||
-    (body.originator as string) ||
-    ''
-  ).trim();
-
-  const messageBody = (
-    (body.body    as string) ||
-    (body.message as string) ||
-    (body.text    as string) ||
-    (body.content as string) ||
-    ''
-  ).trim();
+  const rawPhone = ((message?.from as string) ?? '').trim();
+  const messageBody = ((message?.body as string) ?? '').trim();
 
   if (!rawPhone || !messageBody) {
-    log.warn({ bodyKeys: Object.keys(body) }, '[SMS] Webhook payload missing phone or message — ignoring');
+    log.warn('[SMS] Webhook payload missing phone or message body — ignoring');
     res.status(200).json({ received: true });
     return;
   }
