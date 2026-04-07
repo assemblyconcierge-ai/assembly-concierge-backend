@@ -30,6 +30,11 @@ const envSchema = z.object({
   SMS_PROVIDER_API_KEY: z.string().optional(),
   SMS_FROM: z.string().optional(),
 
+  // Quo (OpenPhone-compatible) — outbound contractor SMS dispatch
+  QUO_API_KEY: z.string().optional(),
+  QUO_PHONE_NUMBER: z.string().optional(),       // E.164, e.g. +14705742191
+  QUO_PHONE_NUMBER_ID: z.string().optional(),    // e.g. PNLQwgD2g3
+
   // Storage
   STORAGE_BUCKET: z.string().optional(),
   STORAGE_ACCESS_KEY: z.string().optional(),

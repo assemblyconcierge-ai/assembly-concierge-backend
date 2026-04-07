@@ -16,6 +16,7 @@ import { recordAuditEvent } from '../audit/audit.service';
 import { enqueueAirtableSync } from '../airtable-sync/airtableSync.queue';
 import { requireAdmin } from '../../common/middleware/auth';
 import { logger } from '../../common/logger';
+import { dispatchJobToContractor } from '../dispatch/dispatch.service';
 
 export const jobsRouter = Router();
 
@@ -257,6 +258,34 @@ jobsRouter.post(
       await enqueueAirtableSync({ jobId: job.id, correlationId: req.correlationId });
       res.json({ message: 'Retry actions enqueued', jobId: job.id });
     } catch (err) {
+      next(err);
+    }
+  },
+);
+
+// POST /jobs/:jobId/dispatch — send dispatch SMS to a contractor
+jobsRouter.post(
+  '/:jobId/dispatch',
+  requireAdmin,
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const schema = z.object({ contractorId: z.string().uuid() });
+      const { contractorId } = schema.parse(req.body);
+      const result = await dispatchJobToContractor(
+        req.params.jobId,
+        contractorId,
+        req.correlationId,
+      );
+      res.status(201).json({ message: 'Dispatch sent', ...result });
+    } catch (err: any) {
+      if (err?.statusCode === 404) {
+        res.status(404).json({ error: 'NOT_FOUND', message: err.message });
+        return;
+      }
+      if (err?.statusCode === 409) {
+        res.status(409).json({ error: 'CONFLICT', message: err.message });
+        return;
+      }
       next(err);
     }
   },
