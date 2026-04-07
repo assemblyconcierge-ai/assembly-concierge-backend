@@ -47,7 +47,7 @@ const envSchema = z.object({
   // Set to the customer-facing website domain (not the API domain).
   // Falls back to APP_BASE_URL if not set.
   FRONTEND_BASE_URL: z.string().optional(),
-  ADMIN_JWT_SECRET: z.string().default('change-me-in-production'),
+  ADMIN_JWT_SECRET: z.string().min(1),
 
   // Webhook security
   JOTFORM_WEBHOOK_SECRET: z.string().optional(),
