@@ -36,7 +36,7 @@ const SERVICE_TYPE_FALLBACK = 'Custom Job';
  * Maps internal job_status enum → Airtable "Status" Single Select option.
  *
  * Confirmed allowed values in Airtable "Status" field (2026-03-15):
- *   pending_payment | paid | ready_for_dispatch | assigned | in_progress | completed | cancelled
+ *   pending_payment | paid | dispatch_ready | assigned | in_progress | completed | cancelled
  *
  * Multiple internal states collapse to the same Airtable label because the
  * Airtable field represents a coarser operational view than the internal lifecycle.
@@ -46,10 +46,10 @@ const JOB_STATUS_MAP: Record<string, string> = {
   intake_validated:           'pending_payment',
   quoted_outside_area:        'pending_payment',
   awaiting_payment:           'pending_payment',
-  deposit_paid:               'ready_for_dispatch',
+  deposit_paid:               'paid',
   paid_in_full:               'paid',
-  ready_for_dispatch:         'ready_for_dispatch',
-  dispatch_in_progress:       'ready_for_dispatch',
+  ready_for_dispatch:         'dispatch_ready',
+  dispatch_in_progress:       'dispatch_ready',
   assigned:                   'assigned',
   scheduled:                  'assigned',
   work_completed:             'completed',
