@@ -226,7 +226,6 @@ async function verifySchema(): Promise<string[]> {
 // Startup sequence: migrate → verify schema → listen
 // ---------------------------------------------------------------------------
 async function start(): Promise<void> {
-  console.log('[DEBUG] ADMIN_JWT_SECRET prefix:', config.ADMIN_JWT_SECRET?.slice(0, 6));
   logger.info('[AC-API] Running database migrations…');
   try {
     await runMigrations();
