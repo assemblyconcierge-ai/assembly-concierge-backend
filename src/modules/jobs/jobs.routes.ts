@@ -17,8 +17,14 @@ import { enqueueAirtableSync } from '../airtable-sync/airtableSync.queue';
 import { requireAdmin } from '../../common/middleware/auth';
 import { logger } from '../../common/logger';
 import { dispatchJobToContractor } from '../dispatch/dispatch.service';
+import { config } from '../../common/config';
 
 export const jobsRouter = Router();
+
+// GET /jobs/debug-token — temporary: confirm which secret the server loaded
+jobsRouter.get('/debug-token', async (req: Request, res: Response) => {
+  res.json({ prefix: config.ADMIN_JWT_SECRET?.slice(0, 8) });
+});
 
 // GET /jobs/pay/:token — public job summary for customer pay page (no auth required)
 // Returns only safe fields: no financial internals, no payout data
