@@ -23,7 +23,15 @@ export const jobsRouter = Router();
 
 // GET /jobs/debug-token — temporary: confirm which secret the server loaded
 jobsRouter.get('/debug-token', async (req: Request, res: Response) => {
-  res.json({ prefix: config.ADMIN_JWT_SECRET?.slice(0, 8) });
+  const secret = config.ADMIN_JWT_SECRET;
+  const incoming = req.headers['x-admin-token'] as string | undefined;
+  res.json({
+    secretPrefix: secret?.slice(0, 8),
+    secretLength: secret?.length,
+    incomingPrefix: incoming?.slice(0, 8),
+    incomingLength: incoming?.length,
+    match: incoming === secret,
+  });
 });
 
 // GET /jobs/pay/:token — public job summary for customer pay page (no auth required)
