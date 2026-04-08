@@ -23,7 +23,7 @@ export function requireAdmin(req: Request, res: Response, next: NextFunction): v
     return;
   }
 
-  if (token !== config.ADMIN_JWT_SECRET) {
+  if (token.trim() !== config.ADMIN_JWT_SECRET.trim()) {
     res.status(403).json({ error: 'FORBIDDEN', message: 'Invalid admin token' });
     return;
   }
