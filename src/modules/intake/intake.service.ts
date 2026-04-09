@@ -46,12 +46,28 @@ export async function processIntake(
   );
   log.info({ city: intake.address.city, areaStatus: areaResult.status }, 'Service area classified');
 
+  // Honour the Jotform areaTag for standard service types.
+  // classifyServiceArea falls back to 'quote_only' for cities not yet in the DB;
+  // the areaTag (set by Jotform form logic) is the authoritative geographic signal.
+  const STANDARD_TYPES = new Set(['small', 'medium', 'large', 'treadmill', 'fitness_equipment']);
+  const areaTagLower = (intake.meta?.areaTag ?? '').toLowerCase();
+  const effectiveAreaStatus =
+    areaTagLower.startsWith('inside') && STANDARD_TYPES.has(intake.service.typeCode)
+      ? 'in_area' as const
+      : areaResult.status;
+  if (effectiveAreaStatus !== areaResult.status) {
+    log.info(
+      { areaTag: intake.meta?.areaTag, dbStatus: areaResult.status, effectiveAreaStatus },
+      'areaTag override applied — treating as in_area',
+    );
+  }
+
   // 2. Pricing (outside transaction — read-only)
   let pricing = null;
   let serviceTypeId: string | null = null;
   let paymentMode = 'full';
 
-  if (areaResult.status === 'in_area' && intake.service.typeCode !== 'custom') {
+  if (effectiveAreaStatus === 'in_area' && intake.service.typeCode !== 'custom') {
     try {
       const rushTier = normalizeRushTier(intake.service.rushType ?? intake.service.rushRequested);
       pricing = await calculatePricing(intake.service.typeCode, rushTier);
@@ -72,9 +88,9 @@ export async function processIntake(
 
   // 3. Determine job status
   let initialStatus: string;
-  if (areaResult.status === 'blocked') {
+  if (effectiveAreaStatus === 'blocked') {
     initialStatus = 'cancelled';
-  } else if (areaResult.status === 'quote_only' || paymentMode === 'quote_only') {
+  } else if (effectiveAreaStatus === 'quote_only' || paymentMode === 'quote_only') {
     initialStatus = 'quoted_outside_area';
   } else if (paymentMode === 'custom_review') {
     initialStatus = 'intake_validated';
@@ -121,7 +137,7 @@ export async function processIntake(
         intakeSubmissionId,
         serviceTypeId: serviceTypeId ?? undefined,
         sourceChannel: 'jotform',
-        serviceAreaStatus: areaResult.status,
+        serviceAreaStatus: effectiveAreaStatus,
         cityDetected: intake.address.city,
         rushRequested: intake.service.rushRequested,
         rushType: rushTierLabel(normalizeRushTier(intake.service.rushType ?? intake.service.rushRequested)),
@@ -155,7 +171,7 @@ export async function processIntake(
       actorType: 'system',
       payload: {
         jobKey,
-        serviceAreaStatus: areaResult.status,
+        serviceAreaStatus: effectiveAreaStatus,
         serviceTypeCode: intake.service.typeCode,
         rushRequested: intake.service.rushRequested,
         rushType: rushTierLabel(normalizeRushTier(intake.service.rushType ?? intake.service.rushRequested)),
@@ -170,7 +186,7 @@ export async function processIntake(
       jobId: job.id,
       jobKey: job.job_key,
       status: job.status,
-      serviceAreaStatus: areaResult.status,
+      serviceAreaStatus: effectiveAreaStatus,
       totalAmountCents: job.total_amount_cents,
       checkoutRequired: initialStatus === 'awaiting_payment',
     };
