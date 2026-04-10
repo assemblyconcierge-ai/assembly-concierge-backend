@@ -201,12 +201,14 @@ export async function processIntake(
 
   // 6. Auto-trigger checkout session creation if payment is required (fire-and-forget)
   // This ensures payment ownership remains with backend + Stripe, not Jotform or Make.
+  const rawPaymentType = (intake.financials?.paymentType ?? '').toLowerCase();
+  const checkoutType: 'full' | 'deposit' = rawPaymentType.includes('full') ? 'full' : 'deposit';
   if (result.checkoutRequired) {
     setImmediate(async () => {
       try {
         const { checkoutUrl, sessionId } = await createJobCheckoutSession(
           result.jobId,
-          'deposit',
+          checkoutType,
           correlationId,
         );
         log.info(
