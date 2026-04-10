@@ -263,6 +263,38 @@ jobsRouter.post(
   },
 );
 
+// POST /jobs/:jobId/approve-dispatch — advance job to ready_for_dispatch (operator approval gate)
+jobsRouter.post(
+  '/:jobId/approve-dispatch',
+  requireAdmin,
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const job = await getJobById(req.params.jobId);
+      if (!job) {
+        res.status(404).json({ error: 'NOT_FOUND', message: 'Job not found' });
+        return;
+      }
+      assertTransition(job.status, 'ready_for_dispatch');
+      await updateJobStatus(job.id, 'ready_for_dispatch');
+      await recordAuditEvent({
+        aggregateType: 'job',
+        aggregateId: job.id,
+        eventType: 'job.dispatch_approved',
+        actorType: 'admin',
+        correlationId: req.correlationId,
+      });
+      await enqueueAirtableSync({ jobId: job.id, correlationId: req.correlationId });
+      res.json({ message: 'Job approved for dispatch', jobId: job.id, status: 'ready_for_dispatch' });
+    } catch (err: any) {
+      if (err?.message?.startsWith('Invalid job state transition')) {
+        res.status(409).json({ error: 'CONFLICT', message: err.message });
+        return;
+      }
+      next(err);
+    }
+  },
+);
+
 // POST /jobs/:jobId/dispatch — send dispatch SMS to a contractor
 jobsRouter.post(
   '/:jobId/dispatch',
