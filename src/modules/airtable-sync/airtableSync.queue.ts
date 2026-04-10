@@ -306,6 +306,7 @@ async function processSyncJob(jobId: string, correlationId: string): Promise<voi
 
     const record = {
       // Core identity
+      jobId: row.id,
       jobKey: row.job_key,
       customerName: row.customer_full_name,
       customerEmail: row.customer_email,

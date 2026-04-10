@@ -133,11 +133,13 @@ export async function calculatePricing(
 
   const subtotalCents = basePriceCents + rushAmountCents;
 
-  // Deposit: use explicit rule value, or fall back to DEFAULT_DEPOSIT_PERCENTAGE of subtotal
-  const depositCents =
+  // Deposit: base deposit + rush fee (rush must be collected upfront with the deposit).
+  // Falls back to DEFAULT_DEPOSIT_PERCENTAGE of subtotal when no explicit deposit is configured.
+  const baseDepositCents =
     rule.default_deposit_cents !== null && rule.default_deposit_cents > 0
       ? rule.default_deposit_cents
       : Math.round(subtotalCents * DEFAULT_DEPOSIT_PERCENTAGE);
+  const depositCents = baseDepositCents + rushAmountCents;
 
   const remainderCents = Math.max(0, subtotalCents - depositCents);
   const totalCents = subtotalCents;

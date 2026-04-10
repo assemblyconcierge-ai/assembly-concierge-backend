@@ -175,6 +175,7 @@ function mapDispatchStatus(status?: string): string {
 
 export interface AirtableJobRecord {
   // Core identity
+  jobId: string;
   jobKey: string;
   customerName: string;
   customerEmail: string;
@@ -225,6 +226,7 @@ export async function syncJobToAirtable(record: AirtableJobRecord): Promise<stri
 
   // All Single Select fields go through the mapping layer — never raw internal values
   const fields: Record<string, unknown> = {
+    'Backend Job ID': record.jobId,
     'Job Key':        record.jobKey,
     'Customer Name':  record.customerName,
     'Customer Email': record.customerEmail,
