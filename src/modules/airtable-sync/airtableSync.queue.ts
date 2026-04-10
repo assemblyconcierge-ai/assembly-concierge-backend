@@ -304,6 +304,10 @@ async function processSyncJob(jobId: string, correlationId: string): Promise<voi
       (rawPayload['paymentType'] as string) ||
       undefined;
 
+    const isPayInFull = (rawPaymentType ?? '').toLowerCase().includes('full');
+    const effectiveDepositCents   = isPayInFull ? row.total_amount_cents : row.deposit_amount_cents;
+    const effectiveRemainderCents = isPayInFull ? 0 : row.remainder_amount_cents;
+
     const record = {
       // Core identity
       jobId: row.id,
@@ -317,8 +321,8 @@ async function processSyncJob(jobId: string, correlationId: string): Promise<voi
       areaStatus: row.service_area_status,
       rushRequested: row.rush_requested,
       totalAmountCents: row.total_amount_cents,
-      depositAmountCents: row.deposit_amount_cents,
-      remainingBalanceCents: row.remainder_amount_cents,
+      depositAmountCents: effectiveDepositCents,
+      remainingBalanceCents: effectiveRemainderCents,
       status: row.status,
       appointmentDate: row.appointment_date?.toISOString().split('T')[0],
       appointmentWindow: row.appointment_window ?? undefined,
