@@ -87,6 +87,31 @@ export async function dispatchJobToContractor(
     throw Object.assign(new Error('Contractor is not active'), { statusCode: 409 });
   }
 
+  // ── Guard: contractor must not already have another active job ─────────────
+  // Excludes the current jobId so a redispatch/retry on the same row never
+  // self-conflicts. Active statuses mirror the SMS webhook lookup.
+  const conflictingJob = await queryOne<{ job_key: string; job_status: string }>(
+    `SELECT j.job_key, j.status AS job_status
+       FROM contractor_assignments ca
+       JOIN jobs j ON j.id = ca.job_id
+      WHERE ca.contractor_id = $1
+        AND ca.status IN ('pending', 'accepted')
+        AND j.status IN ('dispatch_in_progress', 'assigned', 'scheduled', 'completion_reported')
+        AND j.id <> $2
+      ORDER BY ca.assigned_at DESC
+      LIMIT 1`,
+    [contractor.id, jobId],
+  );
+  if (conflictingJob) {
+    throw Object.assign(
+      new Error(
+        `Contractor already has an active job (${conflictingJob.job_key}, status: ${conflictingJob.job_status}). ` +
+        'Resolve that job before dispatching a new one.',
+      ),
+      { statusCode: 409 },
+    );
+  }
+
   // ── Fetch service type display name ───────────────────────────────────────
   const serviceType = await queryOne<ServiceTypeRow>(
     'SELECT display_name, code FROM service_types WHERE id = $1',
