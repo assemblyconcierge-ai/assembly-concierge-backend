@@ -388,6 +388,11 @@ export async function updateAirtableStatus(
   }
   // Backend Sync Error: write empty string on success to clear any previous error
   fields['Backend Sync Error'] = syncError ?? '';
+
+  if (internalStatus === 'assigned') {
+    fields['Dispatch Status'] = 'Accepted';
+  }
+
   await updateAirtableRecord(recordId, fields);
 }
 
