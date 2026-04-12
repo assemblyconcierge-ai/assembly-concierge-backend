@@ -14,7 +14,7 @@ import { normalizePhone } from '../../common/utils';
 
 // ── Command types ─────────────────────────────────────────────────────────────
 
-export type SmsCommand = 'CONFIRM' | 'DECLINE' | 'OTW' | 'DONE';
+export type SmsCommand = 'CONFIRM' | 'DECLINE' | 'OTW' | 'DONE' | 'FINISH';
 
 // ── Keyword lists ─────────────────────────────────────────────────────────────
 
@@ -34,6 +34,10 @@ const DONE_KEYWORDS = [
   'done', 'finished', 'complete', 'completed',
   'all done', 'job done', 'finished up',
 ];
+const FINISH_KEYWORDS = [
+  'finish', 'job finished', 'work finished', 'job complete', 'work complete',
+  'job completed', 'work completed', 'all finished',
+];
 
 // ── Parser ────────────────────────────────────────────────────────────────────
 
@@ -47,6 +51,9 @@ export function parseCommand(body: string): SmsCommand | null {
   if (CONFIRM_KEYWORDS.some((kw) => normalized.includes(kw))) return 'CONFIRM';
   if (DECLINE_KEYWORDS.some((kw) => normalized.includes(kw))) return 'DECLINE';
   if (OTW_KEYWORDS.some((kw) => normalized.includes(kw))) return 'OTW';
+  // FINISH is checked before DONE to avoid 'finished' matching DONE_KEYWORDS first.
+  // Both commands resolve to completion_reported; DONE is kept for backward compat.
+  if (FINISH_KEYWORDS.some((kw) => normalized.includes(kw))) return 'FINISH';
   if (DONE_KEYWORDS.some((kw) => normalized.includes(kw))) return 'DONE';
   return null;
 }
@@ -78,7 +85,10 @@ const COMMAND_TARGET_STATUS: Record<SmsCommand, JobStatus> = {
   CONFIRM: 'assigned',
   DECLINE: 'ready_for_dispatch',
   OTW:     'scheduled',
-  DONE:    'work_completed',
+  // DONE and FINISH both map to completion_reported — single contractor-reported completion state.
+  // DONE is kept for backward compatibility; FINISH is the preferred keyword.
+  DONE:    'completion_reported',
+  FINISH:  'completion_reported',
 };
 
 // ── Main entry point ──────────────────────────────────────────────────────────
@@ -200,7 +210,8 @@ export async function processSmsWebhook(
           [activeJob.dispatch_id],
         );
       }
-    } else if (command === 'DONE') {
+    } else if (command === 'DONE' || command === 'FINISH') {
+      // Both DONE and FINISH mark the assignment completed
       await client.query(
         `UPDATE contractor_assignments
             SET status = 'completed', completed_at = NOW()

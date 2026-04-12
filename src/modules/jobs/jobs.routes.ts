@@ -322,3 +322,126 @@ jobsRouter.post(
     }
   },
 );
+
+// POST /jobs/:jobId/approve-completion — operator gate after contractor reports FINISH
+//
+// Branch logic:
+//   remainder_amount_cents > 0  → job → awaiting_remainder_payment + auto-create remainder checkout
+//   remainder_amount_cents == 0 → job → closed_paid (paid in full at deposit)
+//
+// Valid source state: completion_reported only
+// (contractor must send DONE or FINISH before operator can approve)
+jobsRouter.post(
+  '/:jobId/approve-completion',
+  requireAdmin,
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const job = await getJobById(req.params.jobId);
+      if (!job) {
+        res.status(404).json({ error: 'NOT_FOUND', message: 'Job not found' });
+        return;
+      }
+
+      // Only accept from completion_reported — contractor must have sent DONE or FINISH first
+      if (job.status !== 'completion_reported') {
+        res.status(409).json({
+          error: 'CONFLICT',
+          message: `approve-completion requires status completion_reported, got: ${job.status}`,
+        });
+        return;
+      }
+
+      const remainderCents: number = job.remainder_amount_cents ?? 0;
+
+      if (remainderCents > 0) {
+        // ── Path A: remainder owed ────────────────────────────────────────────
+        assertTransition(job.status, 'awaiting_remainder_payment');
+        await updateJobStatus(job.id, 'awaiting_remainder_payment');
+        await recordAuditEvent({
+          aggregateType: 'job',
+          aggregateId: job.id,
+          eventType: 'job.completion_approved',
+          actorType: 'admin',
+          payload: { remainderCents, path: 'awaiting_remainder_payment' },
+          correlationId: req.correlationId,
+        });
+        await enqueueAirtableSync({ jobId: job.id, correlationId: req.correlationId });
+
+        // Auto-create remainder checkout (fire-and-forget with logging)
+        const correlationId = req.correlationId;
+        setImmediate(async () => {
+          try {
+            const { checkoutUrl, sessionId } = await createJobCheckoutSession(
+              job.id,
+              'remainder',
+              correlationId,
+            );
+            logger.info(
+              { jobId: job.id, sessionId, checkoutUrl },
+              '[approve-completion] Remainder checkout session auto-created',
+            );
+          } catch (err) {
+            logger.error(
+              { err, jobId: job.id, correlationId },
+              '[approve-completion] Remainder checkout creation failed — admin can retry via POST /jobs/:jobId/create-remainder-payment',
+            );
+            // Durable audit record so the failure is visible without log access
+            try {
+              await recordAuditEvent({
+                aggregateType: 'job',
+                aggregateId: job.id,
+                eventType: 'payment.checkout_failed',
+                actorType: 'admin',
+                payload: {
+                  paymentType: 'remainder',
+                  error: err instanceof Error ? err.message : 'unknown',
+                  source: 'approve-completion',
+                  correlationId,
+                },
+                correlationId,
+              });
+            } catch (auditErr) {
+              logger.error(
+                { auditErr, jobId: job.id },
+                '[approve-completion] Failed to write payment.checkout_failed audit event',
+              );
+            }
+          }
+        });
+
+        res.json({
+          message: 'Completion approved — remainder checkout created',
+          jobId: job.id,
+          status: 'awaiting_remainder_payment',
+          remainderCents,
+        });
+      } else {
+        // ── Path B: no remainder owed (paid in full at deposit) ───────────────
+        assertTransition(job.status, 'closed_paid');
+        await updateJobStatus(job.id, 'closed_paid');
+        await recordAuditEvent({
+          aggregateType: 'job',
+          aggregateId: job.id,
+          eventType: 'job.completion_approved',
+          actorType: 'admin',
+          payload: { remainderCents: 0, path: 'closed_paid' },
+          correlationId: req.correlationId,
+        });
+        await enqueueAirtableSync({ jobId: job.id, correlationId: req.correlationId });
+
+        res.json({
+          message: 'Completion approved — job closed (paid in full)',
+          jobId: job.id,
+          status: 'closed_paid',
+          remainderCents: 0,
+        });
+      }
+    } catch (err: any) {
+      if (err?.message?.startsWith('Invalid job state transition')) {
+        res.status(409).json({ error: 'CONFLICT', message: err.message });
+        return;
+      }
+      next(err);
+    }
+  },
+);
