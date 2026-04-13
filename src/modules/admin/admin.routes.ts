@@ -104,6 +104,69 @@ adminRouter.post('/contractors', requireAdmin, async (req: Request, res: Respons
   }
 });
 
+adminRouter.patch('/contractors/:id', requireAdmin, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const schema = z.object({
+      fullName:   z.string().min(1).optional(),
+      phoneE164:  z.string().min(10).optional(),
+      email:      z.string().email().optional(),
+      city:       z.string().optional(),
+      notes:      z.string().optional(),
+      isActive:   z.boolean().optional(),
+    });
+    const body = schema.parse(req.body);
+
+    // 404 if contractor does not exist
+    const existing = await query(
+      'SELECT id FROM contractors WHERE id = $1',
+      [req.params.id],
+    );
+    if (!existing[0]) {
+      res.status(404).json({ error: 'NOT_FOUND', message: 'Contractor not found' });
+      return;
+    }
+
+    // 409 if new phone conflicts with a different contractor
+    if (body.phoneE164) {
+      const conflict = await query(
+        'SELECT id FROM contractors WHERE phone_e164 = $1 AND id != $2',
+        [body.phoneE164, req.params.id],
+      );
+      if (conflict[0]) {
+        res.status(409).json({ error: 'CONFLICT', message: 'Phone number already in use by another contractor' });
+        return;
+      }
+    }
+
+    // Build SET clause from only the fields present in the request body
+    const setClauses: string[] = [];
+    const values: unknown[] = [];
+    let idx = 1;
+    if (body.fullName  !== undefined) { setClauses.push(`full_name  = $${idx++}`); values.push(body.fullName); }
+    if (body.phoneE164 !== undefined) { setClauses.push(`phone_e164 = $${idx++}`); values.push(body.phoneE164); }
+    if (body.email     !== undefined) { setClauses.push(`email      = $${idx++}`); values.push(body.email); }
+    if (body.city      !== undefined) { setClauses.push(`city       = $${idx++}`); values.push(body.city); }
+    if (body.notes     !== undefined) { setClauses.push(`notes      = $${idx++}`); values.push(body.notes); }
+    if (body.isActive  !== undefined) { setClauses.push(`is_active  = $${idx++}`); values.push(body.isActive); }
+
+    if (setClauses.length === 0) {
+      res.status(400).json({ error: 'NO_FIELDS', message: 'No fields provided to update' });
+      return;
+    }
+
+    setClauses.push(`updated_at = NOW()`);
+    values.push(req.params.id);
+
+    const rows = await query(
+      `UPDATE contractors SET ${setClauses.join(', ')} WHERE id = $${idx} RETURNING id, full_name, phone_e164, email, city, notes, is_active`,
+      values,
+    );
+    res.json({ contractor: rows[0] });
+  } catch (err) {
+    next(err);
+  }
+});
+
 // ─────────────────────────────────────────────
 // PAYMENTS
 // ─────────────────────────────────────────────
