@@ -507,4 +507,13 @@ BEGIN
 END $$;
 `,
   },
+  {
+    filename: '008_add_schedule_fields.sql',
+    sql: `
+ALTER TABLE jobs
+  ADD COLUMN IF NOT EXISTS scheduled_start_at TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS scheduled_end_at   TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS timezone           TEXT NOT NULL DEFAULT 'America/New_York';
+`,
+  },
 ];
