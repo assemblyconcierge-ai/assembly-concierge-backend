@@ -10,6 +10,7 @@ import { enqueueAirtableSync } from '../airtable-sync/airtableSync.queue';
 import { createJobCheckoutSession } from '../payments/payment.service';
 import { logger } from '../../common/logger';
 import { query } from '../../db/pool';
+import { parseSchedule } from '../../common/utils/scheduleUtils';
 
 export interface IntakeProcessResult {
   jobId: string;
@@ -127,6 +128,22 @@ export async function processIntake(
       client,
     );
 
+    // Compute schedule fields from appointment data (non-blocking — null on failure)
+    const TIMEZONE = 'America/New_York';
+    let scheduledStartAt: Date | null = null;
+    let scheduledEndAt: Date | null = null;
+    if (intake.appointment.date && intake.appointment.window) {
+      try {
+        const parsed = parseSchedule(intake.appointment.date, intake.appointment.window, TIMEZONE);
+        scheduledStartAt = parsed.scheduledStartAt;
+        scheduledEndAt = parsed.scheduledEndAt;
+      } catch (schedErr) {
+        log.warn(
+          { err: schedErr, appointmentDate: intake.appointment.date, appointmentWindow: intake.appointment.window },
+          '[Intake] Failed to parse schedule — scheduled_start_at/end_at will be null',
+        );
+      }
+    }
     // Create job
     const jobKey = generateJobKey();
     const job = await createJob(
@@ -157,6 +174,9 @@ export async function processIntake(
         status: initialStatus as any,
         appointmentDate: intake.appointment.date,
         appointmentWindow: intake.appointment.window,
+        scheduledStartAt,
+        scheduledEndAt,
+        timezone: TIMEZONE,
         customJobDetails: intake.service.customJobDetails,
         publicPayToken,
       },

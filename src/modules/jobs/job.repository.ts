@@ -31,6 +31,9 @@ export interface JobRow {
   status: JobStatus;
   appointment_date: Date | null;
   appointment_window: string | null;
+  scheduled_start_at: Date | null;
+  scheduled_end_at: Date | null;
+  timezone: string | null;
   special_instructions: string | null;
   custom_job_details: string | null;
   public_pay_token: string | null;
@@ -67,6 +70,9 @@ export async function createJob(
     status: JobStatus;
     appointmentDate?: string;
     appointmentWindow?: string;
+    scheduledStartAt?: Date | null;
+    scheduledEndAt?: Date | null;
+    timezone?: string;
     specialInstructions?: string;
     customJobDetails?: string;
     publicPayToken?: string;
@@ -83,12 +89,13 @@ export async function createJob(
       contractor_total_payout_cents, rush_platform_share_cents,
       stripe_fee_cents, job_margin_cents,
       status, appointment_date, appointment_window,
+      scheduled_start_at, scheduled_end_at, timezone,
       special_instructions, custom_job_details, public_pay_token
     ) VALUES (
       $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
       $13, $14, $15, $16, $17, $18,
       $19, $20, $21, $22, $23, $24, $25,
-      $26, $27, $28, $29, $30
+      $26, $27, $28, $29, $30, $31, $32, $33
     ) RETURNING *`,
     [
       uuidv4(),
@@ -118,6 +125,9 @@ export async function createJob(
       params.status,
       params.appointmentDate ?? null,
       params.appointmentWindow ?? null,
+      params.scheduledStartAt ?? null,
+      params.scheduledEndAt ?? null,
+      params.timezone ?? 'America/New_York',
       params.specialInstructions ?? null,
       params.customJobDetails ?? null,
       params.publicPayToken ?? null,
