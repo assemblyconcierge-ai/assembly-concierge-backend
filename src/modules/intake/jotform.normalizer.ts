@@ -119,6 +119,54 @@ function extractMedia(payload: RawPayload): string[] {
 }
 
 /**
+ * Normalise a raw Jotform date value to ISO YYYY-MM-DD.
+ *
+ * Jotform date fields (e.g. q9_preferredDate) arrive as a nested object:
+ *   { "day": "02", "month": "05", "year": "2026" }
+ * The get() helper's strategy-1 joins the object values with spaces, producing a
+ * string like "02 2026 05" (key-iteration order is not guaranteed).  This helper
+ * handles all observed variants:
+ *   - Jotform object { year, month, day }  → "2026-05-02"
+ *   - Already ISO "2026-05-02"             → returned unchanged
+ *   - Joined YYYY MM DD "2026 05 02"       → "2026-05-02"
+ *   - Joined MM DD YYYY "05 02 2026"       → "2026-05-02"
+ *   - Anything else                        → returned as-is (downstream logging catches it)
+ */
+function normalizeAppointmentDate(raw: unknown): string | undefined {
+  if (!raw) return undefined;
+  // Jotform nested object passed directly (before get() joins it)
+  if (typeof raw === 'object' && !Array.isArray(raw)) {
+    const obj = raw as Record<string, string>;
+    if (obj['year'] && obj['month'] && obj['day']) {
+      return `${obj['year']}-${String(obj['month']).padStart(2, '0')}-${String(obj['day']).padStart(2, '0')}`;
+    }
+    return undefined;
+  }
+  const str = String(raw).trim();
+  if (!str) return undefined;
+  // Already ISO YYYY-MM-DD
+  if (/^\d{4}-\d{2}-\d{2}$/.test(str)) return str;
+  // Joined string — split on whitespace and try both orderings
+  const parts = str.split(/\s+/);
+  if (parts.length === 3) {
+    const [a, b, c] = parts;
+    // YYYY MM DD (year is 4 digits in first position)
+    if (a.length === 4 && /^\d+$/.test(a)) {
+      return `${a}-${b.padStart(2, '0')}-${c.padStart(2, '0')}`;
+    }
+    // MM DD YYYY (year is 4 digits in last position)
+    if (c.length === 4 && /^\d+$/.test(c)) {
+      return `${c}-${a.padStart(2, '0')}-${b.padStart(2, '0')}`;
+    }
+    // DD MM YYYY or ambiguous — last 4-digit wins as year, treat first as month
+    // (Jotform always sends month before day in the object, so joined order is month-day-year
+    //  or year-month-day depending on V8 key iteration)
+  }
+  // Unknown format — pass through unchanged
+  return str;
+}
+
+/**
  * Normalize a raw Jotform webhook payload into the canonical CanonicalIntake model.
  *
  * Live field mapping (real Jotform form, direct webhook, 2026-03-13):
@@ -197,7 +245,11 @@ export function normalizeJotformPayload(
   const rushRequested = normalizeRushFlag(rushType);
 
   // ── Appointment ──────────────────────────────────────────────────────────
-  const appointmentDate   = mapping.appointmentDate   ? get(rawPayload, mapping.appointmentDate)   || undefined : undefined;
+  // q9_preferredDate arrives as a nested object { day, month, year }; normalise to ISO.
+  const rawAppointmentDate = mapping.appointmentDate
+    ? (rawPayload[mapping.appointmentDate] ?? (get(rawPayload, mapping.appointmentDate) || undefined))
+    : undefined;
+  const appointmentDate    = normalizeAppointmentDate(rawAppointmentDate);
   const appointmentWindow = mapping.appointmentWindow ? get(rawPayload, mapping.appointmentWindow) || undefined : undefined;
 
   // ── Notes / custom details ───────────────────────────────────────────────

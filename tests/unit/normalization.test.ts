@@ -72,6 +72,48 @@ describe('Jotform normalization', () => {
   });
 });
 
+describe('Appointment date normalization', () => {
+  // Uses the live DEFAULT_JOTFORM_FIELD_MAPPING which maps appointmentDate → 'q9_preferredDate'
+
+  it('normalises Jotform date object { day, month, year } to ISO YYYY-MM-DD', () => {
+    const result = normalizeJotformPayload({
+      q9_preferredDate: { day: '02', month: '05', year: '2026' },
+      q11_preferredTime: 'Afternoon(12pm-4pm)',
+    });
+    expect(result.appointment.date).toBe('2026-05-02');
+    expect(result.appointment.window).toBe('Afternoon(12pm-4pm)');
+  });
+
+  it('passes through an already-ISO date unchanged', () => {
+    const result = normalizeJotformPayload({
+      q9_preferredDate: '2026-05-02',
+      q11_preferredTime: 'Morning(8am-12pm)',
+    });
+    expect(result.appointment.date).toBe('2026-05-02');
+  });
+
+  it('normalises joined YYYY MM DD string to ISO', () => {
+    const result = normalizeJotformPayload({
+      q9_preferredDate: '2026 05 02',
+      q11_preferredTime: 'Evening(4pm-8pm)',
+    });
+    expect(result.appointment.date).toBe('2026-05-02');
+  });
+
+  it('normalises joined MM DD YYYY string to ISO', () => {
+    const result = normalizeJotformPayload({
+      q9_preferredDate: '05 02 2026',
+      q11_preferredTime: 'Morning(8am-12pm)',
+    });
+    expect(result.appointment.date).toBe('2026-05-02');
+  });
+
+  it('returns undefined when appointmentDate is absent', () => {
+    const result = normalizeJotformPayload({});
+    expect(result.appointment.date).toBeUndefined();
+  });
+});
+
 describe('Service type normalization', () => {
   it.each([
     ['Small Assembly', 'small'],
