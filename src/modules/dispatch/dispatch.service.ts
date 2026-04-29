@@ -6,7 +6,7 @@
  */
 
 import { v4 as uuidv4 } from 'uuid';
-import { queryOne, withTransaction } from '../../db/pool';
+import { queryOne, withTransaction, query } from '../../db/pool';
 import { getJobById } from '../jobs/job.repository';
 import { assertTransition } from '../jobs/job.stateMachine';
 import { recordAuditEvent } from '../audit/audit.service';
@@ -324,4 +324,173 @@ export async function dispatchJobToContractor(
   log.info({ dispatchId, smsSent }, '[Dispatch] Dispatch complete');
 
   return { dispatchId, assignmentId, contractorId: contractor.id, jobId: job.id, smsSent };
+}
+
+// ── Cancel Assignment ─────────────────────────────────────────────────────────
+
+export interface CancelAssignmentResult {
+  success: true;
+  jobId: string;
+  cancelledAssignmentId: string;
+  previousContractorId: string;
+  jobStatus: 'ready_for_dispatch';
+}
+
+interface AssignmentRow {
+  id: string;
+  contractor_id: string;
+  dispatch_id: string | null;
+  status: string;
+}
+
+/** Job statuses from which an assignment can be cancelled */
+const CANCELLABLE_JOB_STATUSES = new Set(['dispatch_in_progress', 'assigned']);
+
+/**
+ * Cancel an active contractor assignment and return the job to ready_for_dispatch.
+ *
+ * All reads and writes happen inside a single transaction with row-level locking
+ * to prevent stale-read races. The assignment UPDATE is guarded by job_id and
+ * active status so a concurrent cancellation cannot double-fire.
+ *
+ * - Does not send SMS.
+ * - Does not touch payment, customer, schedule, or intake fields.
+ * - Does not enqueue Airtable sync (caller may do so if desired).
+ */
+export async function cancelContractorAssignment(
+  jobId: string,
+  correlationId: string,
+  assignmentId?: string,
+): Promise<CancelAssignmentResult> {
+  const log = logger.child({ correlationId, jobId, assignmentId, service: 'cancel-assignment' });
+
+  // ── All reads + writes inside one transaction ─────────────────────────────
+  let result!: CancelAssignmentResult;
+
+  await withTransaction(async (client) => {
+    // Step 0: Lock the job row for the duration of this transaction
+    const jobRes = await client.query<{ id: string; status: string }>(
+      `SELECT id, status FROM jobs WHERE id = $1 FOR UPDATE`,
+      [jobId],
+    );
+    if (jobRes.rowCount === 0) {
+      throw Object.assign(new Error('Job not found'), { statusCode: 404 });
+    }
+    const jobStatus = jobRes.rows[0].status;
+    if (!CANCELLABLE_JOB_STATUSES.has(jobStatus)) {
+      throw Object.assign(
+        new Error(
+          `Cannot cancel assignment: job is in state '${jobStatus}'. ` +
+          `Only dispatch_in_progress and assigned jobs can have assignments cancelled.`,
+        ),
+        { statusCode: 409, errorCode: 'INVALID_JOB_STATE' },
+      );
+    }
+
+    // Step 1: Read active assignments inside the transaction (consistent with the locked job row)
+    const assignRes = await client.query<AssignmentRow>(
+      `SELECT id, contractor_id, dispatch_id, status
+         FROM contractor_assignments
+        WHERE job_id = $1
+          AND status IN ('pending', 'accepted')
+        ORDER BY assigned_at DESC`,
+      [jobId],
+    );
+    const activeRows = assignRes.rows;
+
+    let targetAssignment: AssignmentRow;
+    if (assignmentId) {
+      const found = activeRows.find((r) => r.id === assignmentId);
+      if (!found) {
+        throw Object.assign(
+          new Error(`No active assignment found with id ${assignmentId} for this job.`),
+          { statusCode: 404 },
+        );
+      }
+      targetAssignment = found;
+    } else {
+      if (activeRows.length === 0) {
+        throw Object.assign(
+          new Error('No active assignment exists for this job.'),
+          { statusCode: 409, errorCode: 'NO_ACTIVE_ASSIGNMENT' },
+        );
+      }
+      if (activeRows.length > 1) {
+        throw Object.assign(
+          new Error(
+            `Multiple active assignments exist for this job (${activeRows.length}). ` +
+            'Provide assignmentId to specify which one to cancel.',
+          ),
+          { statusCode: 409, errorCode: 'MULTIPLE_ACTIVE_ASSIGNMENTS' },
+        );
+      }
+      targetAssignment = activeRows[0];
+    }
+
+    // Step 2: Cancel the assignment — guarded by id + job_id + active status
+    const cancelRes = await client.query(
+      `UPDATE contractor_assignments
+          SET status = 'cancelled', updated_at = NOW()
+        WHERE id = $1
+          AND job_id = $2
+          AND status IN ('pending', 'accepted')
+        RETURNING id`,
+      [targetAssignment.id, jobId],
+    );
+    if (cancelRes.rowCount !== 1) {
+      // Another concurrent request already cancelled this assignment
+      throw Object.assign(
+        new Error('Assignment was already cancelled or is no longer active.'),
+        { statusCode: 409, errorCode: 'ASSIGNMENT_ALREADY_CANCELLED' },
+      );
+    }
+
+    // Step 3: Expire the related dispatch row (if one exists)
+    if (targetAssignment.dispatch_id) {
+      await client.query(
+        `UPDATE dispatches
+            SET status = 'expired', updated_at = NOW()
+          WHERE id = $1`,
+        [targetAssignment.dispatch_id],
+      );
+    }
+
+    // Step 4: Return job to ready_for_dispatch (state machine validates the transition)
+    assertTransition(jobStatus as any, 'ready_for_dispatch');
+    await client.query(
+      `UPDATE jobs SET status = 'ready_for_dispatch', updated_at = NOW() WHERE id = $1`,
+      [jobId],
+    );
+
+    // Step 5: Audit event
+    await recordAuditEvent({
+      aggregateType: 'job',
+      aggregateId: jobId,
+      eventType: 'dispatch.assignment_cancelled',
+      actorType: 'admin',
+      payload: {
+        cancelledAssignmentId: targetAssignment.id,
+        previousContractorId: targetAssignment.contractor_id,
+        dispatchId: targetAssignment.dispatch_id,
+        previousJobStatus: jobStatus,
+      },
+      correlationId,
+      client,
+    });
+
+    result = {
+      success: true,
+      jobId,
+      cancelledAssignmentId: targetAssignment.id,
+      previousContractorId: targetAssignment.contractor_id,
+      jobStatus: 'ready_for_dispatch',
+    };
+  });
+
+  log.info(
+    { cancelledAssignmentId: result.cancelledAssignmentId, previousContractorId: result.previousContractorId },
+    '[CancelAssignment] Assignment cancelled — job returned to ready_for_dispatch',
+  );
+
+  return result;
 }

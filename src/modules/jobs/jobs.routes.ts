@@ -16,7 +16,7 @@ import { recordAuditEvent } from '../audit/audit.service';
 import { enqueueAirtableSync } from '../airtable-sync/airtableSync.queue';
 import { requireAdmin } from '../../common/middleware/auth';
 import { logger } from '../../common/logger';
-import { dispatchJobToContractor } from '../dispatch/dispatch.service';
+import { dispatchJobToContractor, cancelContractorAssignment } from '../dispatch/dispatch.service';
 
 export const jobsRouter = Router();
 
@@ -315,7 +315,42 @@ jobsRouter.post(
         return;
       }
       if (err?.statusCode === 409) {
-        res.status(409).json({ error: 'CONFLICT', message: err.message });
+        res.status(409).json({
+          error: err.errorCode ?? 'CONFLICT',
+          message: err.message,
+          ...(err.conflictingJobKey ? { conflictingJobKey: err.conflictingJobKey } : {}),
+        });
+        return;
+      }
+      next(err);
+    }
+  },
+);
+
+// POST /jobs/:jobId/cancel-assignment — cancel active contractor assignment and return job to ready_for_dispatch
+jobsRouter.post(
+  '/:jobId/cancel-assignment',
+  requireAdmin,
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const schema = z.object({ assignmentId: z.string().uuid().optional() });
+      const { assignmentId } = schema.parse(req.body);
+      const result = await cancelContractorAssignment(
+        req.params.jobId,
+        req.correlationId,
+        assignmentId,
+      );
+      res.json(result);
+    } catch (err: any) {
+      if (err?.statusCode === 404) {
+        res.status(404).json({ error: 'NOT_FOUND', message: err.message });
+        return;
+      }
+      if (err?.statusCode === 409) {
+        res.status(409).json({
+          error: err.errorCode ?? 'CONFLICT',
+          message: err.message,
+        });
         return;
       }
       next(err);

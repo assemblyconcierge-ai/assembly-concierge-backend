@@ -26,7 +26,8 @@ const TRANSITIONS: Record<JobStatus, Set<JobStatus>> = {
   paid_in_full: new Set(['ready_for_dispatch', 'cancelled', 'error_review']),
   ready_for_dispatch: new Set(['dispatch_in_progress', 'cancelled', 'error_review']),
   dispatch_in_progress: new Set(['assigned', 'ready_for_dispatch', 'cancelled', 'error_review']),
-  assigned: new Set(['scheduled', 'completion_reported', 'work_completed', 'cancelled', 'error_review']),
+  // ready_for_dispatch added: operator-initiated assignment cancellation (contractor no-show, mistake, unavailability)
+  assigned: new Set(['scheduled', 'completion_reported', 'work_completed', 'ready_for_dispatch', 'cancelled', 'error_review']),
   scheduled: new Set(['work_completed', 'cancelled', 'error_review']),
   work_completed: new Set(['completion_reported', 'awaiting_remainder_payment', 'closed_paid', 'error_review']),
   // completion_reported: contractor said FINISH; awaits operator approval before billing

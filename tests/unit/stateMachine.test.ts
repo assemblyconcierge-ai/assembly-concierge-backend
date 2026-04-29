@@ -65,4 +65,13 @@ describe('Job state machine', () => {
     expect(allowed).toContain('cancelled');
     expect(allowed).not.toContain('closed_paid');
   });
+
+  it('allows assigned → ready_for_dispatch (operator-initiated assignment cancellation)', () => {
+    expect(canTransition('assigned', 'ready_for_dispatch')).toBe(true);
+    expect(() => assertTransition('assigned', 'ready_for_dispatch')).not.toThrow();
+  });
+
+  it('blocks scheduled → ready_for_dispatch (contractor already en route)', () => {
+    expect(canTransition('scheduled', 'ready_for_dispatch')).toBe(false);
+  });
 });
