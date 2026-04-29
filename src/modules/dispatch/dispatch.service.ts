@@ -428,9 +428,10 @@ export async function cancelContractorAssignment(
     }
 
     // Step 2: Cancel the assignment — guarded by id + job_id + active status
+    // Note: contractor_assignments has no updated_at column.
     const cancelRes = await client.query(
       `UPDATE contractor_assignments
-          SET status = 'cancelled', updated_at = NOW()
+          SET status = 'cancelled'
         WHERE id = $1
           AND job_id = $2
           AND status IN ('pending', 'accepted')
