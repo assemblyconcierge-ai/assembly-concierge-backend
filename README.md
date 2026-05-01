@@ -16,14 +16,19 @@
 6. [Phase 3 — Stability, Auto-Checkout, and Payments Table (April 2026)](#phase-3)
 7. [Phase 4 — Dispatch Pipeline (April 2026)](#phase-4)
 8. [Phase 5 — Completion and Remainder Billing (April 2026)](#phase-5)
-9. [Current Architecture](#current-architecture)
-10. [Job State Machine](#job-state-machine)
+9. [Phase 6 — Dispatch Hardening: Schedule-Aware Overlap Detection (April 2026)](#phase-6)
+10. [Phase 7 — Cancel Assignment / Re-dispatch Path (April–May 2026)](#phase-7)
+11. [Phase 8 — Airtable + Make: Cancel Assignment Automation (May 2026)](#phase-8)
+12. [Phase 9 — Re-dispatch Edge Case and Make Scenario Routing (May 2026)](#phase-9)
+13. [Current Architecture](#current-architecture)
+14. [Job State Machine](#job-state-machine)
 11. [SMS Command Protocol](#sms-command-protocol)
 12. [API Reference](#api-reference)
 13. [Airtable Operator Interface](#airtable-operator-interface)
 14. [Key Engineering Decisions](#key-engineering-decisions)
 15. [Deployment](#deployment)
 16. [Environment Variables](#environment-variables)
+17. [Commit History](#commit-history--key-milestones)
 
 ---
 
@@ -462,6 +467,95 @@ Rejects any source state other than `completion_reported`. Returns `409 CONFLICT
 
 ---
 
+<a name="phase-6"></a>
+## Phase 6 — Dispatch Hardening: Schedule-Aware Overlap Detection (April 2026)
+
+The original dispatch conflict guard blocked contractors from any job if they had any active job — regardless of schedule overlap. Replaced with actual window-based overlap detection.
+
+Fix (fc7beda): Conflict check now uses `existing.scheduled_start_at < target.scheduled_end_at AND existing.scheduled_end_at > target.scheduled_start_at`. Fallback for unscheduled rows uses appointment_date + appointment_window.
+
+Validated: Same contractor + overlapping window → 409 CONFLICT. Same contractor + non-overlapping window → 201 allowed.
+
+---
+
+<a name="phase-7"></a>
+## Phase 7 — Cancel Assignment / Re-dispatch Path (April–May 2026)
+
+No operator path existed to release a contractor without ending the job. Every bad dispatch left dirty state requiring manual SQL.
+
+Built POST /jobs/:jobId/cancel-assignment (cd96851 + ab380d7):
+- Cancels active assignment (pending or accepted)
+- Sets contractor_assignments.status = cancelled
+- Sets dispatches.status = expired (cancelled enum does not exist)
+- Sets jobs.status = ready_for_dispatch
+- No SMS, no Airtable update, no payment/customer/schedule changes
+- Returns { success, jobId, cancelledAssignmentId, previousContractorId, jobStatus }
+
+State machine: added assigned → ready_for_dispatch as valid transition.
+
+Transaction hardened: SELECT ... FOR UPDATE inside transaction. Assignment UPDATE guarded by id + job_id + status IN ('pending','accepted') with rowCount validation.
+
+Production bug found (ab380d7): contractor_assignments has no updated_at column — removed from UPDATE. dispatches and jobs both have updated_at and were unchanged.
+
+Tests: 29/29 passing. TypeScript clean.
+
+Live test AC-2026-6M0G PASSED: HTTP 200, job reset to ready_for_dispatch, assignment cancelled, dispatch expired, schedule/payment fields unchanged, no SMS.
+
+---
+
+<a name="phase-8"></a>
+## Phase 8 — Airtable + Make: Cancel Assignment Automation (May 2026)
+
+New Airtable field: Cancel Assignment (checkbox).
+
+New Airtable automation: Cancel Assignment - Trigger Make (OFF by default).
+- Trigger: Cancel Assignment checked AND Backend Job ID not empty AND Assignment ID not empty
+- Action: Run script → sends { "recordId": "<Airtable record ID>" } to Make webhook
+
+New Make scenario: Cancel Assignment - Airtable Record.
+- Module 1: Custom webhook (receives recordId)
+- Module 2: Airtable Get a Record (Backend Intake Sandbox V2)
+- Module 3: Filter guard
+- Module 4: HTTP POST /jobs/:jobId/cancel-assignment with { "assignmentId": "..." }
+- Module 5: Success — clears dispatch fields, sets Last Dispatch Result = cancelled, Backend Job Status = ready_for_dispatch
+- Module 6: Failure — unchecks Cancel Assignment, writes error, does not clear dispatch fields
+- Module 7: Gmail alert on failure
+
+Success uses Make erase for linked/lookup fields. Fields cleared: Cancel Assignment, Dispatch Approved, Dispatch Sent, Dispatch Status (→ Pending Dispatch), Assigned Contractor, Assignment ID, Dispatch ID, Last Dispatch Error.
+
+End-to-end tested AC-2026-49Z0 — full success path validated. Backend and Airtable mirror confirmed correct.
+
+---
+
+<a name="phase-9"></a>
+## Phase 9 — Re-dispatch Edge Case and Make Scenario Routing (May 2026)
+
+After cancel-assignment resets a job to ready_for_dispatch, re-checking Dispatch Approved caused Make to call approve-dispatch again. Backend correctly rejected: "Invalid job state transition: ready_for_dispatch → ready_for_dispatch".
+
+Fix: Two router paths in the Make dispatch scenario.
+
+Route 1 — First-time dispatch (needs approval):
+Filter: Backend Job Status = deposit_paid or paid_in_full (plus standard guards).
+Flow: Approve Dispatch → Dispatch HTTP → Success Update.
+
+Route 2 — Re-dispatch after cancellation (skip approval):
+Filter: Backend Job Status = ready_for_dispatch AND Dispatch Status = Pending Dispatch (plus standard guards).
+Flow: Dispatch HTTP (cloned) → Success Update (cloned). Approve Dispatch skipped.
+
+Validated: First dispatch, cancel, re-dispatch to new contractor, multiple cycles, busy contractor blocking — all working.
+
+Airtable Expected Backend Job Status formula updated twice. Final logic:
+1. Dispatch Accepted → assigned
+2. Dispatch Sent → dispatch_in_progress
+3. Dispatch Approved → ready_for_dispatch
+4. Pending Dispatch AND Last Dispatch Result = cancelled → ready_for_dispatch
+5. Payment Status paid_in_full → paid_in_full
+6. Payment Status deposit_paid → deposit_paid
+
+Correctly distinguishes post-cancel re-dispatch from first-time pre-dispatch.
+
+---
+
 ## Current Architecture
 
 ```
@@ -568,6 +662,7 @@ awaiting_remainder_payment  →  (Stripe webhook)  →  closed_paid
 | POST | `/jobs/:jobId/recalculate` | Recalculate pricing (blocked on paid jobs) |
 | POST | `/jobs/:jobId/mark-complete` | Internal admin completion |
 | POST | `/jobs/:jobId/retry-failed-actions` | Retry Airtable sync |
+| POST | `/jobs/:jobId/cancel-assignment` | Cancel active contractor assignment, return job to ready_for_dispatch. Body: `{ "assignmentId": "optional-uuid" }` |
 
 ### Config (Admin)
 | Method | Path | Description |
@@ -695,8 +790,11 @@ Hosted on **Render** (Oregon region).
 | `feat: FINISH SMS command + completion_reported state` | Completion flow with operator review gate |
 | `feat: approve-completion endpoint` | Branches to remainder billing or closed_paid |
 | `feat(dispatch): guard against dispatching to contractor with active job` (`bda3573`) | Prevents SMS ambiguity |
+| `fix(dispatch): schedule-aware overlap detection` (`fc7beda`) | Window-based conflict check replaces blanket active-job block |
+| `feat(dispatch): add cancel assignment endpoint` (`cd96851`) | POST /jobs/:jobId/cancel-assignment — releases contractor, returns job to ready_for_dispatch |
+| `fix(dispatch): remove invalid assignment updated_at update` (`ab380d7`) | contractor_assignments has no updated_at column — removed from UPDATE |
 
 ---
 
-*This document is updated continuously as the system evolves. Last updated: April 2026.*
+*This document is updated continuously as the system evolves. Last updated: May 2026.*
 *Built by Kenneth Thomas-Utsey with Claude (Anthropic) and Manus AI.*
