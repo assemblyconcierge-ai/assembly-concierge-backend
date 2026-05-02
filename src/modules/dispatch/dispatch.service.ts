@@ -14,6 +14,7 @@ import { enqueueAirtableSync } from '../airtable-sync/airtableSync.queue';
 import { sendSms } from '../sms/quo.adapter';
 import { logger } from '../../common/logger';
 import { parseSchedule } from '../../common/utils/scheduleUtils';
+import { checkScheduleConflict } from './dispatchConflict';
 
 interface ContractorRow {
   id: string;
@@ -170,71 +171,31 @@ export async function dispatchJobToContractor(
       );
     }
 
-    // 0c. Schedule-overlap conflict check
-    // Conflict if the contractor already has an active job that overlaps this window.
-    // Two overlap modes:
-    //   A) Both jobs have computed schedule times → time-range overlap
-    //   B) Conflicting job has no computed times → same appointment_date + window (exact match)
-    const conflictRow = await client.query<{
-      job_key: string;
-      appointment_date: string | null;
-      appointment_window: string | null;
-    }>(
-      `SELECT j.job_key,
-              j.appointment_date::text AS appointment_date,
-              j.appointment_window
-         FROM contractor_assignments ca
-         JOIN jobs j ON j.id = ca.job_id
-        WHERE ca.contractor_id = $1
-          AND ca.status IN ('pending', 'accepted')
-          AND j.status IN (
-                'ready_for_dispatch', 'dispatch_in_progress', 'assigned',
-                'scheduled', 'dispatch_ready', 'completion_reported'
-              )
-          AND j.id <> $2
-          AND (
-            -- Mode A: time-range overlap
-            (
-              j.scheduled_start_at IS NOT NULL
-              AND j.scheduled_end_at IS NOT NULL
-              AND j.scheduled_start_at < $4
-              AND j.scheduled_end_at   > $3
-            )
-            OR
-            -- Mode B: no computed times — same date + window
-            (
-              j.scheduled_start_at IS NULL
-              AND j.scheduled_end_at IS NULL
-              AND j.appointment_date    = $5::date
-              AND j.appointment_window  = $6
-            )
-          )
-        ORDER BY ca.assigned_at DESC
-        LIMIT 1`,
-      [
-        contractor.id,
-        job.id,
-        currentScheduledStart,
-        currentScheduledEnd,
-        sr.appointment_date,
-        sr.appointment_window,
-      ],
+    // 0c. Schedule-overlap conflict check (shared helper — also used by precheck endpoint)
+    const conflictCheck = await checkScheduleConflict(
+      contractor.id,
+      job.id,
+      {
+        scheduled_start_at: currentScheduledStart,
+        scheduled_end_at: currentScheduledEnd,
+        timezone: tz,
+        appointment_date: sr.appointment_date,
+        appointment_window: sr.appointment_window,
+      },
+      client,
     );
-
-    if (conflictRow.rowCount && conflictRow.rowCount > 0) {
-      const c = conflictRow.rows[0];
+    if (conflictCheck.conflict) {
       throw Object.assign(
         new Error('Contractor is already scheduled during this appointment window.'),
         {
           statusCode: 409,
           errorCode: 'CONTRACTOR_SCHEDULE_CONFLICT',
-          conflictingJobKey: c.job_key,
-          conflictingDate: c.appointment_date,
-          conflictingWindow: c.appointment_window,
+          conflictingJobKey: conflictCheck.conflictingJobKey,
+          conflictingDate: conflictCheck.conflictingDate,
+          conflictingWindow: conflictCheck.conflictingWindow,
         },
       );
     }
-
     // 1. Transition job: ready_for_dispatch → dispatch_in_progress
     assertTransition(job.status, 'dispatch_in_progress');
     await client.query(

@@ -17,6 +17,7 @@ import { enqueueAirtableSync } from '../airtable-sync/airtableSync.queue';
 import { requireAdmin } from '../../common/middleware/auth';
 import { logger } from '../../common/logger';
 import { dispatchJobToContractor, cancelContractorAssignment } from '../dispatch/dispatch.service';
+import { checkContractorAvailability } from '../dispatch/dispatchConflict';
 
 export const jobsRouter = Router();
 
@@ -358,6 +359,29 @@ jobsRouter.post(
   },
 );
 
+// POST /jobs/:jobId/precheck-contractor — read-only availability check (no writes, no SMS, no Airtable)
+jobsRouter.post(
+  '/:jobId/precheck-contractor',
+  requireAdmin,
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const schema = z.object({ contractorId: z.string().uuid() });
+      const { contractorId } = schema.parse(req.body);
+      const result = await checkContractorAvailability(
+        req.params.jobId,
+        contractorId,
+        req.correlationId,
+      );
+      res.json(result);
+    } catch (err: any) {
+      if (err?.statusCode === 404) {
+        res.status(404).json({ error: 'NOT_FOUND', message: err.message });
+        return;
+      }
+      next(err);
+    }
+  },
+);
 // POST /jobs/:jobId/approve-completion — operator gate after contractor reports FINISH
 //
 // Branch logic:
