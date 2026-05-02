@@ -20,15 +20,16 @@
 10. [Phase 7 — Cancel Assignment / Re-dispatch Path (April–May 2026)](#phase-7)
 11. [Phase 8 — Airtable + Make: Cancel Assignment Automation (May 2026)](#phase-8)
 12. [Phase 9 — Re-dispatch Edge Case and Make Scenario Routing (May 2026)](#phase-9)
-13. [Current Architecture](#current-architecture)
-14. [Job State Machine](#job-state-machine)
-11. [SMS Command Protocol](#sms-command-protocol)
-12. [API Reference](#api-reference)
-13. [Airtable Operator Interface](#airtable-operator-interface)
-14. [Key Engineering Decisions](#key-engineering-decisions)
-15. [Deployment](#deployment)
-16. [Environment Variables](#environment-variables)
-17. [Commit History](#commit-history--key-milestones)
+13. [Phase 10 — Dispatch Precheck: Read-Only Contractor Availability Check (May 2026)](#phase-10)
+14. [Current Architecture](#current-architecture)
+15. [Job State Machine](#job-state-machine)
+16. [SMS Command Protocol](#sms-command-protocol)
+17. [API Reference](#api-reference)
+18. [Airtable Operator Interface](#airtable-operator-interface)
+19. [Key Engineering Decisions](#key-engineering-decisions)
+20. [Deployment](#deployment)
+21. [Environment Variables](#environment-variables)
+22. [Commit History](#commit-history--key-milestones)
 
 ---
 
@@ -554,6 +555,20 @@ Airtable Expected Backend Job Status formula updated twice. Final logic:
 
 Correctly distinguishes post-cancel re-dispatch from first-time pre-dispatch.
 
+<a name="phase-10"></a>
+## Phase 10 — Dispatch Precheck: Read-Only Contractor Availability Check (May 2026)
+
+No way existed to check contractor availability before committing a dispatch. Conflict detection only fired inside the dispatch transaction — producing a `409` after the operator had already chosen a contractor and submitted. This forced retry loops with no early signal.
+
+Built `POST /jobs/:jobId/precheck-contractor` (`73050b9`):
+- Read-only — no SMS, no state transition, no Airtable sync, no assignment or dispatch rows created
+- Shared conflict logic extracted into `src/modules/dispatch/dispatchConflict.ts`, consumed by both `dispatch.service.ts` and the precheck handler
+- Same overlap rules as dispatch: `scheduled_start_at < currentEnd AND scheduled_end_at > currentStart`. Fallback for unresolved rows uses `appointment_date + appointment_window`
+- Returns a structured result rather than throwing: `{ status, available, note, conflictingJobKey?, conflictWindow? }`
+- Requires admin auth. Response statuses: `Available` | `Conflict` | `Missing Contractor` | `Missing Schedule` | `Error`
+
+Live smoke test (`73050b9`): `POST /jobs/e7011aa8.../precheck-contractor` → HTTP 200, `status: Conflict`, `available: false`, `conflictingJobKey: AC-2026-3UZK`, `conflictWindow: 2026-05-02 Afternoon(12pm-4pm)`. Job fields confirmed unchanged before and after: status remained `ready_for_dispatch`, `scheduled_start_at`, `scheduled_end_at`, `appointment_date`, and `appointment_window` all identical.
+
 ---
 
 ## Current Architecture
@@ -663,6 +678,7 @@ awaiting_remainder_payment  →  (Stripe webhook)  →  closed_paid
 | POST | `/jobs/:jobId/mark-complete` | Internal admin completion |
 | POST | `/jobs/:jobId/retry-failed-actions` | Retry Airtable sync |
 | POST | `/jobs/:jobId/cancel-assignment` | Cancel active contractor assignment, return job to ready_for_dispatch. Body: `{ "assignmentId": "optional-uuid" }` |
+| POST | `/jobs/:jobId/precheck-contractor` | Read-only contractor availability check. Body: `{ "contractorId": "uuid" }` |
 
 ### Config (Admin)
 | Method | Path | Description |
@@ -793,6 +809,7 @@ Hosted on **Render** (Oregon region).
 | `fix(dispatch): schedule-aware overlap detection` (`fc7beda`) | Window-based conflict check replaces blanket active-job block |
 | `feat(dispatch): add cancel assignment endpoint` (`cd96851`) | POST /jobs/:jobId/cancel-assignment — releases contractor, returns job to ready_for_dispatch |
 | `fix(dispatch): remove invalid assignment updated_at update` (`ab380d7`) | contractor_assignments has no updated_at column — removed from UPDATE |
+| `feat(dispatch): add contractor precheck endpoint` (`73050b9`) | POST /jobs/:jobId/precheck-contractor — read-only availability check; shared conflict helper in dispatchConflict.ts |
 
 ---
 
