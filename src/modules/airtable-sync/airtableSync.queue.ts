@@ -219,6 +219,8 @@ async function processSyncJob(jobId: string, correlationId: string): Promise<voi
       status: string;
       appointment_date: Date | null;
       appointment_window: string | null;
+      scheduled_start_at: Date | null;
+      scheduled_end_at: Date | null;
       custom_job_details: string | null;
       airtable_record_id: string | null;
       created_at: Date;
@@ -254,7 +256,9 @@ async function processSyncJob(jobId: string, correlationId: string): Promise<voi
          j.base_price_cents, j.flat_payout_cents, j.contractor_rush_bonus_cents,
          j.contractor_total_payout_cents, j.rush_platform_share_cents,
          j.stripe_fee_cents, j.job_margin_cents,
-         j.appointment_date, j.appointment_window, j.custom_job_details,
+         j.appointment_date, j.appointment_window,
+         j.scheduled_start_at, j.scheduled_end_at,
+         j.custom_job_details,
          j.airtable_record_id, j.created_at, j.updated_at,
          c.full_name AS customer_full_name, c.email AS customer_email, c.phone_e164 AS customer_phone,
          COALESCE(st.code, 'unknown') AS service_type_code,
@@ -326,6 +330,8 @@ async function processSyncJob(jobId: string, correlationId: string): Promise<voi
       status: row.status,
       appointmentDate: row.appointment_date?.toISOString().split('T')[0],
       appointmentWindow: row.appointment_window ?? undefined,
+      scheduledStartAt: row.scheduled_start_at?.toISOString() ?? undefined,
+      scheduledEndAt: row.scheduled_end_at?.toISOString() ?? undefined,
       createdAt: row.created_at.toISOString(),
       // Extended fields
       addressLine1: row.addr_line1 ?? undefined,

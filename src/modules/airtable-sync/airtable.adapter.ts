@@ -189,6 +189,8 @@ export interface AirtableJobRecord {
   status: string;            // internal job_status enum
   appointmentDate?: string;
   appointmentWindow?: string;
+  scheduledStartAt?: string;
+  scheduledEndAt?: string;
   createdAt: string;
   // Extended fields (new Airtable columns)
   addressLine1?: string;
@@ -251,6 +253,8 @@ export async function syncJobToAirtable(record: AirtableJobRecord): Promise<stri
     const mappedWindow = mapAppointmentWindow(record.appointmentWindow);
     if (mappedWindow !== undefined) fields['Appointment Window'] = mappedWindow;
   }
+  if (record.scheduledStartAt) fields['Scheduled Start At'] = record.scheduledStartAt;
+  if (record.scheduledEndAt)   fields['Scheduled End At']   = record.scheduledEndAt;
 
   // ── Extended fields ────────────────────────────────────────────────────────
   // Address detail
