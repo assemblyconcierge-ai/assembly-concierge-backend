@@ -333,10 +333,10 @@ async function processSyncJob(jobId: string, correlationId: string): Promise<voi
       appointmentDate: row.appointment_date?.toISOString().split('T')[0],
       appointmentWindow: row.appointment_window ?? undefined,
       scheduledStartAt: row.scheduled_start_at
-        ? DateTime.fromJSDate(row.scheduled_start_at).setZone(row.timezone ?? 'America/New_York').toISO() ?? undefined
+        ? DateTime.fromJSDate(row.scheduled_start_at).setZone(row.timezone ?? 'America/New_York').toISO({ includeOffset: false }) ?? undefined
         : undefined,
       scheduledEndAt: row.scheduled_end_at
-        ? DateTime.fromJSDate(row.scheduled_end_at).setZone(row.timezone ?? 'America/New_York').toISO() ?? undefined
+        ? DateTime.fromJSDate(row.scheduled_end_at).setZone(row.timezone ?? 'America/New_York').toISO({ includeOffset: false }) ?? undefined
         : undefined,
       createdAt: row.created_at.toISOString(),
       // Extended fields
