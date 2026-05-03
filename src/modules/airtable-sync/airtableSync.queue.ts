@@ -9,6 +9,7 @@
  * ALERT_WEBHOOK_URL so the owner is notified immediately.
  */
 
+import { DateTime } from 'luxon';
 import { logger } from '../../common/logger';
 import { config } from '../../common/config';
 import { query, queryOne } from '../../db/pool';
@@ -221,6 +222,7 @@ async function processSyncJob(jobId: string, correlationId: string): Promise<voi
       appointment_window: string | null;
       scheduled_start_at: Date | null;
       scheduled_end_at: Date | null;
+      timezone: string | null;
       custom_job_details: string | null;
       airtable_record_id: string | null;
       created_at: Date;
@@ -257,7 +259,7 @@ async function processSyncJob(jobId: string, correlationId: string): Promise<voi
          j.contractor_total_payout_cents, j.rush_platform_share_cents,
          j.stripe_fee_cents, j.job_margin_cents,
          j.appointment_date, j.appointment_window,
-         j.scheduled_start_at, j.scheduled_end_at,
+         j.scheduled_start_at, j.scheduled_end_at, j.timezone,
          j.custom_job_details,
          j.airtable_record_id, j.created_at, j.updated_at,
          c.full_name AS customer_full_name, c.email AS customer_email, c.phone_e164 AS customer_phone,
@@ -330,8 +332,12 @@ async function processSyncJob(jobId: string, correlationId: string): Promise<voi
       status: row.status,
       appointmentDate: row.appointment_date?.toISOString().split('T')[0],
       appointmentWindow: row.appointment_window ?? undefined,
-      scheduledStartAt: row.scheduled_start_at?.toISOString() ?? undefined,
-      scheduledEndAt: row.scheduled_end_at?.toISOString() ?? undefined,
+      scheduledStartAt: row.scheduled_start_at
+        ? DateTime.fromJSDate(row.scheduled_start_at).setZone(row.timezone ?? 'America/New_York').toISO() ?? undefined
+        : undefined,
+      scheduledEndAt: row.scheduled_end_at
+        ? DateTime.fromJSDate(row.scheduled_end_at).setZone(row.timezone ?? 'America/New_York').toISO() ?? undefined
+        : undefined,
       createdAt: row.created_at.toISOString(),
       // Extended fields
       addressLine1: row.addr_line1 ?? undefined,
