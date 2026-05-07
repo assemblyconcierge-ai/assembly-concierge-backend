@@ -21,15 +21,16 @@
 11. [Phase 8 — Airtable + Make: Cancel Assignment Automation (May 2026)](#phase-8)
 12. [Phase 9 — Re-dispatch Edge Case and Make Scenario Routing (May 2026)](#phase-9)
 13. [Phase 10 — Dispatch Precheck: Read-Only Contractor Availability Check (May 2026)](#phase-10)
-14. [Current Architecture](#current-architecture)
-15. [Job State Machine](#job-state-machine)
-16. [SMS Command Protocol](#sms-command-protocol)
-17. [API Reference](#api-reference)
-18. [Airtable Operator Interface](#airtable-operator-interface)
-19. [Key Engineering Decisions](#key-engineering-decisions)
-20. [Deployment](#deployment)
-21. [Environment Variables](#environment-variables)
-22. [Commit History](#commit-history--key-milestones)
+14. [Phase 11 — Contractor Availability + Dispatch Lifecycle Automation (May 2026)](#phase-11)
+15. [Current Architecture](#current-architecture)
+16. [Job State Machine](#job-state-machine)
+17. [SMS Command Protocol](#sms-command-protocol)
+18. [API Reference](#api-reference)
+19. [Airtable Operator Interface](#airtable-operator-interface)
+20. [Key Engineering Decisions](#key-engineering-decisions)
+21. [Deployment](#deployment)
+22. [Environment Variables](#environment-variables)
+23. [Commit History](#commit-history--key-milestones)
 
 ---
 
@@ -571,6 +572,32 @@ Live smoke test (`73050b9`): `POST /jobs/e7011aa8.../precheck-contractor` → HT
 
 ---
 
+<a name="phase-11"></a>
+## Phase 11 — Contractor Availability + Dispatch Lifecycle Automation (May 2026)
+
+Completed and validated the contractor availability and dispatch lifecycle automation, tying together Airtable, Make, and backend dispatch state into a coherent operational workflow.
+
+**Contractor availability automation.** Added an Airtable automation that fires when the operator selects an Assigned Contractor, sending the Airtable recordId to the Make availability scenario. The existing manual Check Contractor Availability checkbox was retained as a backup and recheck trigger — both paths send the same recordId to the same Make webhook, keeping the scenario single-entry.
+
+**Make availability scenario.** Make receives the Airtable recordId, fetches the full job record, and calls `POST /jobs/:jobId/precheck-contractor`. The availability result (`Available` or `Conflict`) and supporting detail fields are written back to Airtable. Conflict detail fields clear correctly when the operator selects a new available contractor.
+
+**Dispatch router hardening.** The Blocked Guard route was converted to a Make fallback route, eliminating double-execution when a valid dispatch path matched first. First-time dispatch (Backend Job Status = `deposit_paid` or `paid_in_full`) and re-dispatch after cancellation (Last Dispatch Result = `cancelled`) were separated into distinct route filters with independent HTTP and Success Update modules. Cancel → re-dispatch was tested successfully through multiple cycles.
+
+**Backend Airtable sync fix.** Corrected a status mapping bug in `JOB_STATUS_MAP` (`airtable.adapter.ts`): `dispatch_in_progress` was mapped to `dispatch_ready` instead of `in_progress`. After Make set Status = `in_progress` on dispatch, the next backend sync overwrote it back to `dispatch_ready`. Fixed in commit `7a9e53a`. After the fix, all lifecycle fields align correctly post-dispatch:
+
+| Airtable Field | Value After Dispatch |
+|----------------|---------------------|
+| Status | `in_progress` |
+| Backend Job Status | `dispatch_in_progress` |
+| Expected Backend Job Status | `dispatch_in_progress` |
+| Backend Status Match | Match |
+| Dispatch Sent | checked |
+| Dispatch Status | Dispatch Sent |
+| Assignment ID | populated |
+| Dispatch ID | populated |
+
+---
+
 ## Current Architecture
 
 ```
@@ -810,6 +837,7 @@ Hosted on **Render** (Oregon region).
 | `feat(dispatch): add cancel assignment endpoint` (`cd96851`) | POST /jobs/:jobId/cancel-assignment — releases contractor, returns job to ready_for_dispatch |
 | `fix(dispatch): remove invalid assignment updated_at update` (`ab380d7`) | contractor_assignments has no updated_at column — removed from UPDATE |
 | `feat(dispatch): add contractor precheck endpoint` (`73050b9`) | POST /jobs/:jobId/precheck-contractor — read-only availability check; shared conflict helper in dispatchConflict.ts |
+| `fix(airtable): map dispatch_in_progress to in_progress` (`7a9e53a`) | Correct Airtable Status field mapping — dispatch_in_progress now mirrors to in_progress instead of dispatch_ready |
 
 ---
 
