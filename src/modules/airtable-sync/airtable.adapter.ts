@@ -49,7 +49,7 @@ const JOB_STATUS_MAP: Record<string, string> = {
   deposit_paid:               'paid',
   paid_in_full:               'paid',
   ready_for_dispatch:         'dispatch_ready',
-  dispatch_in_progress:       'dispatch_ready',
+  dispatch_in_progress:       'in_progress',
   assigned:                   'assigned',
   scheduled:                  'assigned',
   work_completed:             'completed',
