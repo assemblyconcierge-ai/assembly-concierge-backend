@@ -53,6 +53,7 @@ const JOB_STATUS_MAP: Record<string, string> = {
   assigned:                   'assigned',
   scheduled:                  'assigned',
   work_completed:             'completed',
+  completion_reported:        'in_progress',
   awaiting_remainder_payment: 'paid',
   closed_paid:                'completed',
   cancelled:                  'cancelled',
