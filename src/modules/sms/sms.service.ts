@@ -72,6 +72,7 @@ interface ActiveJobRow {
   job_status: JobStatus;
   airtable_record_id: string | null;
   assignment_id: string;
+  assignment_status: string;
   dispatch_id: string | null;
 }
 
@@ -132,6 +133,7 @@ export async function processSmsWebhook(
   const activeJob = await queryOne<ActiveJobRow>(
     `SELECT
        ca.id                AS assignment_id,
+       ca.status            AS assignment_status,
        ca.dispatch_id,
        j.id                 AS job_id,
        j.job_key,
@@ -156,6 +158,24 @@ export async function processSmsWebhook(
   }
 
   const newJobStatus = COMMAND_TARGET_STATUS[command];
+
+  // Guard: DONE/FINISH require an accepted assignment.
+  // Without this check the state machine blocks the job transition but the
+  // assignment side-effect still runs, leaving assignment.status = completed
+  // on a pending assignment — corrupted state.
+  if ((command === 'DONE' || command === 'FINISH') && activeJob.assignment_status !== 'accepted') {
+    log.warn(
+      {
+        contractorId: contractor.id,
+        jobId: activeJob.job_id,
+        jobKey: activeJob.job_key,
+        command,
+        assignmentStatus: activeJob.assignment_status,
+      },
+      '[SMS] DONE/FINISH received before assignment accepted — ignoring',
+    );
+    return;
+  }
 
   // 4. Apply state changes in a single transaction
   await withTransaction(async (client) => {
