@@ -378,6 +378,7 @@ export async function updateAirtableStatus(
   jobUpdatedAt?: Date,
   syncError?: string,
   completionReportedAt?: string,
+  remainingBalanceCents?: number,
 ): Promise<void> {
   const now = new Date().toISOString();
   const fields: Record<string, unknown> = {
@@ -406,6 +407,10 @@ export async function updateAirtableStatus(
 
   if (completionReportedAt) {
     fields['Completion Reported At'] = completionReportedAt;
+  }
+
+  if (remainingBalanceCents !== undefined) {
+    fields['Remaining Balance'] = remainingBalanceCents / 100;
   }
 
   await updateAirtableRecord(recordId, fields);

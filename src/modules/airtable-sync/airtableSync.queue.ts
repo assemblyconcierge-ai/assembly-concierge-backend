@@ -314,7 +314,7 @@ async function processSyncJob(jobId: string, correlationId: string): Promise<voi
 
     const isPayInFull = (rawPaymentType ?? '').toLowerCase().includes('full');
     const effectiveDepositCents   = isPayInFull ? row.total_amount_cents : row.deposit_amount_cents;
-    const effectiveRemainderCents = isPayInFull ? 0 : row.remainder_amount_cents;
+    const effectiveRemainderCents = (isPayInFull || row.status === 'closed_paid') ? 0 : row.remainder_amount_cents;
 
     const record = {
       // Core identity
@@ -377,6 +377,7 @@ async function processSyncJob(jobId: string, correlationId: string): Promise<voi
         row.updated_at,
         undefined,
         record.completionReportedAt,
+        record.remainingBalanceCents,
       );
       log.info({ airtableRecordId: row.airtable_record_id }, 'Airtable record updated');
     } else {
