@@ -206,6 +206,7 @@ export interface AirtableJobRecord {
   serviceTypeCode?: string;      // raw code for reference (e.g. "small")
   dispatchStatus?: string;       // defaults to "Pending Dispatch" at intake
   rushType?: string;             // "No Rush" | "Same-day (+30)" | "Next-day (+20)"
+  completionReportedAt?: string; // ISO 8601 timestamp set when contractor texts DONE/FINISH
   // Financial split fields
   basePriceCents?: number;
   rushFeeAmountCents?: number;          // = rushAmountCents
@@ -310,6 +311,10 @@ export async function syncJobToAirtable(record: AirtableJobRecord): Promise<stri
   if (record.jobMarginCents !== undefined)
     fields['Job Margin'] = record.jobMarginCents / 100;
 
+  if (record.completionReportedAt) {
+    fields['Completion Reported At'] = record.completionReportedAt;
+  }
+
   // Dispatch status — always set at intake (defaults to Pending Dispatch)
   fields['Dispatch Status'] = mapDispatchStatus(record.dispatchStatus);
 
@@ -372,6 +377,7 @@ export async function updateAirtableStatus(
   stripePaymentIntentId?: string,
   jobUpdatedAt?: Date,
   syncError?: string,
+  completionReportedAt?: string,
 ): Promise<void> {
   const now = new Date().toISOString();
   const fields: Record<string, unknown> = {
@@ -396,6 +402,10 @@ export async function updateAirtableStatus(
 
   if (internalStatus === 'assigned') {
     fields['Dispatch Status'] = 'Accepted';
+  }
+
+  if (completionReportedAt) {
+    fields['Completion Reported At'] = completionReportedAt;
   }
 
   await updateAirtableRecord(recordId, fields);

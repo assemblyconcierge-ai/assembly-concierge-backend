@@ -182,8 +182,11 @@ export async function processSmsWebhook(
     // Job status transition
     try {
       assertTransition(activeJob.job_status, newJobStatus);
+      const isCompletion = newJobStatus === 'completion_reported';
       await client.query(
-        'UPDATE jobs SET status = $2, updated_at = NOW() WHERE id = $1',
+        isCompletion
+          ? 'UPDATE jobs SET status = $2, completion_reported_at = NOW(), updated_at = NOW() WHERE id = $1'
+          : 'UPDATE jobs SET status = $2, updated_at = NOW() WHERE id = $1',
         [activeJob.job_id, newJobStatus],
       );
     } catch {

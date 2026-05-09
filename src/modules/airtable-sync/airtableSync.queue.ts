@@ -250,6 +250,7 @@ async function processSyncJob(jobId: string, correlationId: string): Promise<voi
       raw_payload_json: unknown;
       // Backend mirror fields
       updated_at: Date;
+      completion_reported_at: Date | null;
     }>(
       `SELECT
          j.id, j.job_key, j.city_detected, j.service_area_status, j.rush_requested,
@@ -261,6 +262,7 @@ async function processSyncJob(jobId: string, correlationId: string): Promise<voi
          j.appointment_date, j.appointment_window,
          j.scheduled_start_at, j.scheduled_end_at, j.timezone,
          j.custom_job_details,
+         j.completion_reported_at,
          j.airtable_record_id, j.created_at, j.updated_at,
          c.full_name AS customer_full_name, c.email AS customer_email, c.phone_e164 AS customer_phone,
          COALESCE(st.code, 'unknown') AS service_type_code,
@@ -348,6 +350,9 @@ async function processSyncJob(jobId: string, correlationId: string): Promise<voi
       paymentType: rawPaymentType,
       stripeCheckoutSessionId: row.stripe_session_id ?? undefined,
       stripePaymentIntentId: row.stripe_intent_id ?? undefined,
+      completionReportedAt: row.completion_reported_at
+        ? row.completion_reported_at.toISOString()
+        : undefined,
       dispatchStatus: 'pending',   // always "Pending Dispatch" at intake
       rushType: row.rush_type ?? undefined,
       // Financial split fields (from jobs table columns added by migration 005)
@@ -370,6 +375,8 @@ async function processSyncJob(jobId: string, correlationId: string): Promise<voi
         record.totalAmountCents,
         record.stripePaymentIntentId,
         row.updated_at,
+        undefined,
+        record.completionReportedAt,
       );
       log.info({ airtableRecordId: row.airtable_record_id }, 'Airtable record updated');
     } else {

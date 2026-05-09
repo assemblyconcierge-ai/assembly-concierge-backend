@@ -38,6 +38,7 @@ export interface JobRow {
   custom_job_details: string | null;
   public_pay_token: string | null;
   airtable_record_id: string | null;
+  completion_reported_at: Date | null;
   created_at: Date;
   updated_at: Date;
 }

@@ -516,4 +516,11 @@ ALTER TABLE jobs
   ADD COLUMN IF NOT EXISTS timezone           TEXT NOT NULL DEFAULT 'America/New_York';
 `,
   },
+  {
+    filename: '009_add_completion_reported_at.sql',
+    sql: `
+ALTER TABLE jobs
+  ADD COLUMN IF NOT EXISTS completion_reported_at TIMESTAMPTZ;
+`,
+  },
 ];
