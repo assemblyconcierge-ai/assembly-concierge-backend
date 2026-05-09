@@ -1,4 +1,8 @@
 import { vi } from 'vitest';
+import { setSchemaReady } from '../../src/common/schemaState';
+
+process.env.ADMIN_JWT_SECRET ||= 'test-admin-secret';
+setSchemaReady(true);
 
 // Mock the DB pool so tests never need a real Postgres connection
 vi.mock('../../src/db/pool', () => {

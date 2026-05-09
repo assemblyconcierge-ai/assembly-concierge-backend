@@ -10,17 +10,19 @@ describe('Jotform normalization', () => {
   const samplePayload = {
     submissionID: 'SUB-001',
     submissionDate: '2024-03-01T10:00:00Z',
-    'q3_name[first]': 'Jane',
-    'q3_name[last]': 'Smith',
+    q3_fullName: { first: 'Jane', last: 'Smith' },
     q4_email: 'jane@example.com',
-    q5_phone: '(404) 555-1234',
-    'q6_address[addr_line1]': '123 Main St',
-    q7_city: 'Hampton',
-    q7_state: 'GA',
-    q8_serviceType: 'Small Assembly',
-    q9_rush: 'No',
-    q10_date: '2024-03-15',
-    q11_window: '9am-12pm',
+    q79_phoneNumber79: { full: '(404) 555-1234' },
+    q6_streetNumberstreet: { addr_line1: '123 Main St' },
+    q26_typeA26: 'Hampton',
+    'q38_addresshttpswwwjotformcomhelp71-Prepopulating-Fiel': {
+      state: 'GA',
+      postal: '30228',
+    },
+    q7_serviceNeeded: 'Small Assembly',
+    q48_typeA48: 'No',
+    q9_preferredDate: '2024-03-15',
+    q11_preferredTime: 'Morning(8am-12pm)',
   };
 
   it('maps all canonical fields correctly', () => {
@@ -33,27 +35,27 @@ describe('Jotform normalization', () => {
     expect(result.customer.phone).toBe('+14045551234');
     expect(result.address.city).toBe('Hampton');
     expect(result.address.state).toBe('GA');
+    expect(result.address.postalCode).toBe('30228');
     expect(result.service.typeCode).toBe('small');
     expect(result.service.rushRequested).toBe(false);
     expect(result.appointment.date).toBe('2024-03-15');
-    expect(result.appointment.window).toBe('9am-12pm');
+    expect(result.appointment.window).toBe('Morning(8am-12pm)');
     expect(result.source.raw).toEqual(samplePayload);
   });
 
   it('handles rush = yes correctly', () => {
-    const result = normalizeJotformPayload({ ...samplePayload, q9_rush: 'Yes' });
+    const result = normalizeJotformPayload({ ...samplePayload, q48_typeA48: 'Same-day (+30)' });
     expect(result.service.rushRequested).toBe(true);
   });
 
   it('handles missing optional fields gracefully', () => {
     const minimal = {
       submissionID: 'SUB-002',
-      'q3_name[first]': 'Bob',
-      'q3_name[last]': 'Jones',
+      q3_fullName: { first: 'Bob', last: 'Jones' },
       q4_email: 'bob@example.com',
-      q5_phone: '4045550000',
-      q7_city: 'McDonough',
-      q8_serviceType: 'Medium',
+      q79_phoneNumber79: { full: '4045550000' },
+      q26_typeA26: 'McDonough',
+      q7_serviceNeeded: 'Medium',
     };
     const result = normalizeJotformPayload(minimal);
     expect(result.customer.firstName).toBe('Bob');
