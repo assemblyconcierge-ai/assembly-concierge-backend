@@ -78,14 +78,14 @@ interface ActiveJobRow {
 
 // ── Target job status per command ─────────────────────────────────────────────
 //
-// Note: OTW maps to 'scheduled' — the closest valid JobStatus to "in_progress".
-// The state machine has no 'in_progress' state; assigned → scheduled is the
-// canonical transition for a contractor who has confirmed and is heading to the job.
+// OTW maps to 'assigned' so it does not advance the core job lifecycle state.
+// The job stays assigned; OTW is an operational signal only (contractor en route).
+// Customer notification / contractor_en_route_at fields will be added separately.
 
 const COMMAND_TARGET_STATUS: Record<SmsCommand, JobStatus> = {
   CONFIRM: 'assigned',
   DECLINE: 'ready_for_dispatch',
-  OTW:     'scheduled',
+  OTW:     'assigned',
   // DONE and FINISH both map to completion_reported — single contractor-reported completion state.
   // DONE is kept for backward compatibility; FINISH is the preferred keyword.
   DONE:    'completion_reported',
