@@ -271,7 +271,8 @@ async function processSyncJob(jobId: string, correlationId: string): Promise<voi
          a.line1 AS addr_line1, a.state AS addr_state, a.postal_code AS addr_postal,
          p.provider_session_id AS stripe_session_id,
          p.provider_payment_intent_id AS stripe_intent_id,
-         s.raw_payload_json
+         s.raw_payload_json,
+         d.dispatch_status
        FROM jobs j
        JOIN customers c ON c.id = j.customer_id
        JOIN addresses a ON a.id = j.address_id
