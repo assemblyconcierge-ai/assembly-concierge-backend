@@ -22,15 +22,16 @@
 12. [Phase 9 — Re-dispatch Edge Case and Make Scenario Routing (May 2026)](#phase-9)
 13. [Phase 10 — Dispatch Precheck: Read-Only Contractor Availability Check (May 2026)](#phase-10)
 14. [Phase 11 — Contractor Availability + Dispatch Lifecycle Automation (May 2026)](#phase-11)
-15. [Current Architecture](#current-architecture)
-16. [Job State Machine](#job-state-machine)
-17. [SMS Command Protocol](#sms-command-protocol)
-18. [API Reference](#api-reference)
-19. [Airtable Operator Interface](#airtable-operator-interface)
-20. [Key Engineering Decisions](#key-engineering-decisions)
-21. [Deployment](#deployment)
-22. [Environment Variables](#environment-variables)
-23. [Commit History](#commit-history--key-milestones)
+15. [Phase 12 — OTW Tracking, Completion Timestamps, and Billing Fixes (May 2026)](#phase-12)
+16. [Current Architecture](#current-architecture)
+17. [Job State Machine](#job-state-machine)
+18. [SMS Command Protocol](#sms-command-protocol)
+19. [API Reference](#api-reference)
+20. [Airtable Operator Interface](#airtable-operator-interface)
+21. [Key Engineering Decisions](#key-engineering-decisions)
+22. [Deployment](#deployment)
+23. [Environment Variables](#environment-variables)
+24. [Commit History](#commit-history--key-milestones)
 
 ---
 
@@ -307,7 +308,7 @@ Jobs from McDonough, GA were being incorrectly rejected as outside the service a
 
 A customer selecting "Pay in Full" was being charged $25 (the deposit amount) instead of the full price.
 
-**Evidence from Render logs (job AC-2026-KXGK):**
+**Evidence from Render logs (job AC-2026-EXAMPLE1):**
 ```
 Normalized intake: paymentType = "full", totalAmount = "229"
 Checkout session created: paymentType = "deposit", amountCents = 5500
@@ -375,14 +376,14 @@ if (internalStatus === 'assigned') {
 
 Contractor texted CONFIRM. Render logs showed:
 ```json
-{"contractorId":"4dc61fcb...","command":"CONFIRM","msg":"[SMS] No active job found for contractor — ignoring"}
+{"contractorId":"contractor_uuid_redacted","command":"CONFIRM","msg":"[SMS] No active job found for contractor — ignoring"}
 ```
 
-**Root cause:** Two contractor records existed with the same phone number `+14044256394`, both `is_active = true`. The SMS webhook matched the wrong one first (by `assigned_at DESC`). The correct contractor had the active job; the stale duplicate did not.
+**Root cause:** Two contractor records existed with the same phone number `+1XXXXXXXXXX`, both `is_active = true`. The SMS webhook matched the wrong one first (by `assigned_at DESC`). The correct contractor had the active job; the stale duplicate did not.
 
 **Fix:**
 ```sql
-UPDATE contractors SET is_active = false WHERE id = '4dc61fcb-fe79-4080-8f90-6651f246e18d';
+UPDATE contractors SET is_active = false WHERE id = 'contractor_uuid_redacted';
 ```
 
 **Lesson:** Phone number uniqueness must be enforced at the contractor level. The SMS webhook lookup assumes one active contractor per phone.
@@ -501,7 +502,7 @@ Production bug found (ab380d7): contractor_assignments has no updated_at column 
 
 Tests: 29/29 passing. TypeScript clean.
 
-Live test AC-2026-6M0G PASSED: HTTP 200, job reset to ready_for_dispatch, assignment cancelled, dispatch expired, schedule/payment fields unchanged, no SMS.
+Live test AC-2026-EXAMPLE2 PASSED: HTTP 200, job reset to ready_for_dispatch, assignment cancelled, dispatch expired, schedule/payment fields unchanged, no SMS.
 
 ---
 
@@ -525,7 +526,7 @@ New Make scenario: Cancel Assignment - Airtable Record.
 
 Success uses Make erase for linked/lookup fields. Fields cleared: Cancel Assignment, Dispatch Approved, Dispatch Sent, Dispatch Status (→ Pending Dispatch), Assigned Contractor, Assignment ID, Dispatch ID, Last Dispatch Error.
 
-End-to-end tested AC-2026-49Z0 — full success path validated. Backend and Airtable mirror confirmed correct.
+End-to-end tested AC-2026-EXAMPLE3 — full success path validated. Backend and Airtable mirror confirmed correct.
 
 ---
 
@@ -568,7 +569,7 @@ Built `POST /jobs/:jobId/precheck-contractor` (`73050b9`):
 - Returns a structured result rather than throwing: `{ status, available, note, conflictingJobKey?, conflictWindow? }`
 - Requires admin auth. Response statuses: `Available` | `Conflict` | `Missing Contractor` | `Missing Schedule` | `Error`
 
-Live smoke test (`73050b9`): `POST /jobs/e7011aa8.../precheck-contractor` → HTTP 200, `status: Conflict`, `available: false`, `conflictingJobKey: AC-2026-3UZK`, `conflictWindow: 2026-05-02 Afternoon(12pm-4pm)`. Job fields confirmed unchanged before and after: status remained `ready_for_dispatch`, `scheduled_start_at`, `scheduled_end_at`, `appointment_date`, and `appointment_window` all identical.
+Live smoke test (`73050b9`): `POST /jobs/job_uuid_redacted/precheck-contractor` → HTTP 200, `status: Conflict`, `available: false`, `conflictingJobKey: AC-2026-EXAMPLE4`, `conflictWindow: 2026-05-02 Afternoon(12pm-4pm)`. Job fields confirmed unchanged before and after: status remained `ready_for_dispatch`, `scheduled_start_at`, `scheduled_end_at`, `appointment_date`, and `appointment_window` all identical.
 
 ---
 
@@ -595,6 +596,211 @@ Completed and validated the contractor availability and dispatch lifecycle autom
 | Dispatch Status | Dispatch Sent |
 | Assignment ID | populated |
 | Dispatch ID | populated |
+
+---
+
+<a name="phase-12"></a>
+## Phase 12 — OTW Tracking, Completion Timestamps, and Billing Fixes (May 2026)
+
+### 12.1 Bug: Full-payment `approve-completion` left `remainder_amount_cents` non-zero
+
+**Problem:** `jobs.remainder_amount_cents` is set at intake as a static pricing-split field. For full-payment jobs the configured pricing-split remainder is recorded even though the customer pays in full. When Stripe's `checkout.session.completed` fired for a full-payment job, the `UPDATE jobs` query in `handleCheckoutCompleted` did not include `remainder_amount_cents = 0`. The field stayed at the intake value in both PostgreSQL and Airtable.
+
+When a contractor later texted `FINISH` and the operator hit `approve-completion`, the endpoint evaluated `remaining_balance_cents > 0` and incorrectly routed the job to `awaiting_remainder_payment` instead of `closed_paid` — attempting to generate a remainder invoice on an already fully-paid job.
+
+**Fix (`5f80aec`):**
+- `stripe.webhook.ts` (`handleCheckoutCompleted`): Extended the full-payment `UPDATE jobs` query to include `remainder_amount_cents = 0`.
+- `jobs.routes.ts` (`approve-completion`): Added a defensive payment-record lookup. If the job's payments table contains a `paid_in_full` record, `remaining_balance_cents` resolves to `0` regardless of what `remainder_amount_cents` stores in the jobs row, routing correctly to `closed_paid`.
+
+---
+
+### 12.2 Bug: OTW command advanced job to `scheduled`
+
+**Problem:** `COMMAND_TARGET_STATUS` mapped `OTW → 'scheduled'`. A contractor who texted `OTW` advanced the job to `scheduled`. From `scheduled` there is no valid state machine path to `completion_reported`, so a subsequent `FINISH` would silently skip the job status update while still marking the assignment completed — leaving the job stuck at `scheduled` with no path to billing.
+
+**Fix (`252ca15`):** Changed `OTW: 'scheduled'` to `OTW: 'assigned'` in `COMMAND_TARGET_STATUS`. OTW is an operational signal only — the job stays at `assigned`. The `assertTransition(assigned, assigned)` call is caught by the existing no-op catch block.
+
+---
+
+### 12.3 Bug: `dispatch_status` missing from Airtable sync SELECT projection
+
+**Problem:** `airtableSync.queue.ts` added a LATERAL join to fetch the latest dispatch status but omitted `d.dispatch_status` from the SELECT list. `row.dispatch_status` was `undefined` at runtime; Airtable received `undefined` and silently dropped the field update.
+
+**Fix (`6cfc4eb`):** Added `d.dispatch_status` to the SELECT projection.
+
+---
+
+### 12.4 Bug: `DONE`/`FINISH` accepted before contractor assignment confirmed
+
+**Problem:** A contractor with a `dispatch_in_progress` job (assignment status `pending`) could text `FINISH`. The state machine correctly blocked `dispatch_in_progress → completion_reported`, so the job status update was skipped. But the assignment side effect still ran: `contractor_assignments.status` was set to `completed` on a `pending` assignment — corrupted state.
+
+**Fix (`53b9f1c`):** Added an early-exit guard before the transaction: if `command === 'DONE' || command === 'FINISH'` and `activeJob.assignment_status !== 'accepted'`, log a warning and return. The transaction does not run at all when the assignment has not been accepted.
+
+---
+
+### 12.5 Feature: `contractor_en_route_at` timestamp
+
+Added `contractor_en_route_at TIMESTAMPTZ` to the `jobs` table (migration 010). When a contractor texts `OTW`, the transaction sets:
+
+```sql
+UPDATE jobs
+   SET contractor_en_route_at = COALESCE(contractor_en_route_at, NOW()),
+       updated_at = NOW()
+ WHERE id = $1
+```
+
+`COALESCE` ensures the first OTW wins — repeated OTW texts do not overwrite the original timestamp.
+
+---
+
+### 12.6 Feature: Customer OTW SMS notification
+
+When a contractor texts `OTW`, the backend sends a one-time SMS to the customer notifying them the contractor is en route.
+
+**Implementation details:**
+- Runs inline after the DB transaction, before `enqueueAirtableSync` — no `setImmediate`
+- DB re-check on `customer_otw_text_sent_at` (not the pre-fetched value) to prevent duplicates under concurrent OTW texts
+- Uses contractor first name when available: *"Your Assembly Concierge contractor, [First Name], is on the way for your appointment. Please keep your phone nearby in case they need to reach you."*
+- Falls back to a generic message if name parsing fails
+- Inner `try/catch` on `sendSms` only — failure sets `customer_otw_text_status = 'failed'` without throwing
+- Outer `try/catch` ensures OTW notification errors never propagate out of `processSmsWebhook`
+- If `customer_phone` is missing: sets `customer_otw_text_status = 'skipped'`, leaves `customer_otw_text_sent_at = null` so future OTW texts can retry
+
+---
+
+### 12.7 Feature: `completion_reported_at` timestamp
+
+Added `completion_reported_at TIMESTAMPTZ` to `jobs` (migration 009). When a contractor texts `FINISH` or `DONE` and the job transitions to `completion_reported`, the UPDATE includes `completion_reported_at = NOW()`. Propagated to Airtable on every sync.
+
+---
+
+### 12.8 Feature: `completed_at` timestamp
+
+Added `completed_at TIMESTAMPTZ` to `jobs` (migration 010). Written in three places:
+
+| Trigger | Write Site |
+|---------|-----------|
+| `approve-completion` Path B — no remainder balance | `jobs.routes.ts` inline query |
+| Stripe `checkout.session.completed` — two-step remainder (`deposit_paid → closed_paid`) | `stripe.webhook.ts` if-branch |
+| Stripe `checkout.session.completed` — normal remainder (`awaiting_remainder_payment → closed_paid`) | `stripe.webhook.ts` else-branch |
+
+Full-payment jobs that go to `closed_paid` via `approve-completion` Path B get `completed_at` at operator approval. Deposit jobs get `completed_at` when Stripe confirms the final payment.
+
+---
+
+### 12.9 Feature: `customer_otw_text_sent_at` / `customer_otw_text_status`
+
+Added two columns (migration 010):
+- `customer_otw_text_sent_at TIMESTAMPTZ` — populated only on successful send
+- `customer_otw_text_status TEXT` — `'sent'` | `'failed'` | `'skipped'`
+
+`customer_otw_text_status` is an Airtable Single Select with exact lowercase values — mapped via `CUSTOMER_OTW_TEXT_STATUS_MAP` in `airtable.adapter.ts` to prevent 422 errors from capitalization mismatches.
+
+---
+
+### 12.10 Migration 010: four new job columns
+
+```sql
+-- 010_add_otw_and_completion_fields.sql
+ALTER TABLE jobs
+  ADD COLUMN IF NOT EXISTS completed_at              TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS contractor_en_route_at    TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS customer_otw_text_sent_at TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS customer_otw_text_status  TEXT;
+```
+
+Runs automatically on startup via `embeddedMigrations.ts`. All columns nullable — no backfill required.
+
+---
+
+### 12.11 Airtable sync: four new fields propagated
+
+`airtable.adapter.ts` and `airtableSync.queue.ts` extended to propagate all four new columns. `updateAirtableStatus` signature extended to 13 parameters. Fields written conditionally (nulls not sent):
+
+| Airtable Field | Source Column | Type |
+|---------------|--------------|------|
+| `Completed At` | `jobs.completed_at` | Date/time |
+| `Contractor En Route At` | `jobs.contractor_en_route_at` | Date/time |
+| `Customer OTW Text Sent At` | `jobs.customer_otw_text_sent_at` | Date/time |
+| `Customer OTW Text Status` | `jobs.customer_otw_text_status` | Single Select (mapped) |
+
+---
+
+### 12.12 Contractor Decline and Re-Dispatch Flow
+
+When a contractor texts `DECLINE`:
+1. Backend moves job to `ready_for_dispatch`; `contractor_assignments.status = declined`; `dispatches.status = declined`, `assigned_contractor_id = NULL`
+2. Airtable sync runs and mirrors `Dispatch Status = Declined`
+3. Airtable/Make cleanup fires — cleared fields: `Dispatch Approved`, `Dispatch Sent`, `Assigned Contractor`, `Assignment ID`, `Dispatch ID`, `Last Dispatch Error`, `Contractor Availability Status`, `Contractor Availability Note`
+4. `Last Dispatch Result = declined` is preserved so the operator knows why the job returned to queue
+5. Operator selects a new contractor and re-dispatches using the standard dispatch flow
+
+The decline cleanup uses the same field-erase pattern as the cancel-assignment automation (Phase 8), keeping a single consistent reset surface regardless of why a contractor was released.
+
+---
+
+### 12.13 Make Re-Dispatch Filter Hardening
+
+The Make dispatch scenario Route 2 (re-dispatch after contractor release) was extended to handle declined jobs alongside cancelled ones:
+
+**Route 2 gate conditions:**
+- Backend Job Status: `ready_for_dispatch`
+- Dispatch Status: `Pending Dispatch` OR `Declined`
+- Last Dispatch Result: `declined`, `cancelled`, or `blocked`
+
+**States that remain blocked from re-dispatch:**
+`Dispatch Sent`, `Accepted`, `assigned`, `completion_reported`, `awaiting_remainder_payment`, `closed_paid`
+
+This prevents the re-dispatch route from firing on active jobs and limits it to jobs that are genuinely back in queue after a contractor release.
+
+---
+
+### 12.14 Ownership Boundaries
+
+**Backend-owned (PostgreSQL authoritative, Airtable is read-only mirror):**
+- `job.status` — job lifecycle state machine
+- `payment_type`, `payment_status`, `remainder_amount_cents` — payment state
+- `completion_reported_at` — when contractor reported completion
+- `completed_at` — when job reached `closed_paid`
+- `contractor_en_route_at` — when contractor first texted OTW
+- `customer_otw_text_sent_at` — when customer OTW SMS was delivered
+- `customer_otw_text_status` — SMS delivery outcome
+- Remaining balance (computed from payment records)
+- Dispatch status mirror (from `dispatches` table)
+
+**Airtable/Make-owned (not written by backend):**
+- `Dispatch Approved` — operator input checkbox
+- `Dispatch Sent` — set by Make after dispatch SMS sent
+- `Assigned Contractor`, `Assignment ID`, `Dispatch ID` — dashboard reference fields, set and cleared by Make
+- `Last Dispatch Result`, `Last Dispatch Error` — Make-written outcome fields
+- `Completion Approved` — operator input checkbox
+- `Completion Approved At`, `Last Completion Result`, `Last Completion Error` — Make-written completion fields
+- Cleanup/reset fields — managed by Make automation scripts
+
+---
+
+### 12.15 Validated End-to-End Flows
+
+| Flow | Status Path |
+|------|------------|
+| Deposit path | `awaiting_payment → deposit_paid → dispatch_in_progress → assigned → completion_reported → awaiting_remainder_payment → closed_paid` |
+| Full-payment path | `awaiting_payment → paid_in_full → dispatch_in_progress → assigned → completion_reported → closed_paid` |
+| Decline / re-dispatch | `dispatch_in_progress` or `assigned` → `ready_for_dispatch` (DECLINE) → dashboard cleanup → new dispatch → `dispatch_in_progress → assigned` |
+| OTW customer notification | `assigned` + OTW SMS → `contractor_en_route_at` set → customer notified → `customer_otw_text_status = sent` |
+
+---
+
+### 12.16 State after Phase 12
+
+| Airtable Field | Populated When |
+|---------------|---------------|
+| `Contractor En Route At` | Contractor texts OTW |
+| `Customer OTW Text Status` | OTW processed (`sent` / `failed` / `skipped`) |
+| `Customer OTW Text Sent At` | Customer SMS delivered successfully |
+| `Completion Reported At` | Contractor texts FINISH or DONE |
+| `Completed At` | Job reaches `closed_paid` |
+
+TypeScript: clean via `npx tsc --noEmit`.
 
 ---
 
@@ -628,6 +834,10 @@ Make calls POST /jobs/:id/dispatch → dispatch_in_progress + SMS sent (Quo)
 Contractor replies CONFIRM via SMS
         ↓
 POST /webhooks/sms → assigned → Airtable sync (async)
+        ↓
+Contractor replies OTW when en route
+        ↓
+POST /webhooks/sms → contractor_en_route_at set → customer SMS sent → Airtable sync (async)
         ↓
 Contractor replies FINISH when job complete
         ↓
@@ -677,6 +887,7 @@ awaiting_remainder_payment  →  (Stripe webhook)  →  closed_paid
 |---------|----------|-----------|-------|
 | `CONFIRM` | confirm, confirmed, yes | `assigned` | Must have active `dispatch_in_progress` job |
 | `DECLINE` | decline, no, pass | `ready_for_dispatch` | Returns job to dispatch queue |
+| `OTW` | otw, on my way, omw, heading over, leaving now, headed there | `assigned` (no-op) | Sets `contractor_en_route_at`; sends customer OTW SMS; job status unchanged |
 | `FINISH` | finish, job finished, work finished, etc. | `completion_reported` | Requires `assigned` source state |
 | `DONE` | done, all done, job done | `completion_reported` | Legacy alias for FINISH |
 
@@ -735,6 +946,11 @@ Airtable is the operator's UI — not the source of truth. Every field is either
 | `Dispatch Payment Eligible` | Formula | `OR(deposit_paid, paid_in_full)` helper for automation trigger |
 | `Expected Backend Job Status` | Formula | Computed expected status |
 | `Backend Status Match` | Formula | Flags mismatches for reconciliation |
+| `Completed At` | Backend mirror | Timestamp when job reached `closed_paid` (`completed_at`) |
+| `Contractor En Route At` | Backend mirror | Timestamp when contractor first texted OTW (`contractor_en_route_at`) |
+| `Customer OTW Text Sent At` | Backend mirror | Timestamp when customer OTW SMS was delivered |
+| `Customer OTW Text Status` | Backend mirror | SMS delivery outcome: `sent` / `failed` / `skipped` |
+| `Minutes OTW to Completion` | Formula | Minutes between `Contractor En Route At` and `Completion Reported At` |
 
 ### Automation Flow (when operator checks Dispatch Approved)
 
@@ -790,6 +1006,10 @@ Hosted on **Render** (Oregon region).
 | 004 | `004_rush_tier.sql` | Rush pricing tiers, contractor rush bonuses |
 | 005 | `005_job_financial_split.sql` | 7 financial split columns on jobs table |
 | 006 | `006_fitness_equipment_service_type.sql` | Fitness equipment as distinct service type |
+| 007 | `007_add_missing_job_status_values.sql` | Add `dispatch_ready` and `completion_reported` to `job_status` enum |
+| 008 | `008_add_schedule_fields.sql` | `scheduled_start_at`, `scheduled_end_at`, `timezone` on jobs |
+| 009 | `009_add_completion_reported_at.sql` | `completion_reported_at` timestamp on jobs |
+| 010 | `010_add_otw_and_completion_fields.sql` | `completed_at`, `contractor_en_route_at`, `customer_otw_text_sent_at`, `customer_otw_text_status` on jobs |
 
 ---
 
@@ -838,6 +1058,26 @@ Hosted on **Render** (Oregon region).
 | `fix(dispatch): remove invalid assignment updated_at update` (`ab380d7`) | contractor_assignments has no updated_at column — removed from UPDATE |
 | `feat(dispatch): add contractor precheck endpoint` (`73050b9`) | POST /jobs/:jobId/precheck-contractor — read-only availability check; shared conflict helper in dispatchConflict.ts |
 | `fix(airtable): map dispatch_in_progress to in_progress` (`7a9e53a`) | Correct Airtable Status field mapping — dispatch_in_progress now mirrors to in_progress instead of dispatch_ready |
+| `docs(portfolio): add contractor availability lifecycle milestone` (`d957a12`) | Phase 11 documentation — contractor availability automation, Make dispatch routing, dispatch status mapping |
+| `fix(airtable): map completion reported to in progress` (`284936e`) | `completion_reported` Airtable status maps to `in_progress`; prior mapping was missing |
+| `fix(sms): block completion before contractor acceptance` (`53b9f1c`) | DONE/FINISH guard — rejects completion SMS if assignment is still pending, prevents corrupted assignment state |
+| `feat(completion): sync completion reported timestamp` (`116833f`) | `completion_reported_at` timestamp propagated to Airtable on every sync |
+| `test: stabilize current baseline fixtures` (`fd181b9`) | Test suite baseline fixtures updated after schema additions |
+| `fix(sms): keep OTW from changing job lifecycle state` (`252ca15`) | OTW maps to `assigned` (no-op transition) instead of `scheduled`; OTW is an operational signal only |
+| `fix(airtable): update remaining balance on sync` (`8ea4aef`) | Remaining balance field propagated on every Airtable sync |
+| `fix(airtable): sync latest dispatch status` (`935f5fd`) | Latest dispatch status fetched and mirrored on every sync |
+| `fix(airtable): include dispatch status in sync query` (`6cfc4eb`) | `dispatch_status` added to SELECT projection — previously undefined at runtime |
+| `fix(payments): zero remainder_amount_cents on full payment and guard approve-completion` (`5f80aec`) | Full payment webhook zeroes `remainder_amount_cents`; approve-completion checks actual payment records defensively |
+| `feat(tracking): add OTW and completion lifecycle timestamps` (`5f7d7ab`) | Migration 010; `completed_at`, `contractor_en_route_at`, `customer_otw_text_sent_at/status`; customer OTW SMS; Airtable sync for all 4 fields |
+
+---
+
+## Portfolio Highlights
+
+- **End-to-end job lifecycle system** — designed and built a production Node.js/TypeScript/PostgreSQL backend for a real operating business, handling customer intake, Stripe payment processing, contractor dispatch via SMS, operator approval gates, and remainder billing with a fully enforced 16-status state machine.
+- **Real-time contractor coordination via SMS** — built an inbound SMS webhook handler that fuzzy-matches natural-language contractor replies (`confirm`, `on my way`, `finish`) and drives atomic job state transitions, customer OTW notifications, and Airtable sync.
+- **Full-stack Airtable + Make.com automation** — designed multi-route Make.com dispatch scenarios covering first dispatch, decline/re-dispatch, cancel/re-dispatch, and contractor availability checks, with Airtable as an operator mirror and PostgreSQL as the single source of truth.
+- **Fault-tolerant payment pipeline** — integrated Stripe Checkout with idempotent webhook processing, deposit/remainder split billing, full-payment edge-case handling, and automatic remainder invoice generation after operator-approved job completion.
 
 ---
 
