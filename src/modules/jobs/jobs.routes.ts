@@ -410,7 +410,11 @@ jobsRouter.post(
         return;
       }
 
-      const remainderCents: number = job.remainder_amount_cents ?? 0;
+      const payments = await getPaymentsByJobId(job.id);
+      const fullyPaid = payments.some(
+        (p) => p.payment_type === 'full' && p.status === 'paid_in_full',
+      );
+      const remainderCents: number = fullyPaid ? 0 : (job.remainder_amount_cents ?? 0);
 
       if (remainderCents > 0) {
         // ── Path A: remainder owed ────────────────────────────────────────────

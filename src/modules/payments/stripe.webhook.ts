@@ -189,7 +189,9 @@ async function handleCheckoutCompleted(
       } else {
         assertTransition(job.status, newJobStatus as any);
         await client.query(
-          'UPDATE jobs SET status = $2, updated_at = NOW() WHERE id = $1',
+          paymentType === 'full'
+            ? 'UPDATE jobs SET status = $2, remainder_amount_cents = 0, updated_at = NOW() WHERE id = $1'
+            : 'UPDATE jobs SET status = $2, updated_at = NOW() WHERE id = $1',
           [job.id, newJobStatus],
         );
       }
