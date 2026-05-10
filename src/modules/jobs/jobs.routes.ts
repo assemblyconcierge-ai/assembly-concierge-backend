@@ -7,7 +7,7 @@ import {
   searchJobs,
   updateJobStatus,
 } from './job.repository';
-import { queryOne } from '../../db/pool';
+import { queryOne, query } from '../../db/pool';
 import { getPaymentsByJobId, createJobCheckoutSession } from '../payments/payment.service';
 import { getAuditEvents } from '../audit/audit.service';
 import { calculatePricing } from '../pricing/pricing.service';
@@ -481,7 +481,10 @@ jobsRouter.post(
       } else {
         // ── Path B: no remainder owed (paid in full at deposit) ───────────────
         assertTransition(job.status, 'closed_paid');
-        await updateJobStatus(job.id, 'closed_paid');
+        await query(
+          'UPDATE jobs SET status = $2, completed_at = NOW(), updated_at = NOW() WHERE id = $1',
+          [job.id, 'closed_paid'],
+        );
         await recordAuditEvent({
           aggregateType: 'job',
           aggregateId: job.id,

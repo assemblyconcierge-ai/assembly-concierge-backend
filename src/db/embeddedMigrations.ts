@@ -523,4 +523,14 @@ ALTER TABLE jobs
   ADD COLUMN IF NOT EXISTS completion_reported_at TIMESTAMPTZ;
 `,
   },
+  {
+    filename: '010_add_otw_and_completion_fields.sql',
+    sql: `
+ALTER TABLE jobs
+  ADD COLUMN IF NOT EXISTS completed_at              TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS contractor_en_route_at    TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS customer_otw_text_sent_at TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS customer_otw_text_status  TEXT;
+`,
+  },
 ];

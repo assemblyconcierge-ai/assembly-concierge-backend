@@ -39,6 +39,10 @@ export interface JobRow {
   public_pay_token: string | null;
   airtable_record_id: string | null;
   completion_reported_at: Date | null;
+  completed_at: Date | null;
+  contractor_en_route_at: Date | null;
+  customer_otw_text_sent_at: Date | null;
+  customer_otw_text_status: string | null;
   created_at: Date;
   updated_at: Date;
 }

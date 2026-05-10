@@ -251,6 +251,10 @@ async function processSyncJob(jobId: string, correlationId: string): Promise<voi
       // Backend mirror fields
       updated_at: Date;
       completion_reported_at: Date | null;
+      completed_at: Date | null;
+      contractor_en_route_at: Date | null;
+      customer_otw_text_sent_at: Date | null;
+      customer_otw_text_status: string | null;
       // Most recent dispatch status (null if no dispatch exists yet)
       dispatch_status: string | null;
     }>(
@@ -265,6 +269,8 @@ async function processSyncJob(jobId: string, correlationId: string): Promise<voi
          j.scheduled_start_at, j.scheduled_end_at, j.timezone,
          j.custom_job_details,
          j.completion_reported_at,
+         j.completed_at, j.contractor_en_route_at,
+         j.customer_otw_text_sent_at, j.customer_otw_text_status,
          j.airtable_record_id, j.created_at, j.updated_at,
          c.full_name AS customer_full_name, c.email AS customer_email, c.phone_e164 AS customer_phone,
          COALESCE(st.code, 'unknown') AS service_type_code,
@@ -362,6 +368,16 @@ async function processSyncJob(jobId: string, correlationId: string): Promise<voi
       completionReportedAt: row.completion_reported_at
         ? row.completion_reported_at.toISOString()
         : undefined,
+      completedAt: row.completed_at
+        ? row.completed_at.toISOString()
+        : undefined,
+      contractorEnRouteAt: row.contractor_en_route_at
+        ? row.contractor_en_route_at.toISOString()
+        : undefined,
+      customerOtwTextSentAt: row.customer_otw_text_sent_at
+        ? row.customer_otw_text_sent_at.toISOString()
+        : undefined,
+      customerOtwTextStatus: row.customer_otw_text_status ?? undefined,
       dispatchStatus: 'pending',   // always "Pending Dispatch" at intake
       rushType: row.rush_type ?? undefined,
       // Financial split fields (from jobs table columns added by migration 005)
@@ -388,6 +404,10 @@ async function processSyncJob(jobId: string, correlationId: string): Promise<voi
         record.completionReportedAt,
         record.remainingBalanceCents,
         row.dispatch_status ?? undefined,
+        record.completedAt,
+        record.contractorEnRouteAt,
+        record.customerOtwTextSentAt,
+        record.customerOtwTextStatus,
       );
       log.info({ airtableRecordId: row.airtable_record_id }, 'Airtable record updated');
     } else {

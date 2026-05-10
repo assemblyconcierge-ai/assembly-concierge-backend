@@ -148,6 +148,27 @@ function mapAppointmentWindow(raw?: string): string | undefined {
   return mapped;
 }
 
+/** Maps customer_otw_text_status → Airtable "Customer OTW Text Status" Single Select option */
+const CUSTOMER_OTW_TEXT_STATUS_MAP: Record<string, string> = {
+  sent:    'sent',
+  failed:  'failed',
+  skipped: 'skipped',
+};
+const CUSTOMER_OTW_TEXT_STATUS_FALLBACK = 'skipped';
+
+function mapCustomerOtwTextStatus(status?: string): string {
+  if (!status) return CUSTOMER_OTW_TEXT_STATUS_FALLBACK;
+  const mapped = CUSTOMER_OTW_TEXT_STATUS_MAP[status?.toLowerCase?.()];
+  if (!mapped) {
+    logger.warn(
+      { internalValue: status, fallback: CUSTOMER_OTW_TEXT_STATUS_FALLBACK, field: 'Customer OTW Text Status' },
+      '[Airtable] Unrecognised customer_otw_text_status — using fallback',
+    );
+    return CUSTOMER_OTW_TEXT_STATUS_FALLBACK;
+  }
+  return mapped;
+}
+
 /** Maps internal dispatch_status enum → Airtable "Dispatch Status" Single Select option */
 const DISPATCH_STATUS_MAP: Record<string, string> = {
   pending:    'Pending Dispatch',
@@ -208,6 +229,10 @@ export interface AirtableJobRecord {
   dispatchStatus?: string;       // defaults to "Pending Dispatch" at intake
   rushType?: string;             // "No Rush" | "Same-day (+30)" | "Next-day (+20)"
   completionReportedAt?: string; // ISO 8601 timestamp set when contractor texts DONE/FINISH
+  completedAt?: string;           // ISO 8601 timestamp set when job reaches closed_paid
+  contractorEnRouteAt?: string;   // ISO 8601 timestamp set when contractor texts OTW
+  customerOtwTextSentAt?: string; // ISO 8601 timestamp set when customer OTW SMS sends
+  customerOtwTextStatus?: string; // sent | failed | skipped
   // Financial split fields
   basePriceCents?: number;
   rushFeeAmountCents?: number;          // = rushAmountCents
@@ -315,6 +340,18 @@ export async function syncJobToAirtable(record: AirtableJobRecord): Promise<stri
   if (record.completionReportedAt) {
     fields['Completion Reported At'] = record.completionReportedAt;
   }
+  if (record.completedAt) {
+    fields['Completed At'] = record.completedAt;
+  }
+  if (record.contractorEnRouteAt) {
+    fields['Contractor En Route At'] = record.contractorEnRouteAt;
+  }
+  if (record.customerOtwTextSentAt) {
+    fields['Customer OTW Text Sent At'] = record.customerOtwTextSentAt;
+  }
+  if (record.customerOtwTextStatus) {
+    fields['Customer OTW Text Status'] = mapCustomerOtwTextStatus(record.customerOtwTextStatus);
+  }
 
   // Dispatch status — always set at intake (defaults to Pending Dispatch)
   fields['Dispatch Status'] = mapDispatchStatus(record.dispatchStatus);
@@ -381,6 +418,10 @@ export async function updateAirtableStatus(
   completionReportedAt?: string,
   remainingBalanceCents?: number,
   dispatchStatus?: string,
+  completedAt?: string,
+  contractorEnRouteAt?: string,
+  customerOtwTextSentAt?: string,
+  customerOtwTextStatus?: string,
 ): Promise<void> {
   const now = new Date().toISOString();
   const fields: Record<string, unknown> = {
@@ -413,6 +454,19 @@ export async function updateAirtableStatus(
 
   if (remainingBalanceCents !== undefined) {
     fields['Remaining Balance'] = remainingBalanceCents / 100;
+  }
+
+  if (completedAt) {
+    fields['Completed At'] = completedAt;
+  }
+  if (contractorEnRouteAt) {
+    fields['Contractor En Route At'] = contractorEnRouteAt;
+  }
+  if (customerOtwTextSentAt) {
+    fields['Customer OTW Text Sent At'] = customerOtwTextSentAt;
+  }
+  if (customerOtwTextStatus !== undefined) {
+    fields['Customer OTW Text Status'] = mapCustomerOtwTextStatus(customerOtwTextStatus);
   }
 
   await updateAirtableRecord(recordId, fields);

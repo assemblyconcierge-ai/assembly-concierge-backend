@@ -179,7 +179,7 @@ async function handleCheckoutCompleted(
         assertTransition(job.status, 'awaiting_remainder_payment');
         assertTransition('awaiting_remainder_payment', 'closed_paid');
         await client.query(
-          'UPDATE jobs SET status = $2, updated_at = NOW() WHERE id = $1',
+          'UPDATE jobs SET status = $2, completed_at = NOW(), updated_at = NOW() WHERE id = $1',
           [job.id, 'closed_paid'],
         );
         log.info(
@@ -191,7 +191,9 @@ async function handleCheckoutCompleted(
         await client.query(
           paymentType === 'full'
             ? 'UPDATE jobs SET status = $2, remainder_amount_cents = 0, updated_at = NOW() WHERE id = $1'
-            : 'UPDATE jobs SET status = $2, updated_at = NOW() WHERE id = $1',
+            : newJobStatus === 'closed_paid'
+              ? 'UPDATE jobs SET status = $2, completed_at = NOW(), updated_at = NOW() WHERE id = $1'
+              : 'UPDATE jobs SET status = $2, updated_at = NOW() WHERE id = $1',
           [job.id, newJobStatus],
         );
       }

@@ -5,10 +5,11 @@
  * Applies fuzzy keyword matching and drives job/dispatch state transitions.
  */
 
-import { queryOne, withTransaction } from '../../db/pool';
+import { queryOne, withTransaction, query } from '../../db/pool';
 import { assertTransition, JobStatus } from '../jobs/job.stateMachine';
 import { recordAuditEvent } from '../audit/audit.service';
 import { enqueueAirtableSync } from '../airtable-sync/airtableSync.queue';
+import { sendSms } from './quo.adapter';
 import { logger } from '../../common/logger';
 import { normalizePhone } from '../../common/utils';
 
@@ -74,6 +75,8 @@ interface ActiveJobRow {
   assignment_id: string;
   assignment_status: string;
   dispatch_id: string | null;
+  customer_phone: string;
+  customer_otw_text_sent_at: Date | null;
 }
 
 // ── Target job status per command ─────────────────────────────────────────────
@@ -132,15 +135,18 @@ export async function processSmsWebhook(
   //    assigned or scheduled (awaiting OTW/DONE).
   const activeJob = await queryOne<ActiveJobRow>(
     `SELECT
-       ca.id                AS assignment_id,
-       ca.status            AS assignment_status,
+       ca.id                        AS assignment_id,
+       ca.status                    AS assignment_status,
        ca.dispatch_id,
-       j.id                 AS job_id,
+       j.id                         AS job_id,
        j.job_key,
-       j.status             AS job_status,
-       j.airtable_record_id
+       j.status                     AS job_status,
+       j.airtable_record_id,
+       j.customer_otw_text_sent_at,
+       cust.phone_e164              AS customer_phone
      FROM contractor_assignments ca
      JOIN jobs j ON j.id = ca.job_id
+     JOIN customers cust ON cust.id = j.customer_id
     WHERE ca.contractor_id = $1
       AND ca.status IN ('pending', 'accepted')
       AND j.status IN ('dispatch_in_progress', 'assigned', 'scheduled')
@@ -241,8 +247,15 @@ export async function processSmsWebhook(
           WHERE id = $1`,
         [activeJob.assignment_id],
       );
+    } else if (command === 'OTW') {
+      await client.query(
+        `UPDATE jobs
+            SET contractor_en_route_at = COALESCE(contractor_en_route_at, NOW()),
+                updated_at = NOW()
+          WHERE id = $1`,
+        [activeJob.job_id],
+      );
     }
-    // OTW has no dispatch/assignment side effect beyond the job status update above
 
     // Audit record
     await recordAuditEvent({
@@ -275,6 +288,54 @@ export async function processSmsWebhook(
     },
     '[SMS] Command processed',
   );
+
+  // OTW: send customer notification (never throws — never blocks job flow)
+  if (command === 'OTW') {
+    try {
+      const currentJob = await queryOne<{ customer_otw_text_sent_at: Date | null }>(
+        'SELECT customer_otw_text_sent_at FROM jobs WHERE id = $1',
+        [activeJob.job_id],
+      );
+      if (!currentJob?.customer_otw_text_sent_at) {
+        const phone = activeJob.customer_phone;
+
+        if (!phone) {
+          await query(
+            `UPDATE jobs SET customer_otw_text_status = $2, updated_at = NOW() WHERE id = $1`,
+            [activeJob.job_id, 'skipped'],
+          );
+        } else {
+          const firstName = contractor.full_name.split(' ')[0];
+          const message = firstName
+            ? `Your Assembly Concierge contractor, ${firstName}, is on the way for your appointment. Please keep your phone nearby in case they need to reach you.`
+            : `Your Assembly Concierge contractor is on the way for your appointment. Please keep your phone nearby in case they need to reach you.`;
+
+          let textStatus: 'sent' | 'failed' | 'skipped' = 'skipped';
+          let sentAt: string | null = null;
+
+          try {
+            const result = await sendSms(phone, message, correlationId);
+            if (result.messageId) {
+              textStatus = 'sent';
+              sentAt = new Date().toISOString();
+            } else {
+              textStatus = 'skipped';
+            }
+          } catch (smsErr) {
+            textStatus = 'failed';
+            log.warn({ err: smsErr }, '[SMS] Customer OTW notification failed');
+          }
+
+          await query(
+            `UPDATE jobs SET customer_otw_text_sent_at = $2, customer_otw_text_status = $3, updated_at = NOW() WHERE id = $1`,
+            [activeJob.job_id, sentAt, textStatus],
+          );
+        }
+      }
+    } catch (err) {
+      log.warn({ err }, '[SMS] Customer OTW notification block failed');
+    }
+  }
 
   // 5. Enqueue Airtable sync (fire-and-forget)
   try {
