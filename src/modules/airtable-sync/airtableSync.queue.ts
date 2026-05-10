@@ -251,6 +251,8 @@ async function processSyncJob(jobId: string, correlationId: string): Promise<voi
       // Backend mirror fields
       updated_at: Date;
       completion_reported_at: Date | null;
+      // Most recent dispatch status (null if no dispatch exists yet)
+      dispatch_status: string | null;
     }>(
       `SELECT
          j.id, j.job_key, j.city_detected, j.service_area_status, j.rush_requested,
@@ -281,6 +283,12 @@ async function processSyncJob(jobId: string, correlationId: string): Promise<voi
          ORDER BY created_at DESC LIMIT 1
        ) p ON TRUE
        LEFT JOIN intake_submissions s ON s.id = j.intake_submission_id
+       LEFT JOIN LATERAL (
+         SELECT status AS dispatch_status
+         FROM dispatches
+         WHERE job_id = j.id
+         ORDER BY created_at DESC LIMIT 1
+       ) d ON TRUE
        WHERE j.id = $1`,
       [jobId],
     );
@@ -378,6 +386,7 @@ async function processSyncJob(jobId: string, correlationId: string): Promise<voi
         undefined,
         record.completionReportedAt,
         record.remainingBalanceCents,
+        row.dispatch_status ?? undefined,
       );
       log.info({ airtableRecordId: row.airtable_record_id }, 'Airtable record updated');
     } else {

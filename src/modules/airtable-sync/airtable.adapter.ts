@@ -156,6 +156,7 @@ const DISPATCH_STATUS_MAP: Record<string, string> = {
   declined:   'Declined',
   completed:  'Completed',
   cancelled:  'Cancelled',
+  expired:    'Cancelled',
 };
 const DISPATCH_STATUS_FALLBACK = 'Pending Dispatch';
 
@@ -379,6 +380,7 @@ export async function updateAirtableStatus(
   syncError?: string,
   completionReportedAt?: string,
   remainingBalanceCents?: number,
+  dispatchStatus?: string,
 ): Promise<void> {
   const now = new Date().toISOString();
   const fields: Record<string, unknown> = {
@@ -401,8 +403,8 @@ export async function updateAirtableStatus(
   // Backend Sync Error: write empty string on success to clear any previous error
   fields['Backend Sync Error'] = syncError ?? '';
 
-  if (internalStatus === 'assigned') {
-    fields['Dispatch Status'] = 'Accepted';
+  if (dispatchStatus !== undefined) {
+    fields['Dispatch Status'] = mapDispatchStatus(dispatchStatus);
   }
 
   if (completionReportedAt) {
