@@ -13,11 +13,7 @@ import { sendSms } from './quo.adapter';
 import { logger } from '../../common/logger';
 import { normalizePhone } from '../../common/utils';
 
-// ── Command types ─────────────────────────────────────────────────────────────
-
 export type SmsCommand = 'CONFIRM' | 'DECLINE' | 'OTW' | 'DONE' | 'FINISH';
-
-// ── Keyword lists ─────────────────────────────────────────────────────────────
 
 const CONFIRM_KEYWORDS = [
   'confirm', 'yes', 'yeah', 'ok', 'sure', 'accept',
@@ -40,26 +36,18 @@ const FINISH_KEYWORDS = [
   'job completed', 'work completed', 'all finished',
 ];
 
-// ── Parser ────────────────────────────────────────────────────────────────────
-
 /**
  * Fuzzy-match a raw SMS body against known command keyword lists.
- * Checks are ordered: CONFIRM before DECLINE so "yes" doesn't accidentally
- * match "sorry" type logic, and multi-word phrases are checked on normalized text.
  */
 export function parseCommand(body: string): SmsCommand | null {
   const normalized = body.trim().toLowerCase();
   if (CONFIRM_KEYWORDS.some((kw) => normalized.includes(kw))) return 'CONFIRM';
   if (DECLINE_KEYWORDS.some((kw) => normalized.includes(kw))) return 'DECLINE';
   if (OTW_KEYWORDS.some((kw) => normalized.includes(kw))) return 'OTW';
-  // FINISH is checked before DONE to avoid 'finished' matching DONE_KEYWORDS first.
-  // Both commands resolve to completion_reported; DONE is kept for backward compat.
   if (FINISH_KEYWORDS.some((kw) => normalized.includes(kw))) return 'FINISH';
   if (DONE_KEYWORDS.some((kw) => normalized.includes(kw))) return 'DONE';
   return null;
 }
-
-// ── DB row types ──────────────────────────────────────────────────────────────
 
 interface ContractorRow {
   id: string;
@@ -79,23 +67,54 @@ interface ActiveJobRow {
   customer_otw_text_sent_at: Date | null;
 }
 
-// ── Target job status per command ─────────────────────────────────────────────
-//
-// OTW maps to 'assigned' so it does not advance the core job lifecycle state.
-// The job stays assigned; OTW is an operational signal only (contractor en route).
-// Customer notification / contractor_en_route_at fields will be added separately.
+type AssignmentStatus = 'pending' | 'accepted';
 
-const COMMAND_TARGET_STATUS: Record<SmsCommand, JobStatus> = {
-  CONFIRM: 'assigned',
-  DECLINE: 'ready_for_dispatch',
-  OTW:     'assigned',
-  // DONE and FINISH both map to completion_reported — single contractor-reported completion state.
-  // DONE is kept for backward compatibility; FINISH is the preferred keyword.
-  DONE:    'completion_reported',
-  FINISH:  'completion_reported',
+interface CommandRule {
+  assignmentStatuses: ReadonlySet<AssignmentStatus>;
+  jobStatuses: ReadonlySet<JobStatus>;
+  targetJobStatus: JobStatus | null;
+}
+
+const COMMAND_RULES: Record<SmsCommand, CommandRule> = {
+  CONFIRM: {
+    assignmentStatuses: new Set(['pending']),
+    jobStatuses: new Set(['dispatch_in_progress']),
+    targetJobStatus: 'assigned',
+  },
+  DECLINE: {
+    assignmentStatuses: new Set(['pending', 'accepted']),
+    jobStatuses: new Set(['dispatch_in_progress', 'assigned']),
+    targetJobStatus: 'ready_for_dispatch',
+  },
+  OTW: {
+    assignmentStatuses: new Set(['accepted']),
+    jobStatuses: new Set(['assigned']),
+    targetJobStatus: null,
+  },
+  DONE: {
+    assignmentStatuses: new Set(['accepted']),
+    jobStatuses: new Set(['assigned']),
+    targetJobStatus: 'completion_reported',
+  },
+  FINISH: {
+    assignmentStatuses: new Set(['accepted']),
+    jobStatuses: new Set(['assigned']),
+    targetJobStatus: 'completion_reported',
+  },
 };
 
-// ── Main entry point ──────────────────────────────────────────────────────────
+function isAssignmentStatus(status: string): status is AssignmentStatus {
+  return status === 'pending' || status === 'accepted';
+}
+
+function isCommandAllowed(command: SmsCommand, activeJob: ActiveJobRow): boolean {
+  const rule = COMMAND_RULES[command];
+  return (
+    isAssignmentStatus(activeJob.assignment_status) &&
+    rule.assignmentStatuses.has(activeJob.assignment_status) &&
+    rule.jobStatuses.has(activeJob.job_status)
+  );
+}
 
 export async function processSmsWebhook(
   rawPhone: string,
@@ -106,7 +125,6 @@ export async function processSmsWebhook(
 
   const phoneE164 = normalizePhone(rawPhone);
 
-  // 1. Look up contractor by E.164 phone
   const contractor = await queryOne<ContractorRow>(
     `SELECT id, full_name, phone_e164
        FROM contractors
@@ -116,23 +134,19 @@ export async function processSmsWebhook(
   );
 
   if (!contractor) {
-    log.info({ phoneE164 }, '[SMS] No active contractor found for phone — ignoring');
+    log.info({ phoneE164 }, '[SMS] No active contractor found for phone - ignoring');
     return;
   }
 
-  // 2. Parse command
   const command = parseCommand(messageBody);
   if (!command) {
     log.info(
       { contractorId: contractor.id, messageBody },
-      '[SMS] Message not recognized — ignoring',
+      '[SMS] Message not recognized - ignoring',
     );
     return;
   }
 
-  // 3. Find the active job assigned to this contractor
-  //    Active statuses: dispatch_in_progress (awaiting confirm/decline),
-  //    assigned or scheduled (awaiting OTW/DONE).
   const activeJob = await queryOne<ActiveJobRow>(
     `SELECT
        ca.id                        AS assignment_id,
@@ -149,7 +163,7 @@ export async function processSmsWebhook(
      JOIN customers cust ON cust.id = j.customer_id
     WHERE ca.contractor_id = $1
       AND ca.status IN ('pending', 'accepted')
-      AND j.status IN ('dispatch_in_progress', 'assigned', 'scheduled')
+      AND j.status IN ('dispatch_in_progress', 'assigned')
     ORDER BY ca.assigned_at DESC
     LIMIT 1`,
     [contractor.id],
@@ -158,55 +172,59 @@ export async function processSmsWebhook(
   if (!activeJob) {
     log.info(
       { contractorId: contractor.id, command },
-      '[SMS] No active job found for contractor — ignoring',
+      '[SMS] No active job found for contractor - ignoring',
     );
     return;
   }
 
-  const newJobStatus = COMMAND_TARGET_STATUS[command];
+  const rule = COMMAND_RULES[command];
 
-  // Guard: DONE/FINISH require an accepted assignment.
-  // Without this check the state machine blocks the job transition but the
-  // assignment side-effect still runs, leaving assignment.status = completed
-  // on a pending assignment — corrupted state.
-  if ((command === 'DONE' || command === 'FINISH') && activeJob.assignment_status !== 'accepted') {
+  if (!isCommandAllowed(command, activeJob)) {
     log.warn(
       {
         contractorId: contractor.id,
         jobId: activeJob.job_id,
         jobKey: activeJob.job_key,
         command,
+        jobStatus: activeJob.job_status,
         assignmentStatus: activeJob.assignment_status,
       },
-      '[SMS] DONE/FINISH received before assignment accepted — ignoring',
+      '[SMS] Command not valid for current assignment/job state - ignoring',
     );
     return;
   }
 
-  // 4. Apply state changes in a single transaction
-  await withTransaction(async (client) => {
-    // Job status transition
+  if (rule.targetJobStatus) {
     try {
-      assertTransition(activeJob.job_status, newJobStatus);
-      const isCompletion = newJobStatus === 'completion_reported';
+      assertTransition(activeJob.job_status, rule.targetJobStatus);
+    } catch (err) {
+      log.warn(
+        {
+          err,
+          contractorId: contractor.id,
+          jobId: activeJob.job_id,
+          jobKey: activeJob.job_key,
+          command,
+          from: activeJob.job_status,
+          to: rule.targetJobStatus,
+        },
+        '[SMS] Command target transition rejected by state machine - ignoring',
+      );
+      return;
+    }
+  }
+
+  await withTransaction(async (client) => {
+    if (rule.targetJobStatus) {
+      const isCompletion = rule.targetJobStatus === 'completion_reported';
       await client.query(
         isCompletion
           ? 'UPDATE jobs SET status = $2, completion_reported_at = NOW(), updated_at = NOW() WHERE id = $1'
           : 'UPDATE jobs SET status = $2, updated_at = NOW() WHERE id = $1',
-        [activeJob.job_id, newJobStatus],
+        [activeJob.job_id, rule.targetJobStatus],
       );
-    } catch {
-      // Already at target or transition not valid — log and continue so
-      // dispatch/assignment side effects still apply.
-      if (activeJob.job_status !== newJobStatus) {
-        log.warn(
-          { from: activeJob.job_status, to: newJobStatus, command },
-          '[SMS] Job state transition not valid — skipping job status update',
-        );
-      }
     }
 
-    // Command-specific side effects
     if (command === 'CONFIRM') {
       await client.query(
         `UPDATE contractor_assignments
@@ -240,7 +258,6 @@ export async function processSmsWebhook(
         );
       }
     } else if (command === 'DONE' || command === 'FINISH') {
-      // Both DONE and FINISH mark the assignment completed
       await client.query(
         `UPDATE contractor_assignments
             SET status = 'completed', completed_at = NOW()
@@ -257,7 +274,6 @@ export async function processSmsWebhook(
       );
     }
 
-    // Audit record
     await recordAuditEvent({
       aggregateType: 'job',
       aggregateId: activeJob.job_id,
@@ -270,7 +286,7 @@ export async function processSmsWebhook(
         messageBody,
         command,
         fromStatus: activeJob.job_status,
-        toStatus: newJobStatus,
+        toStatus: rule.targetJobStatus ?? activeJob.job_status,
       },
       correlationId,
       client,
@@ -284,12 +300,11 @@ export async function processSmsWebhook(
       jobKey: activeJob.job_key,
       command,
       from: activeJob.job_status,
-      to: newJobStatus,
+      to: rule.targetJobStatus ?? activeJob.job_status,
     },
     '[SMS] Command processed',
   );
 
-  // OTW: send customer notification (never throws — never blocks job flow)
   if (command === 'OTW') {
     try {
       const currentJob = await queryOne<{ customer_otw_text_sent_at: Date | null }>(
@@ -308,7 +323,7 @@ export async function processSmsWebhook(
           const firstName = contractor.full_name.split(' ')[0];
           const message = firstName
             ? `Your Assembly Concierge contractor, ${firstName}, is on the way for your appointment. Please keep your phone nearby in case they need to reach you.`
-            : `Your Assembly Concierge contractor is on the way for your appointment. Please keep your phone nearby in case they need to reach you.`;
+            : 'Your Assembly Concierge contractor is on the way for your appointment. Please keep your phone nearby in case they need to reach you.';
 
           let textStatus: 'sent' | 'failed' | 'skipped' = 'skipped';
           let sentAt: string | null = null;
@@ -337,7 +352,6 @@ export async function processSmsWebhook(
     }
   }
 
-  // 5. Enqueue Airtable sync (fire-and-forget)
   try {
     await enqueueAirtableSync({ jobId: activeJob.job_id, correlationId });
   } catch (err) {
