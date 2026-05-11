@@ -34,19 +34,30 @@ function activeJob(overrides: Record<string, unknown> = {}) {
     dispatch_id: 'dispatch-1',
     customer_phone: '+14045550200',
     customer_otw_text_sent_at: null,
+    address_line1: '123 Main St',
+    address_line2: null,
+    address_city: 'Atlanta',
+    address_state: 'GA',
+    address_postal_code: '30301',
     ...overrides,
   };
 }
 
-function setupDb(job = activeJob()) {
+/**
+ * Sets up standard DB mocks for a webhook call.
+ * Pass a single job or an array; they become the return value of the
+ * first query() call (the active-job lookup).
+ */
+function setupDb(jobsOrJob: ReturnType<typeof activeJob> | ReturnType<typeof activeJob>[] = activeJob()) {
+  const jobs = Array.isArray(jobsOrJob) ? jobsOrJob : [jobsOrJob];
   const mockQueryOne = vi.mocked(queryOne);
   const mockQuery = vi.mocked(query);
   const mockWithTransaction = vi.mocked(withTransaction);
   const clientQuery = vi.fn(async () => ({ rows: [], rowCount: 0 }));
 
-  mockQueryOne.mockResolvedValueOnce(contractor as any);
-  mockQueryOne.mockResolvedValueOnce(job as any);
-  mockQuery.mockResolvedValue([]);
+  mockQueryOne.mockResolvedValueOnce(contractor as any);   // contractor lookup
+  mockQuery.mockResolvedValueOnce(jobs as any);             // active-job lookup (returns array)
+  mockQuery.mockResolvedValue([]);                          // subsequent query calls (UPDATEs etc.)
   mockWithTransaction.mockImplementation(async (fn: any) => fn({ query: clientQuery }));
 
   return { clientQuery, mockQueryOne, mockQuery, mockWithTransaction };
@@ -60,6 +71,10 @@ beforeEach(() => {
   mockSendSms.mockResolvedValue({ messageId: 'msg-1' });
   mockRecordAuditEvent.mockResolvedValue(undefined);
 });
+
+// ---------------------------------------------------------------------------
+// Existing lifecycle safety tests (fc33ffe behaviour preserved)
+// ---------------------------------------------------------------------------
 
 describe('processSmsWebhook command state safety', () => {
   it('accepts CONFIRM only for pending dispatch_in_progress assignments', async () => {
@@ -130,7 +145,8 @@ describe('processSmsWebhook command state safety', () => {
       expect.stringContaining('customer_otw_text_sent_at = $2'),
       ['job-1', expect.any(String), 'sent'],
     );
-    expect(mockQuery.mock.invocationCallOrder[0]).toBeLessThan(
+    // OTW text UPDATE (query index 1) must precede Airtable sync
+    expect(mockQuery.mock.invocationCallOrder[1]).toBeLessThan(
       vi.mocked(enqueueAirtableSync).mock.invocationCallOrder[0],
     );
   });
@@ -145,7 +161,7 @@ describe('processSmsWebhook command state safety', () => {
     await processSmsWebhook('+1 (404) 555-0100', 'otw', 'corr-1');
 
     expect(mockSendSms).not.toHaveBeenCalled();
-    expect(mockQuery).not.toHaveBeenCalled();
+    expect(mockQuery).toHaveBeenCalledTimes(1); // only the active-job lookup; no OTW text UPDATE
     expect(enqueueAirtableSync).toHaveBeenCalledWith({ jobId: 'job-1', correlationId: 'corr-1' });
   });
 
@@ -195,6 +211,213 @@ describe('processSmsWebhook command state safety', () => {
     expect(clientQuery).toHaveBeenCalledWith(
       expect.stringContaining("SET status = 'declined'"),
       ['dispatch-1'],
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Job-key routing and ambiguity guard
+// ---------------------------------------------------------------------------
+
+describe('processSmsWebhook job-key routing', () => {
+  it('plain CONFIRM works when exactly one active job exists', async () => {
+    const { clientQuery } = setupDb(activeJob({
+      job_key: 'AC-2026-EPME',
+    }));
+
+    await processSmsWebhook('+1 (404) 555-0100', 'confirm', 'corr-1');
+
+    expect(clientQuery).toHaveBeenCalledWith(
+      expect.stringContaining('UPDATE jobs SET status = $2'),
+      ['job-1', 'assigned'],
+    );
+  });
+
+  it('plain OTW is rejected when multiple active jobs exist and sends ambiguity SMS', async () => {
+    const job1 = activeJob({ job_id: 'job-1', job_key: 'AC-2026-EPME', assignment_status: 'accepted', job_status: 'assigned' });
+    const job2 = activeJob({ job_id: 'job-2', job_key: 'AC-2026-XXXX', assignment_status: 'accepted', job_status: 'assigned' });
+    const { mockWithTransaction } = setupDb([job1, job2]);
+
+    await processSmsWebhook('+1 (404) 555-0100', 'otw', 'corr-1');
+
+    expect(mockWithTransaction).not.toHaveBeenCalled();
+    expect(mockSendSms).toHaveBeenCalledWith(
+      contractor.phone_e164,
+      expect.stringContaining('multiple active Assembly Concierge jobs'),
+      'corr-1',
+    );
+    expect(enqueueAirtableSync).not.toHaveBeenCalled();
+  });
+
+  it('OTW with dashed job key routes to matching job', async () => {
+    const { clientQuery, mockQueryOne } = setupDb(activeJob({
+      job_key: 'AC-2026-EPME',
+      assignment_status: 'accepted',
+      job_status: 'assigned',
+    }));
+    mockQueryOne.mockResolvedValueOnce({ customer_otw_text_sent_at: null } as any);
+
+    await processSmsWebhook('+1 (404) 555-0100', 'OTW AC-2026-EPME', 'corr-1');
+
+    expect(clientQuery).toHaveBeenCalledWith(
+      expect.stringContaining('contractor_en_route_at = COALESCE'),
+      ['job-1'],
+    );
+    expect(mockSendSms).toHaveBeenCalledWith(
+      '+14045550200',
+      expect.stringContaining('on the way'),
+      'corr-1',
+    );
+  });
+
+  it('OTW with no-dash job key also routes correctly', async () => {
+    const { clientQuery, mockQueryOne } = setupDb(activeJob({
+      job_key: 'AC-2026-EPME',
+      assignment_status: 'accepted',
+      job_status: 'assigned',
+    }));
+    mockQueryOne.mockResolvedValueOnce({ customer_otw_text_sent_at: null } as any);
+
+    await processSmsWebhook('+1 (404) 555-0100', 'otw AC2026EPME', 'corr-1');
+
+    expect(clientQuery).toHaveBeenCalledWith(
+      expect.stringContaining('contractor_en_route_at = COALESCE'),
+      ['job-1'],
+    );
+  });
+
+  it('invalid job key is rejected and sends helper SMS', async () => {
+    const mockQueryOne = vi.mocked(queryOne);
+    const mockQuery = vi.mocked(query);
+    const mockWithTransaction = vi.mocked(withTransaction);
+
+    mockQueryOne.mockResolvedValueOnce(contractor as any);
+    mockQuery.mockResolvedValueOnce([] as any); // keyed lookup finds nothing
+    mockQuery.mockResolvedValue([]);
+
+    await processSmsWebhook('+1 (404) 555-0100', 'confirm AC-2026-XXXX', 'corr-1');
+
+    expect(mockWithTransaction).not.toHaveBeenCalled();
+    expect(mockSendSms).toHaveBeenCalledWith(
+      contractor.phone_e164,
+      expect.stringContaining('could not find an active Assembly Concierge job'),
+      'corr-1',
+    );
+    expect(enqueueAirtableSync).not.toHaveBeenCalled();
+  });
+
+  it('DONE with job key before acceptance is rejected', async () => {
+    const { mockWithTransaction } = setupDb(activeJob({
+      job_key: 'AC-2026-EPME',
+      assignment_status: 'pending',
+      job_status: 'dispatch_in_progress',
+    }));
+
+    await processSmsWebhook('+1 (404) 555-0100', 'done AC-2026-EPME', 'corr-1');
+
+    expect(mockWithTransaction).not.toHaveBeenCalled();
+    expect(mockSendSms).not.toHaveBeenCalled();
+    expect(enqueueAirtableSync).not.toHaveBeenCalled();
+  });
+
+  it('successful CONFIRM sends post-acceptance SMS with full address to contractor', async () => {
+    const { clientQuery } = setupDb(activeJob({
+      job_key: 'AC-2026-EPME',
+      address_line1: '456 Oak Ave',
+      address_line2: null,
+      address_city: 'Marietta',
+      address_state: 'GA',
+      address_postal_code: '30060',
+    }));
+
+    await processSmsWebhook('+1 (404) 555-0100', 'confirm', 'corr-1');
+
+    // DB transition still happens
+    expect(clientQuery).toHaveBeenCalledWith(
+      expect.stringContaining('UPDATE jobs SET status = $2'),
+      ['job-1', 'assigned'],
+    );
+    // Post-CONFIRM SMS sent to contractor phone (not customer)
+    expect(mockSendSms).toHaveBeenCalledWith(
+      contractor.phone_e164,
+      expect.stringContaining('Confirmed for AC-2026-EPME'),
+      'corr-1',
+    );
+    expect(mockSendSms).toHaveBeenCalledWith(
+      contractor.phone_e164,
+      expect.stringContaining('456 Oak Ave'),
+      'corr-1',
+    );
+    expect(mockSendSms).toHaveBeenCalledWith(
+      contractor.phone_e164,
+      expect.stringContaining('Reply OTW AC-2026-EPME when headed there'),
+      'corr-1',
+    );
+    expect(mockSendSms).toHaveBeenCalledWith(
+      contractor.phone_e164,
+      expect.stringContaining('Reply DONE AC-2026-EPME when complete'),
+      'corr-1',
+    );
+  });
+
+  it('successful CONFIRM falls back to city/state/zip when address line1 is missing', async () => {
+    setupDb(activeJob({
+      job_key: 'AC-2026-EPME',
+      address_line1: null,
+      address_city: 'Decatur',
+      address_state: 'GA',
+      address_postal_code: '30030',
+    }));
+
+    await processSmsWebhook('+1 (404) 555-0100', 'confirm', 'corr-1');
+
+    expect(mockSendSms).toHaveBeenCalledWith(
+      contractor.phone_e164,
+      expect.stringContaining('Decatur'),
+      'corr-1',
+    );
+  });
+
+  it('successful DECLINE sends acknowledgement SMS to contractor', async () => {
+    const { clientQuery } = setupDb(activeJob({
+      job_key: 'AC-2026-EPME',
+      assignment_status: 'pending',
+      job_status: 'dispatch_in_progress',
+    }));
+
+    await processSmsWebhook('+1 (404) 555-0100', 'decline', 'corr-1');
+
+    expect(clientQuery).toHaveBeenCalledWith(
+      expect.stringContaining("SET status = 'declined'"),
+      ['assignment-1'],
+    );
+    expect(mockSendSms).toHaveBeenCalledWith(
+      contractor.phone_e164,
+      expect.stringContaining('Declined AC-2026-EPME. No further action needed.'),
+      'corr-1',
+    );
+  });
+
+  it('DONE with job key does not update dispatches', async () => {
+    const { clientQuery } = setupDb(activeJob({
+      job_key: 'AC-2026-EPME',
+      assignment_status: 'accepted',
+      job_status: 'assigned',
+    }));
+
+    await processSmsWebhook('+1 (404) 555-0100', 'done AC-2026-EPME', 'corr-1');
+
+    expect(clientQuery).not.toHaveBeenCalledWith(
+      expect.stringContaining('UPDATE dispatches'),
+      expect.anything(),
+    );
+    expect(clientQuery).toHaveBeenCalledWith(
+      expect.stringContaining('completion_reported_at = NOW()'),
+      ['job-1', 'completion_reported'],
+    );
+    expect(clientQuery).toHaveBeenCalledWith(
+      expect.stringContaining("SET status = 'completed', completed_at = NOW()"),
+      ['assignment-1'],
     );
   });
 });

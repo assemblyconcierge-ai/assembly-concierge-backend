@@ -3,9 +3,10 @@
  *
  * Handles inbound contractor SMS commands from Quo webhooks.
  * Applies fuzzy keyword matching and drives job/dispatch state transitions.
+ * Supports optional full job-key routing to resolve multi-job ambiguity.
  */
 
-import { queryOne, withTransaction, query } from '../../db/pool';
+import { query, queryOne, withTransaction } from '../../db/pool';
 import { assertTransition, JobStatus } from '../jobs/job.stateMachine';
 import { recordAuditEvent } from '../audit/audit.service';
 import { enqueueAirtableSync } from '../airtable-sync/airtableSync.queue';
@@ -14,6 +15,12 @@ import { logger } from '../../common/logger';
 import { normalizePhone } from '../../common/utils';
 
 export type SmsCommand = 'CONFIRM' | 'DECLINE' | 'OTW' | 'DONE' | 'FINISH';
+
+export interface ParsedCommand {
+  command: SmsCommand;
+  /** Normalized job key (dashes removed, uppercase), or null when not present in message */
+  jobKey: string | null;
+}
 
 const CONFIRM_KEYWORDS = [
   'confirm', 'yes', 'yeah', 'ok', 'sure', 'accept',
@@ -36,17 +43,33 @@ const FINISH_KEYWORDS = [
   'job completed', 'work completed', 'all finished',
 ];
 
+// Matches AC-2026-EPME, AC2026EPME, ac-2026-epme, ac2026epme, etc.
+const JOB_KEY_PATTERN = /\b(AC-?\d{4}-?[A-Z0-9]{4})\b/i;
+
+/** Strip non-alphanumeric chars and uppercase - used for DB comparison via REPLACE(UPPER(...), '-', '') */
+function extractJobKey(body: string): string | null {
+  const match = JOB_KEY_PATTERN.exec(body);
+  if (!match) return null;
+  return match[1].replace(/[^A-Za-z0-9]/g, '').toUpperCase();
+}
+
 /**
  * Fuzzy-match a raw SMS body against known command keyword lists.
+ * Also extracts and normalizes an optional full job key (e.g. AC-2026-EPME -> AC2026EPME).
  */
-export function parseCommand(body: string): SmsCommand | null {
+export function parseCommand(body: string): ParsedCommand | null {
   const normalized = body.trim().toLowerCase();
-  if (CONFIRM_KEYWORDS.some((kw) => normalized.includes(kw))) return 'CONFIRM';
-  if (DECLINE_KEYWORDS.some((kw) => normalized.includes(kw))) return 'DECLINE';
-  if (OTW_KEYWORDS.some((kw) => normalized.includes(kw))) return 'OTW';
-  if (FINISH_KEYWORDS.some((kw) => normalized.includes(kw))) return 'FINISH';
-  if (DONE_KEYWORDS.some((kw) => normalized.includes(kw))) return 'DONE';
-  return null;
+  const jobKey = extractJobKey(body);
+
+  let command: SmsCommand | null = null;
+  if (CONFIRM_KEYWORDS.some((kw) => normalized.includes(kw))) command = 'CONFIRM';
+  else if (DECLINE_KEYWORDS.some((kw) => normalized.includes(kw))) command = 'DECLINE';
+  else if (OTW_KEYWORDS.some((kw) => normalized.includes(kw))) command = 'OTW';
+  else if (FINISH_KEYWORDS.some((kw) => normalized.includes(kw))) command = 'FINISH';
+  else if (DONE_KEYWORDS.some((kw) => normalized.includes(kw))) command = 'DONE';
+
+  if (!command) return null;
+  return { command, jobKey };
 }
 
 interface ContractorRow {
@@ -65,6 +88,11 @@ interface ActiveJobRow {
   dispatch_id: string | null;
   customer_phone: string;
   customer_otw_text_sent_at: Date | null;
+  address_line1: string | null;
+  address_line2: string | null;
+  address_city: string | null;
+  address_state: string | null;
+  address_postal_code: string | null;
 }
 
 type AssignmentStatus = 'pending' | 'accepted';
@@ -116,6 +144,71 @@ function isCommandAllowed(command: SmsCommand, activeJob: ActiveJobRow): boolean
   );
 }
 
+// Shared SELECT/FROM/WHERE for active SMS-routable jobs. Callers append key filter or ORDER BY.
+const ACTIVE_JOB_BASE_SQL = `
+  SELECT
+    ca.id                        AS assignment_id,
+    ca.status                    AS assignment_status,
+    ca.dispatch_id,
+    j.id                         AS job_id,
+    j.job_key,
+    j.status                     AS job_status,
+    j.airtable_record_id,
+    j.customer_otw_text_sent_at,
+    cust.phone_e164              AS customer_phone,
+    a.line1                      AS address_line1,
+    a.line2                      AS address_line2,
+    a.city                       AS address_city,
+    a.state                      AS address_state,
+    a.postal_code                AS address_postal_code
+  FROM contractor_assignments ca
+  JOIN jobs j ON j.id = ca.job_id
+  JOIN customers cust ON cust.id = j.customer_id
+  LEFT JOIN addresses a ON a.id = j.address_id
+ WHERE ca.contractor_id = $1
+   AND ca.status IN ('pending', 'accepted')
+   AND j.status IN ('dispatch_in_progress', 'assigned')`;
+
+interface WarnLogger {
+  warn(obj: Record<string, unknown>, msg: string): void;
+}
+
+function buildPostConfirmSms(activeJob: ActiveJobRow, log: WarnLogger): string {
+  const { job_key: jobKey } = activeJob;
+  let addressStr: string;
+
+  if (activeJob.address_line1 && activeJob.address_city) {
+    const lines: string[] = [activeJob.address_line1];
+    if (activeJob.address_line2) lines.push(activeJob.address_line2);
+    const cityState = [activeJob.address_city, activeJob.address_state].filter(Boolean).join(', ');
+    const cityStateZip = activeJob.address_postal_code
+      ? `${cityState} ${activeJob.address_postal_code}`
+      : cityState;
+    if (cityStateZip) lines.push(cityStateZip);
+    addressStr = lines.join('\n');
+  } else {
+    log.warn(
+      { jobId: activeJob.job_id, jobKey },
+      '[SMS] Incomplete address for post-CONFIRM SMS - falling back to city/state/zip',
+    );
+    addressStr = [activeJob.address_city, activeJob.address_state, activeJob.address_postal_code]
+      .filter(Boolean)
+      .join(', ');
+  }
+
+  return [
+    `Confirmed for ${jobKey}.`,
+    '',
+    'Address:',
+    addressStr,
+    '',
+    'Full job details, notes, and photos will be provided separately.',
+    '',
+    `Reply OTW ${jobKey} when headed there.`,
+    `Reply DONE ${jobKey} when complete.`,
+  ].join('\n');
+}
+
 export async function processSmsWebhook(
   rawPhone: string,
   messageBody: string,
@@ -138,8 +231,8 @@ export async function processSmsWebhook(
     return;
   }
 
-  const command = parseCommand(messageBody);
-  if (!command) {
+  const parsed = parseCommand(messageBody);
+  if (!parsed) {
     log.info(
       { contractorId: contractor.id, messageBody },
       '[SMS] Message not recognized - ignoring',
@@ -147,36 +240,72 @@ export async function processSmsWebhook(
     return;
   }
 
-  const activeJob = await queryOne<ActiveJobRow>(
-    `SELECT
-       ca.id                        AS assignment_id,
-       ca.status                    AS assignment_status,
-       ca.dispatch_id,
-       j.id                         AS job_id,
-       j.job_key,
-       j.status                     AS job_status,
-       j.airtable_record_id,
-       j.customer_otw_text_sent_at,
-       cust.phone_e164              AS customer_phone
-     FROM contractor_assignments ca
-     JOIN jobs j ON j.id = ca.job_id
-     JOIN customers cust ON cust.id = j.customer_id
-    WHERE ca.contractor_id = $1
-      AND ca.status IN ('pending', 'accepted')
-      AND j.status IN ('dispatch_in_progress', 'assigned')
-    ORDER BY ca.assigned_at DESC
-    LIMIT 1`,
-    [contractor.id],
-  );
+  const { command, jobKey } = parsed;
 
-  if (!activeJob) {
-    log.info(
-      { contractorId: contractor.id, command },
-      '[SMS] No active job found for contractor - ignoring',
+  // Active job lookup with job-key routing
+  let activeJobs: ActiveJobRow[];
+
+  if (jobKey) {
+    activeJobs = await query<ActiveJobRow>(
+      `${ACTIVE_JOB_BASE_SQL}
+         AND REPLACE(UPPER(j.job_key), '-', '') = $2`,
+      [contractor.id, jobKey],
     );
-    return;
+    if (activeJobs.length === 0) {
+      log.info(
+        { contractorId: contractor.id, jobKey, command },
+        '[SMS] No active job found for job key',
+      );
+      try {
+        await sendSms(
+          contractor.phone_e164,
+          'We could not find an active Assembly Concierge job with that code. Please check the job code and try again.',
+          correlationId,
+        );
+      } catch (err) {
+        log.warn({ err }, '[SMS] Helper SMS for unknown job key failed');
+      }
+      return;
+    }
+    if (activeJobs.length > 1) {
+      log.warn(
+        { contractorId: contractor.id, jobKey, command, count: activeJobs.length },
+        '[SMS] Multiple active jobs matched the same job key - data integrity issue, ignoring',
+      );
+      return;
+    }
+  } else {
+    activeJobs = await query<ActiveJobRow>(
+      `${ACTIVE_JOB_BASE_SQL}
+       ORDER BY ca.assigned_at DESC`,
+      [contractor.id],
+    );
+    if (activeJobs.length === 0) {
+      log.info(
+        { contractorId: contractor.id, command },
+        '[SMS] No active job found for contractor - ignoring',
+      );
+      return;
+    }
+    if (activeJobs.length > 1) {
+      log.warn(
+        { contractorId: contractor.id, command, count: activeJobs.length },
+        '[SMS] Multiple active jobs - ambiguous command, prompting contractor',
+      );
+      try {
+        await sendSms(
+          contractor.phone_e164,
+          'You have multiple active Assembly Concierge jobs. Please include the job code, like: OTW AC-2026-EPME.',
+          correlationId,
+        );
+      } catch (err) {
+        log.warn({ err }, '[SMS] Ambiguity helper SMS failed');
+      }
+      return;
+    }
   }
 
+  const activeJob = activeJobs[0];
   const rule = COMMAND_RULES[command];
 
   if (!isCommandAllowed(command, activeJob)) {
@@ -304,6 +433,26 @@ export async function processSmsWebhook(
     },
     '[SMS] Command processed',
   );
+
+  // Post-CONFIRM: send contractor address + reply instructions
+  if (command === 'CONFIRM') {
+    try {
+      await sendSms(contractor.phone_e164, buildPostConfirmSms(activeJob, log), correlationId);
+    } catch (err) {
+      log.warn({ err }, '[SMS] Post-CONFIRM contractor SMS failed');
+    }
+  } else if (command === 'DECLINE') {
+    // Post-DECLINE: acknowledgement only
+    try {
+      await sendSms(
+        contractor.phone_e164,
+        `Declined ${activeJob.job_key}. No further action needed.`,
+        correlationId,
+      );
+    } catch (err) {
+      log.warn({ err }, '[SMS] Post-DECLINE contractor SMS failed');
+    }
+  }
 
   if (command === 'OTW') {
     try {

@@ -42,19 +42,20 @@ function formatDollars(cents: number): string {
   return dollars % 1 === 0 ? dollars.toFixed(0) : dollars.toFixed(2);
 }
 
-/** Build the SMS message body sent to the contractor */
+/** Build the SMS message body sent to the contractor at dispatch time */
 function buildDispatchMessage(
   serviceTypeName: string,
   city: string,
   contractorPayCents: number,
+  jobKey: string,
 ): string {
   return [
     `AC JOB - ${serviceTypeName}`,
     `${city}, GA`,
     `Pay: $${formatDollars(contractorPayCents)}`,
     '',
-    'Reply CONFIRM to accept',
-    'Reply DECLINE to pass',
+    `Reply CONFIRM ${jobKey} to accept this job`,
+    `Reply DECLINE ${jobKey} if you are not available`,
   ].join('\n');
 }
 
@@ -246,7 +247,7 @@ export async function dispatchJobToContractor(
   );
 
   // ── Send dispatch SMS (outside transaction) ───────────────────────────────
-  const message = buildDispatchMessage(serviceTypeName, city, job.contractor_total_payout_cents);
+  const message = buildDispatchMessage(serviceTypeName, city, job.contractor_total_payout_cents, job.job_key);
   let smsSent = false;
 
   try {
