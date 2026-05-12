@@ -293,11 +293,19 @@ export async function processSmsWebhook(
         '[SMS] Multiple active jobs - ambiguous command, prompting contractor',
       );
       try {
-        await sendSms(
-          contractor.phone_e164,
-          'You have multiple active Assembly Concierge jobs. Please include the job code, like: OTW AC-2026-EPME.',
-          correlationId,
-        );
+        const keyList = activeJobs.map((j) => j.job_key).join('\n');
+        const ambiguityMsg = [
+          'You have multiple active Assembly Concierge jobs. Please include the job code with your reply.',
+          '',
+          'Active job codes:',
+          keyList,
+          '',
+          'Example format:',
+          'OTW [job code]',
+          'DONE [job code]',
+          'CONFIRM [job code]',
+        ].join('\n');
+        await sendSms(contractor.phone_e164, ambiguityMsg, correlationId);
       } catch (err) {
         log.warn({ err }, '[SMS] Ambiguity helper SMS failed');
       }
@@ -320,6 +328,24 @@ export async function processSmsWebhook(
       },
       '[SMS] Command not valid for current assignment/job state - ignoring',
     );
+    if (
+      jobKey &&
+      (command === 'OTW' || command === 'DONE' || command === 'FINISH') &&
+      activeJob.assignment_status === 'pending'
+    ) {
+      const verb = command === 'OTW' ? 'sending OTW' : 'marking the job complete';
+      const confirmFirst = [
+        `Please confirm ${activeJob.job_key} first before ${verb}.`,
+        '',
+        'Reply:',
+        `CONFIRM ${activeJob.job_key}`,
+      ].join('\n');
+      try {
+        await sendSms(contractor.phone_e164, confirmFirst, correlationId);
+      } catch (err) {
+        log.warn({ err }, '[SMS] Confirm-first helper SMS failed');
+      }
+    }
     return;
   }
 

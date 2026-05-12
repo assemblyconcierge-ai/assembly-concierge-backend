@@ -246,6 +246,16 @@ describe('processSmsWebhook job-key routing', () => {
       expect.stringContaining('multiple active Assembly Concierge jobs'),
       'corr-1',
     );
+    expect(mockSendSms).toHaveBeenCalledWith(
+      contractor.phone_e164,
+      expect.stringContaining('AC-2026-EPME'),
+      'corr-1',
+    );
+    expect(mockSendSms).toHaveBeenCalledWith(
+      contractor.phone_e164,
+      expect.stringContaining('AC-2026-XXXX'),
+      'corr-1',
+    );
     expect(enqueueAirtableSync).not.toHaveBeenCalled();
   });
 
@@ -306,7 +316,7 @@ describe('processSmsWebhook job-key routing', () => {
     expect(enqueueAirtableSync).not.toHaveBeenCalled();
   });
 
-  it('DONE with job key before acceptance is rejected', async () => {
+  it('DONE with job key before acceptance is rejected and sends confirm-first SMS', async () => {
     const { mockWithTransaction } = setupDb(activeJob({
       job_key: 'AC-2026-EPME',
       assignment_status: 'pending',
@@ -316,7 +326,11 @@ describe('processSmsWebhook job-key routing', () => {
     await processSmsWebhook('+1 (404) 555-0100', 'done AC-2026-EPME', 'corr-1');
 
     expect(mockWithTransaction).not.toHaveBeenCalled();
-    expect(mockSendSms).not.toHaveBeenCalled();
+    expect(mockSendSms).toHaveBeenCalledWith(
+      contractor.phone_e164,
+      expect.stringContaining('Please confirm AC-2026-EPME first before marking the job complete'),
+      'corr-1',
+    );
     expect(enqueueAirtableSync).not.toHaveBeenCalled();
   });
 
@@ -419,5 +433,81 @@ describe('processSmsWebhook job-key routing', () => {
       expect.stringContaining("SET status = 'completed', completed_at = NOW()"),
       ['assignment-1'],
     );
+  });
+
+  it('ambiguity SMS lists actual active job keys', async () => {
+    const job1 = activeJob({ job_id: 'job-1', job_key: 'AC-2026-AAAA', assignment_status: 'accepted', job_status: 'assigned' });
+    const job2 = activeJob({ job_id: 'job-2', job_key: 'AC-2026-BBBB', assignment_status: 'accepted', job_status: 'assigned' });
+    setupDb([job1, job2]);
+
+    await processSmsWebhook('+1 (404) 555-0100', 'done', 'corr-1');
+
+    const sentMsg: string = mockSendSms.mock.calls[0][1];
+    expect(sentMsg).toContain('AC-2026-AAAA');
+    expect(sentMsg).toContain('AC-2026-BBBB');
+  });
+
+  it('ambiguity SMS uses generic [job code] example format instead of a hardcoded key', async () => {
+    const job1 = activeJob({ job_id: 'job-1', job_key: 'AC-2026-AAAA', assignment_status: 'accepted', job_status: 'assigned' });
+    const job2 = activeJob({ job_id: 'job-2', job_key: 'AC-2026-BBBB', assignment_status: 'accepted', job_status: 'assigned' });
+    setupDb([job1, job2]);
+
+    await processSmsWebhook('+1 (404) 555-0100', 'done', 'corr-1');
+
+    const sentMsg: string = mockSendSms.mock.calls[0][1];
+    expect(sentMsg).toContain('[job code]');
+    expect(sentMsg).not.toMatch(/like: OTW AC-/);
+  });
+
+  it('OTW with job key before CONFIRM sends confirm-first SMS', async () => {
+    const { mockWithTransaction } = setupDb(activeJob({
+      job_key: 'AC-2026-EPME',
+      assignment_status: 'pending',
+      job_status: 'dispatch_in_progress',
+    }));
+
+    await processSmsWebhook('+1 (404) 555-0100', 'OTW AC-2026-EPME', 'corr-1');
+
+    expect(mockWithTransaction).not.toHaveBeenCalled();
+    expect(mockSendSms).toHaveBeenCalledWith(
+      contractor.phone_e164,
+      expect.stringContaining('Please confirm AC-2026-EPME first before sending OTW'),
+      'corr-1',
+    );
+    expect(enqueueAirtableSync).not.toHaveBeenCalled();
+  });
+
+  it('FINISH with job key before CONFIRM sends confirm-first SMS', async () => {
+    const { mockWithTransaction } = setupDb(activeJob({
+      job_key: 'AC-2026-EPME',
+      assignment_status: 'pending',
+      job_status: 'dispatch_in_progress',
+    }));
+
+    await processSmsWebhook('+1 (404) 555-0100', 'finish AC-2026-EPME', 'corr-1');
+
+    expect(mockWithTransaction).not.toHaveBeenCalled();
+    expect(mockSendSms).toHaveBeenCalledWith(
+      contractor.phone_e164,
+      expect.stringContaining('Please confirm AC-2026-EPME first before marking the job complete'),
+      'corr-1',
+    );
+    expect(enqueueAirtableSync).not.toHaveBeenCalled();
+  });
+
+  it('confirm-first SMS does not trigger customer SMS or Airtable sync', async () => {
+    setupDb(activeJob({
+      job_key: 'AC-2026-EPME',
+      assignment_status: 'pending',
+      job_status: 'dispatch_in_progress',
+    }));
+
+    await processSmsWebhook('+1 (404) 555-0100', 'OTW AC-2026-EPME', 'corr-1');
+
+    // Only one SMS sent - to contractor, not customer
+    expect(mockSendSms).toHaveBeenCalledTimes(1);
+    expect(mockSendSms).toHaveBeenCalledWith(contractor.phone_e164, expect.any(String), 'corr-1');
+    expect(mockSendSms).not.toHaveBeenCalledWith('+14045550200', expect.any(String), expect.any(String));
+    expect(enqueueAirtableSync).not.toHaveBeenCalled();
   });
 });
