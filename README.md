@@ -23,15 +23,16 @@
 13. [Phase 10 — Dispatch Precheck: Read-Only Contractor Availability Check (May 2026)](#phase-10)
 14. [Phase 11 — Contractor Availability + Dispatch Lifecycle Automation (May 2026)](#phase-11)
 15. [Phase 12 — OTW Tracking, Completion Timestamps, and Billing Fixes (May 2026)](#phase-12)
-16. [Current Architecture](#current-architecture)
-17. [Job State Machine](#job-state-machine)
-18. [SMS Command Protocol](#sms-command-protocol)
-19. [API Reference](#api-reference)
-20. [Airtable Operator Interface](#airtable-operator-interface)
-21. [Key Engineering Decisions](#key-engineering-decisions)
-22. [Deployment](#deployment)
-23. [Environment Variables](#environment-variables)
-24. [Commit History](#commit-history--key-milestones)
+16. [Production SMS Command Routing and Lifecycle Hardening](#phase-13)
+17. [Current Architecture](#current-architecture)
+18. [Job State Machine](#job-state-machine)
+19. [SMS Command Protocol](#sms-command-protocol)
+20. [API Reference](#api-reference)
+21. [Airtable Operator Interface](#airtable-operator-interface)
+22. [Key Engineering Decisions](#key-engineering-decisions)
+23. [Deployment](#deployment)
+24. [Environment Variables](#environment-variables)
+25. [Commit History](#commit-history--key-milestones)
 
 ---
 
@@ -804,6 +805,24 @@ TypeScript: clean via `npx tsc --noEmit`.
 
 ---
 
+<a name="phase-13"></a>
+## Production SMS Command Routing and Lifecycle Hardening
+
+Phase 13 hardened contractor SMS from a best-effort command parser into a guarded production workflow. The work focused on backend reliability: commands now route to the intended job, reject unsafe lifecycle timing, and avoid side effects when contractor replies are ambiguous or out of sequence.
+
+**Reliability improvements:**
+- SMS lifecycle hardening blocks `OTW`, `DONE`, and `FINISH` before contractor confirmation, preventing pending assignments from being advanced or completed.
+- Job-key routing supports contractor replies such as `CONFIRM AC-2026-XXXX`, `OTW AC2026XXXX`, and `DONE AC-2026-XXXX`, so commands target the correct active job.
+- Multiple-active-job ambiguity protection rejects unkeyed commands when a contractor has more than one active job instead of guessing by most recent assignment.
+- Contractor helper messages now list the contractor's active job codes and provide clear retry formats for ambiguous, unknown-code, or confirm-first cases.
+- Rejected commands do not send customer SMS, enqueue Airtable sync, or change job state, keeping invalid replies from creating partial production side effects.
+
+**Production validation:** Render logs confirmed the hardened paths in production, including rejected pre-confirmation `OTW` / `DONE` commands with no customer SMS, Airtable sync, or job state change. The full workflow was then validated end to end: dispatch → `CONFIRM` → `OTW` → `DONE` → Airtable sync → remainder checkout/payment.
+
+**Commits:** `fc33ffe fix(sms): harden contractor command state checks`; `369dccd fix(sms): route contractor commands by job key`; `6002479 fix(sms): improve contractor command helper messages`.
+
+---
+
 ## Current Architecture
 
 ```
@@ -1069,13 +1088,16 @@ Hosted on **Render** (Oregon region).
 | `fix(airtable): include dispatch status in sync query` (`6cfc4eb`) | `dispatch_status` added to SELECT projection — previously undefined at runtime |
 | `fix(payments): zero remainder_amount_cents on full payment and guard approve-completion` (`5f80aec`) | Full payment webhook zeroes `remainder_amount_cents`; approve-completion checks actual payment records defensively |
 | `feat(tracking): add OTW and completion lifecycle timestamps` (`5f7d7ab`) | Migration 010; `completed_at`, `contractor_en_route_at`, `customer_otw_text_sent_at/status`; customer OTW SMS; Airtable sync for all 4 fields |
+| `fix(sms): harden contractor command state checks` (`fc33ffe`) | Explicit SMS command rules enforce job + assignment state before transactions; adds unit coverage for invalid sequencing |
+| `fix(sms): route contractor commands by job key` (`369dccd`) | Optional job-key routing, ambiguity prompts, post-`CONFIRM` address instructions, and command tests |
+| `fix(sms): improve contractor command helper messages` (`6002479`) | Ambiguity SMS lists active job codes; confirm-first helpers guide out-of-order OTW/DONE/FINISH replies |
 
 ---
 
 ## Portfolio Highlights
 
 - **End-to-end job lifecycle system** — designed and built a production Node.js/TypeScript/PostgreSQL backend for a real operating business, handling customer intake, Stripe payment processing, contractor dispatch via SMS, operator approval gates, and remainder billing with a fully enforced 16-status state machine.
-- **Real-time contractor coordination via SMS** — built an inbound SMS webhook handler that fuzzy-matches natural-language contractor replies (`confirm`, `on my way`, `finish`) and drives atomic job state transitions, customer OTW notifications, and Airtable sync.
+- **Real-time contractor coordination via SMS** — built an inbound SMS webhook handler that fuzzy-matches natural-language contractor replies (`confirm`, `on my way`, `finish`), routes ambiguous replies by job key, enforces command/state guards, and drives atomic job state transitions, customer OTW notifications, and Airtable sync.
 - **Full-stack Airtable + Make.com automation** — designed multi-route Make.com dispatch scenarios covering first dispatch, decline/re-dispatch, cancel/re-dispatch, and contractor availability checks, with Airtable as an operator mirror and PostgreSQL as the single source of truth.
 - **Fault-tolerant payment pipeline** — integrated Stripe Checkout with idempotent webhook processing, deposit/remainder split billing, full-payment edge-case handling, and automatic remainder invoice generation after operator-approved job completion.
 
