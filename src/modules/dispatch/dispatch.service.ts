@@ -7,7 +7,7 @@
 
 import { v4 as uuidv4 } from 'uuid';
 import { queryOne, withTransaction, query } from '../../db/pool';
-import { getJobById } from '../jobs/job.repository';
+import { getJobById, updateJobStatus } from '../jobs/job.repository';
 import { assertTransition } from '../jobs/job.stateMachine';
 import { recordAuditEvent } from '../audit/audit.service';
 import { enqueueAirtableSync } from '../airtable-sync/airtableSync.queue';
@@ -453,6 +453,113 @@ export async function cancelContractorAssignment(
   log.info(
     { cancelledAssignmentId: result.cancelledAssignmentId, previousContractorId: result.previousContractorId },
     '[CancelAssignment] Assignment cancelled — job returned to ready_for_dispatch',
+  );
+
+  return result;
+}
+
+// ── Cancel Job ────────────────────────────────────────────────────────────────
+
+export interface CancelJobResult {
+  success: true;
+  jobId: string;
+  previousJobStatus: string;
+  cancelledAssignmentCount: number;
+  expiredDispatchCount: number;
+}
+
+/**
+ * Cancel a job, bulk-cancel all active contractor assignments, expire related
+ * dispatches, and write an audit event — all inside one transaction.
+ *
+ * - Does not send SMS.
+ * - Does not touch payment records.
+ * - Caller is responsible for calling enqueueAirtableSync after this returns.
+ */
+export async function cancelJob(
+  jobId: string,
+  correlationId: string,
+  reason?: string,
+): Promise<CancelJobResult> {
+  const log = logger.child({ correlationId, jobId, service: 'cancel-job' });
+
+  let result!: CancelJobResult;
+
+  await withTransaction(async (client) => {
+    // Step 0: Lock the job row for the duration of this transaction
+    const jobRes = await client.query<{ id: string; status: string }>(
+      `SELECT id, status FROM jobs WHERE id = $1 FOR UPDATE`,
+      [jobId],
+    );
+    if (jobRes.rowCount === 0) {
+      throw Object.assign(new Error('Job not found'), { statusCode: 404 });
+    }
+    const previousJobStatus = jobRes.rows[0].status;
+
+    // Step 1: Validate transition (throws on terminal states: closed_paid, cancelled)
+    assertTransition(previousJobStatus as any, 'cancelled');
+
+    // Step 2: Bulk-cancel all active contractor assignments for this job
+    const assignRes = await client.query<{ id: string; dispatch_id: string | null }>(
+      `UPDATE contractor_assignments
+          SET status = 'cancelled'
+        WHERE job_id = $1
+          AND status IN ('pending', 'accepted')
+        RETURNING id, dispatch_id`,
+      [jobId],
+    );
+    const cancelledAssignmentCount = assignRes.rowCount ?? 0;
+    const dispatchIds = assignRes.rows
+      .map((r) => r.dispatch_id)
+      .filter((d): d is string => d !== null);
+
+    // Step 3: Bulk-expire related dispatch rows
+    let expiredDispatchCount = 0;
+    if (dispatchIds.length > 0) {
+      const expireRes = await client.query(
+        `UPDATE dispatches
+            SET status = 'expired', updated_at = NOW()
+          WHERE id = ANY($1::uuid[])`,
+        [dispatchIds],
+      );
+      expiredDispatchCount = expireRes.rowCount ?? 0;
+    }
+
+    // Step 4: Set job status to cancelled (uses shared updateJobStatus helper with client)
+    await updateJobStatus(jobId, 'cancelled', client);
+
+    // Step 5: Write audit event inside the transaction
+    await recordAuditEvent({
+      aggregateType: 'job',
+      aggregateId: jobId,
+      eventType: 'job.cancelled',
+      actorType: 'admin',
+      payload: {
+        reason: reason ?? null,
+        previousJobStatus,
+        cancelledAssignmentCount,
+        expiredDispatchCount,
+      },
+      correlationId,
+      client,
+    });
+
+    result = {
+      success: true,
+      jobId,
+      previousJobStatus,
+      cancelledAssignmentCount,
+      expiredDispatchCount,
+    };
+  });
+
+  log.info(
+    {
+      previousJobStatus: result.previousJobStatus,
+      cancelledAssignmentCount: result.cancelledAssignmentCount,
+      expiredDispatchCount: result.expiredDispatchCount,
+    },
+    '[CancelJob] Job cancelled',
   );
 
   return result;

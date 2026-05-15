@@ -16,7 +16,7 @@ import { recordAuditEvent } from '../audit/audit.service';
 import { enqueueAirtableSync } from '../airtable-sync/airtableSync.queue';
 import { requireAdmin } from '../../common/middleware/auth';
 import { logger } from '../../common/logger';
-import { dispatchJobToContractor, cancelContractorAssignment } from '../dispatch/dispatch.service';
+import { dispatchJobToContractor, cancelContractorAssignment, cancelJob } from '../dispatch/dispatch.service';
 import { checkContractorAvailability } from '../dispatch/dispatchConflict';
 
 export const jobsRouter = Router();
@@ -503,6 +503,48 @@ jobsRouter.post(
         });
       }
     } catch (err: any) {
+      if (err?.message?.startsWith('Invalid job state transition')) {
+        res.status(409).json({ error: 'CONFLICT', message: err.message });
+        return;
+      }
+      next(err);
+    }
+  },
+);
+
+// POST /jobs/:jobId/cancel — operator-initiated job cancellation
+//
+// Bulk-cancels all active contractor assignments, expires related dispatches,
+// sets job status = cancelled, writes audit event, enqueues Airtable sync.
+// Does NOT send SMS. Does NOT touch payment records.
+jobsRouter.post(
+  '/:jobId/cancel',
+  requireAdmin,
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const schema = z.object({ reason: z.string().max(500).optional() });
+      const { reason } = schema.parse(req.body);
+
+      const result = await cancelJob(req.params.jobId, req.correlationId, reason);
+
+      // Enqueue Airtable sync after transaction commits (fire-and-forget with logging)
+      enqueueAirtableSync({ jobId: result.jobId, correlationId: req.correlationId }).catch((err) => {
+        logger.warn({ err, jobId: result.jobId }, '[cancel] Airtable sync enqueue failed');
+      });
+
+      res.json({
+        message: 'Job cancelled',
+        jobId: result.jobId,
+        status: 'cancelled',
+        previousJobStatus: result.previousJobStatus,
+        cancelledAssignmentCount: result.cancelledAssignmentCount,
+        expiredDispatchCount: result.expiredDispatchCount,
+      });
+    } catch (err: any) {
+      if (err?.statusCode === 404) {
+        res.status(404).json({ error: 'NOT_FOUND', message: err.message });
+        return;
+      }
       if (err?.message?.startsWith('Invalid job state transition')) {
         res.status(409).json({ error: 'CONFLICT', message: err.message });
         return;
