@@ -34,6 +34,7 @@ function activeJob(overrides: Record<string, unknown> = {}) {
     dispatch_id: 'dispatch-1',
     customer_phone: '+14045550200',
     customer_otw_text_sent_at: null,
+    customer_confirm_text_sent_at: null,
     address_line1: '123 Main St',
     address_line2: null,
     address_city: 'Atlanta',
@@ -109,7 +110,7 @@ describe('processSmsWebhook command state safety', () => {
     expect(enqueueAirtableSync).not.toHaveBeenCalled();
   });
 
-  it('ignores OTW before assignment acceptance', async () => {
+  it('blocks OTW before assignment acceptance and sends confirm-first SMS', async () => {
     const { mockWithTransaction } = setupDb(activeJob({
       assignment_status: 'pending',
       job_status: 'dispatch_in_progress',
@@ -118,7 +119,12 @@ describe('processSmsWebhook command state safety', () => {
     await processSmsWebhook('+1 (404) 555-0100', 'otw', 'corr-1');
 
     expect(mockWithTransaction).not.toHaveBeenCalled();
-    expect(mockSendSms).not.toHaveBeenCalled();
+    expect(mockSendSms).toHaveBeenCalledTimes(1);
+    expect(mockSendSms).toHaveBeenCalledWith(
+      contractor.phone_e164,
+      expect.stringContaining('Please confirm AC-TEST first before sending OTW'),
+      'corr-1',
+    );
     expect(enqueueAirtableSync).not.toHaveBeenCalled();
   });
 
@@ -372,6 +378,45 @@ describe('processSmsWebhook job-key routing', () => {
       expect.stringContaining('Reply DONE AC-2026-EPME when complete'),
       'corr-1',
     );
+  });
+
+  it('successful CONFIRM sends customer confirmation SMS to customer phone', async () => {
+    setupDb(activeJob({ job_key: 'AC-2026-EPME' }));
+
+    await processSmsWebhook('+1 (404) 555-0100', 'confirm', 'corr-1');
+
+    expect(mockSendSms).toHaveBeenCalledWith(
+      '+14045550200',
+      expect.stringContaining('Your contractor has confirmed your job'),
+      'corr-1',
+    );
+    expect(mockSendSms).toHaveBeenCalledWith(
+      '+14045550200',
+      expect.stringContaining("We'll text you again when they're on the way"),
+      'corr-1',
+    );
+  });
+
+  it('does not resend customer confirmation SMS when already sent', async () => {
+    setupDb(activeJob({
+      job_key: 'AC-2026-EPME',
+      customer_confirm_text_sent_at: new Date(),
+    }));
+
+    await processSmsWebhook('+1 (404) 555-0100', 'confirm', 'corr-1');
+
+    const customerSmsCalls = mockSendSms.mock.calls.filter(
+      (call) => call[0] === '+14045550200',
+    );
+    expect(customerSmsCalls).toHaveLength(0);
+  });
+
+  it('customer confirmation SMS does not send when CONFIRM is blocked', async () => {
+    setupDb(activeJob({ assignment_status: 'accepted', job_status: 'assigned' }));
+
+    await processSmsWebhook('+1 (404) 555-0100', 'confirm', 'corr-1');
+
+    expect(mockSendSms).not.toHaveBeenCalled();
   });
 
   it('successful CONFIRM falls back to city/state/zip when address line1 is missing', async () => {

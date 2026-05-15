@@ -88,6 +88,7 @@ interface ActiveJobRow {
   dispatch_id: string | null;
   customer_phone: string;
   customer_otw_text_sent_at: Date | null;
+  customer_confirm_text_sent_at: Date | null;
   address_line1: string | null;
   address_line2: string | null;
   address_city: string | null;
@@ -155,6 +156,7 @@ const ACTIVE_JOB_BASE_SQL = `
     j.status                     AS job_status,
     j.airtable_record_id,
     j.customer_otw_text_sent_at,
+    j.customer_confirm_text_sent_at,
     cust.phone_e164              AS customer_phone,
     a.line1                      AS address_line1,
     a.line2                      AS address_line2,
@@ -329,7 +331,6 @@ export async function processSmsWebhook(
       '[SMS] Command not valid for current assignment/job state - ignoring',
     );
     if (
-      jobKey &&
       (command === 'OTW' || command === 'DONE' || command === 'FINISH') &&
       activeJob.assignment_status === 'pending'
     ) {
@@ -477,6 +478,39 @@ export async function processSmsWebhook(
       );
     } catch (err) {
       log.warn({ err }, '[SMS] Post-DECLINE contractor SMS failed');
+    }
+  }
+
+  if (command === 'CONFIRM' && !activeJob.customer_confirm_text_sent_at) {
+    try {
+      const phone = activeJob.customer_phone;
+      if (!phone) {
+        await query(
+          `UPDATE jobs SET customer_confirm_text_status = $2, updated_at = NOW() WHERE id = $1`,
+          [activeJob.job_id, 'skipped'],
+        );
+      } else {
+        const message =
+          "Assembly Concierge update: Your contractor has confirmed your job. We'll text you again when they're on the way.";
+        let confirmTextStatus: 'sent' | 'failed' | 'skipped' = 'skipped';
+        let confirmSentAt: string | null = null;
+        try {
+          const result = await sendSms(phone, message, correlationId);
+          if (result.messageId) {
+            confirmTextStatus = 'sent';
+            confirmSentAt = new Date().toISOString();
+          }
+        } catch (smsErr) {
+          confirmTextStatus = 'failed';
+          log.warn({ err: smsErr }, '[SMS] Customer confirmation SMS failed');
+        }
+        await query(
+          `UPDATE jobs SET customer_confirm_text_sent_at = $2, customer_confirm_text_status = $3, updated_at = NOW() WHERE id = $1`,
+          [activeJob.job_id, confirmSentAt, confirmTextStatus],
+        );
+      }
+    } catch (err) {
+      log.warn({ err }, '[SMS] Customer confirmation SMS block failed');
     }
   }
 

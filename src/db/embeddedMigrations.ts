@@ -533,4 +533,12 @@ ALTER TABLE jobs
   ADD COLUMN IF NOT EXISTS customer_otw_text_status  TEXT;
 `,
   },
+  {
+    filename: '011_add_customer_confirm_text_fields.sql',
+    sql: `
+ALTER TABLE jobs
+  ADD COLUMN IF NOT EXISTS customer_confirm_text_sent_at TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS customer_confirm_text_status  TEXT;
+`,
+  },
 ];
