@@ -24,15 +24,16 @@
 14. [Phase 11 — Contractor Availability + Dispatch Lifecycle Automation (May 2026)](#phase-11)
 15. [Phase 12 — OTW Tracking, Completion Timestamps, and Billing Fixes (May 2026)](#phase-12)
 16. [Production SMS Command Routing and Lifecycle Hardening](#phase-13)
-17. [Current Architecture](#current-architecture)
-18. [Job State Machine](#job-state-machine)
-19. [SMS Command Protocol](#sms-command-protocol)
-20. [API Reference](#api-reference)
-21. [Airtable Operator Interface](#airtable-operator-interface)
-22. [Key Engineering Decisions](#key-engineering-decisions)
-23. [Deployment](#deployment)
-24. [Environment Variables](#environment-variables)
-25. [Commit History](#commit-history--key-milestones)
+17. [Phase 14 — SMS Lifecycle Hardening: OTW Guard and Customer Confirmation (May 2026)](#phase-14)
+18. [Current Architecture](#current-architecture)
+19. [Job State Machine](#job-state-machine)
+20. [SMS Command Protocol](#sms-command-protocol)
+21. [API Reference](#api-reference)
+22. [Airtable Operator Interface](#airtable-operator-interface)
+23. [Key Engineering Decisions](#key-engineering-decisions)
+24. [Deployment](#deployment)
+25. [Environment Variables](#environment-variables)
+26. [Commit History](#commit-history--key-milestones)
 
 ---
 
@@ -823,6 +824,36 @@ Phase 13 hardened contractor SMS from a best-effort command parser into a guarde
 
 ---
 
+<a name="phase-14"></a>
+## SMS lifecycle hardening update
+
+Commit: `697eee7 fix(sms): improve contractor and customer confirmation messaging`
+
+Completed:
+- Fixed early `OTW` before `CONFIRM` for contractors with exactly one pending/unconfirmed job.
+- Contractor now receives a confirm-first helper instead of the message being silently ignored.
+- Added customer confirmation SMS after contractor `CONFIRM`.
+- Added duplicate guard fields:
+  - `customer_confirm_text_sent_at`
+  - `customer_confirm_text_status`
+- Added embedded migration `011_add_customer_confirm_text_fields.sql`.
+- Updated SMS unit tests.
+
+Validation:
+- `npx vitest run tests/unit/smsService.test.ts`
+- Result: 26/26 tests passed.
+
+Deployment:
+- Pushed to `origin/main`.
+- Render deployment/production validation pending.
+
+Notes:
+- No job status changes occur on early `OTW`.
+- Customer confirmation SMS only sends after successful `CONFIRM`.
+- Existing OTW customer SMS behavior remains unchanged.
+
+---
+
 ## Current Architecture
 
 ```
@@ -1091,6 +1122,7 @@ Hosted on **Render** (Oregon region).
 | `fix(sms): harden contractor command state checks` (`fc33ffe`) | Explicit SMS command rules enforce job + assignment state before transactions; adds unit coverage for invalid sequencing |
 | `fix(sms): route contractor commands by job key` (`369dccd`) | Optional job-key routing, ambiguity prompts, post-`CONFIRM` address instructions, and command tests |
 | `fix(sms): improve contractor command helper messages` (`6002479`) | Ambiguity SMS lists active job codes; confirm-first helpers guide out-of-order OTW/DONE/FINISH replies |
+| `fix(sms): improve contractor and customer confirmation messaging` (`697eee7`) | Migration 011; `customer_confirm_text_sent_at/status`; customer confirmation SMS after CONFIRM; confirm-first helper for plain OTW before CONFIRM on single pending job |
 
 ---
 
