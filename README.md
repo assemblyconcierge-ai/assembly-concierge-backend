@@ -25,15 +25,16 @@
 15. [Phase 12 — OTW Tracking, Completion Timestamps, and Billing Fixes (May 2026)](#phase-12)
 16. [Production SMS Command Routing and Lifecycle Hardening](#phase-13)
 17. [Phase 14 — SMS Lifecycle Hardening: OTW Guard and Customer Confirmation (May 2026)](#phase-14)
-18. [Current Architecture](#current-architecture)
-19. [Job State Machine](#job-state-machine)
-20. [SMS Command Protocol](#sms-command-protocol)
-21. [API Reference](#api-reference)
-22. [Airtable Operator Interface](#airtable-operator-interface)
-23. [Key Engineering Decisions](#key-engineering-decisions)
-24. [Deployment](#deployment)
-25. [Environment Variables](#environment-variables)
-26. [Commit History](#commit-history--key-milestones)
+18. [Phase 15 — Cancel Job Endpoint and Airtable Operator Workflow (May 2026)](#phase-15)
+19. [Current Architecture](#current-architecture)
+20. [Job State Machine](#job-state-machine)
+21. [SMS Command Protocol](#sms-command-protocol)
+22. [API Reference](#api-reference)
+23. [Airtable Operator Interface](#airtable-operator-interface)
+24. [Key Engineering Decisions](#key-engineering-decisions)
+25. [Deployment](#deployment)
+26. [Environment Variables](#environment-variables)
+27. [Commit History](#commit-history--key-milestones)
 
 ---
 
@@ -854,6 +855,81 @@ Notes:
 
 ---
 
+<a name="phase-15"></a>
+## Phase 15 — Cancel Job Endpoint and Airtable Operator Workflow (May 2026)
+
+Commit: `8bc2ec2 feat(jobs): add admin cancel job endpoint`
+
+### 15.1 Backend endpoint
+
+`POST /jobs/:jobId/cancel`
+
+- **Auth:** `requireAdmin` — accepts `X-Admin-Token` header or Bearer token.
+- **Body:** `{ "reason": "optional cancellation reason" }`
+
+**Behavior:**
+
+- Locks the job row with `SELECT … FOR UPDATE` and transitions any cancellable job to `cancelled`.
+- Cancels all active contractor assignments for the job.
+- Expires all linked dispatches.
+- Writes a `job.cancelled` audit event containing: cancellation reason, previous job status, cancelled assignment count, and expired dispatch count.
+- Queues an Airtable sync after the transaction commits.
+- Does **not** send SMS to the contractor.
+- Does **not** modify payment records.
+
+### 15.2 Airtable / Make operator workflow
+
+**Airtable fields added:**
+
+| Field | Type | Purpose |
+|---|---|---|
+| `Cancel Job Requested` | Checkbox | Operator intent signal — first gate |
+| `Cancel Job Confirmed` | Checkbox | Operator confirmation — second gate |
+| `Cancel Job Reason` | Text | Operator-entered reason; forwarded to backend audit payload |
+| `Last Cancel Job At` | Date/time | Timestamp of most recent cancel attempt |
+| `Last Cancel Job Result` | Text | `Success` or `Failed` |
+| `Last Cancel Job Error` | Text | Error detail on failure |
+
+**Double-confirmation safety gate:**
+
+Both `Cancel Job Requested` and `Cancel Job Confirmed` must be checked before the Airtable automation fires. This prevents accidental cancellations from a single checkbox click.
+
+**Workflow sequence:**
+
+1. Operator checks `Cancel Job Requested` and `Cancel Job Confirmed`, and optionally fills `Cancel Job Reason`.
+2. Airtable automation sends `recordId`, Backend Job ID, Job Key, and reason to Make.
+3. Make scenario calls `POST /jobs/:jobId/cancel` on the backend.
+4. On success, Make clears both checkboxes and writes success metadata to `Last Cancel Job At`, `Last Cancel Job Result`.
+5. Backend Airtable sync (triggered by the cancel transaction) owns backend status, dispatch status, assignment fields, and payment fields — Make does not manually update these.
+
+### 15.3 Validation
+
+- `npm run build` passed.
+- Targeted unit tests passed: **49/49**.
+- Render deployed commit `8bc2ec2`.
+- Direct backend test passed for `ready_for_dispatch → cancelled`.
+- Make-triggered active cleanup validated on job `AC-2026-IA3V`:
+  - `previousJobStatus`: `assigned`
+  - `status`: `cancelled`
+  - `cancelledAssignmentCount`: `1`
+  - `expiredDispatchCount`: `1`
+- Make HTTP module returned HTTP 200; backend response confirmed `Job cancelled`.
+
+### 15.4 Notes
+
+- Active assignment and dispatch cleanup are validated end-to-end.
+- Payment records are intentionally untouched by the cancel endpoint.
+- `Cancel Job Reason` is operator-entered in Airtable and forwarded to the backend audit payload.
+- Backend-owned Airtable fields (status, dispatch status, assignment fields, payment fields) are not manually updated by Make.
+
+### 15.5 Next steps
+
+- Add optional Make failure route to set `Last Cancel Job Result = Failed` and populate `Last Cancel Job Error`.
+- Add final operator-use documentation for the cancel workflow.
+- Continue backend hardening roadmap after Cancel Job workflow.
+
+---
+
 ## Current Architecture
 
 ```
@@ -1123,6 +1199,7 @@ Hosted on **Render** (Oregon region).
 | `fix(sms): route contractor commands by job key` (`369dccd`) | Optional job-key routing, ambiguity prompts, post-`CONFIRM` address instructions, and command tests |
 | `fix(sms): improve contractor command helper messages` (`6002479`) | Ambiguity SMS lists active job codes; confirm-first helpers guide out-of-order OTW/DONE/FINISH replies |
 | `fix(sms): improve contractor and customer confirmation messaging` (`697eee7`) | Migration 011; `customer_confirm_text_sent_at/status`; customer confirmation SMS after CONFIRM; confirm-first helper for plain OTW before CONFIRM on single pending job |
+| `feat(jobs): add admin cancel job endpoint` (`8bc2ec2`) | `POST /jobs/:jobId/cancel` — locks job row, transitions to `cancelled`, cancels active assignments, expires dispatches, writes `job.cancelled` audit event; Airtable double-confirmation safety gate via Make |
 
 ---
 
