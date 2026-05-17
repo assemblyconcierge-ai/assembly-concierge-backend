@@ -30,11 +30,12 @@
 20. [Job State Machine](#job-state-machine)
 21. [SMS Command Protocol](#sms-command-protocol)
 22. [API Reference](#api-reference)
-23. [Airtable Operator Interface](#airtable-operator-interface)
-24. [Key Engineering Decisions](#key-engineering-decisions)
-25. [Deployment](#deployment)
-26. [Environment Variables](#environment-variables)
-27. [Commit History](#commit-history--key-milestones)
+23. [Admin Endpoint Reference](#admin-endpoint-reference)
+24. [Airtable Operator Interface](#airtable-operator-interface)
+25. [Key Engineering Decisions](#key-engineering-decisions)
+26. [Deployment](#deployment)
+27. [Environment Variables](#environment-variables)
+28. [Commit History](#commit-history--key-milestones)
 
 ---
 
@@ -1053,6 +1054,79 @@ awaiting_remainder_payment  →  (Stripe webhook)  →  closed_paid
 | GET | `/payments/:paymentId` | Get payment |
 | POST | `/payments/:paymentId/refund` | Issue refund |
 | GET | `/integration-failures` | View failed Airtable syncs |
+
+---
+
+<a name="admin-endpoint-reference"></a>
+## Admin Endpoint Reference
+
+Operational detail for the four endpoints most relevant to the Make.com operator workflow and manual admin recovery.
+
+Auth for all endpoints: `requireAdmin` — pass either `X-Admin-Token: <token>` header or `Authorization: Bearer <token>`.
+
+---
+
+### POST /jobs/:jobId/retry-failed-actions
+
+**Purpose:** Re-enqueues an Airtable sync for the job. Recovers from a failed sync without changing any job state.
+
+| | |
+|---|---|
+| **Auth** | `requireAdmin` |
+| **Caller** | Admin — manual recovery; not part of the normal Make workflow |
+| **Request body** | None |
+| **Response** | `{ message: "Retry actions enqueued", jobId }` |
+| **Side effects** | Enqueues one Airtable sync via BullMQ. No DB state changes. |
+| **Airtable/Make** | Triggers the Airtable sync worker only — no Make involvement. |
+| **Failure behavior** | 404 if job not found. Sync errors are non-fatal and logged. |
+
+---
+
+### POST /jobs/:jobId/dispatch
+
+**Purpose:** Sends a dispatch SMS to a contractor. Runs a schedule-conflict check, transitions the job `ready_for_dispatch → dispatch_in_progress`, creates `dispatches` and `contractor_assignments` rows, and sends the CONFIRM/DECLINE SMS.
+
+| | |
+|---|---|
+| **Auth** | `requireAdmin` |
+| **Caller** | Make.com dispatch scenario — called after `approve-dispatch` succeeds |
+| **Request body** | `{ "contractorId": "uuid" }` (required) |
+| **Response** | 201 `{ message: "Dispatch sent", dispatchId, assignmentId, contractorId, jobId, smsSent }` |
+| **Side effects** | Job: `ready_for_dispatch → dispatch_in_progress`. Creates `dispatches` row (`status: sent`) and `contractor_assignments` row (`status: pending`). Sends SMS. Enqueues Airtable sync post-transaction. |
+| **Airtable/Make** | Make calls this endpoint; Airtable sync mirrors dispatch outcome. |
+| **Failure behavior** | 404: job or contractor not found. 409: `CONTRACTOR_SCHEDULE_CONFLICT` (response includes `conflictingJobKey`), `SCHEDULE_PARSE_FAILED`, job not at `ready_for_dispatch`, contractor inactive. SMS failure is **non-fatal** — DB transaction commits regardless; dispatch row is marked `failed`; response includes `smsSent: false`. |
+
+---
+
+### POST /jobs/:jobId/cancel-assignment
+
+**Purpose:** Cancels the active contractor assignment and returns the job to `ready_for_dispatch`. Used in the decline/re-dispatch and manual contractor release workflows.
+
+| | |
+|---|---|
+| **Auth** | `requireAdmin` |
+| **Caller** | Make.com cancel-assignment scenario, or direct admin call |
+| **Request body** | `{ "assignmentId": "uuid" }` (optional — required if multiple active assignments exist) |
+| **Response** | `{ success: true, jobId, cancelledAssignmentId, previousContractorId, jobStatus: "ready_for_dispatch" }` |
+| **Side effects** | Assignment: `pending`/`accepted → cancelled`. Linked dispatch: `→ expired`. Job: `→ ready_for_dispatch`. Writes `dispatch.assignment_cancelled` audit event. No SMS. **No Airtable sync is enqueued by this endpoint** — the caller is responsible for triggering sync if Airtable update is needed. |
+| **Airtable/Make** | No Airtable sync enqueued internally. Make or the caller must trigger separately. |
+| **Failure behavior** | 404: job not found, or specified `assignmentId` not found. 409: `INVALID_JOB_STATE` (job must be `dispatch_in_progress` or `assigned`), `NO_ACTIVE_ASSIGNMENT`, `MULTIPLE_ACTIVE_ASSIGNMENTS` (supply `assignmentId`), `ASSIGNMENT_ALREADY_CANCELLED`. |
+
+---
+
+### POST /jobs/:jobId/cancel
+
+**Purpose:** Operator-initiated job cancellation. Locks the job row, bulk-cancels all active assignments, expires all linked dispatches, transitions job to `cancelled`, and writes a `job.cancelled` audit event. Airtable sync is enqueued post-transaction.
+
+| | |
+|---|---|
+| **Auth** | `requireAdmin` |
+| **Caller** | Make.com cancel-job scenario, triggered via the Airtable double-confirmation gate |
+| **Request body** | `{ "reason": "..." }` (optional, max 500 chars) |
+| **Response** | `{ message: "Job cancelled", jobId, status: "cancelled", previousJobStatus, cancelledAssignmentCount, expiredDispatchCount }` |
+| **Side effects** | All active assignments: `→ cancelled`. All linked dispatches: `→ expired`. Job: `→ cancelled`. Writes `job.cancelled` audit event with reason, previous status, and counts. Enqueues Airtable sync post-transaction (fire-and-forget; failure is logged, not thrown). No SMS. Payment records untouched. |
+| **Airtable/Make** | Make calls this endpoint. On success, Make clears `Cancel Job Requested` / `Cancel Job Confirmed` and writes `Last Cancel Job At` / `Last Cancel Job Result`. Backend sync owns status, dispatch, assignment, and payment fields — Make does not update these directly. |
+| **Failure behavior** | 404: job not found. 409: job is already `cancelled` or in a terminal state (`closed_paid`) — state machine rejects the transition. |
 
 ---
 
