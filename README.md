@@ -914,6 +914,7 @@ Both `Cancel Job Requested` and `Cancel Job Confirmed` must be checked before th
   - `cancelledAssignmentCount`: `1`
   - `expiredDispatchCount`: `1`
 - Make HTTP module returned HTTP 200; backend response confirmed `Job cancelled`.
+- Make failure route validated using an already-cancelled job: failure route sets `Last Cancel Job Result = Failed`, populates `Last Cancel Job Error`, and clears `Cancel Job Requested` / `Cancel Job Confirmed`.
 
 ### 15.4 Notes
 
@@ -924,7 +925,6 @@ Both `Cancel Job Requested` and `Cancel Job Confirmed` must be checked before th
 
 ### 15.5 Next steps
 
-- Add optional Make failure route to set `Last Cancel Job Result = Failed` and populate `Last Cancel Job Error`.
 - Add final operator-use documentation for the cancel workflow.
 - Continue backend hardening roadmap after Cancel Job workflow.
 
