@@ -1277,6 +1277,27 @@ Hosted on **Render** (Oregon region).
 
 ---
 
+## Deferred Future Hardening
+
+### Airtable Reconciliation Sync
+
+**Potential endpoint:** `POST /jobs/reconcile-airtable`
+
+**Purpose:** Queue an Airtable sync for all active-pipeline jobs and any unresolved `integration_failures` entries. Intended as a recovery tool when Airtable drift is observed — not a routine scheduled operation.
+
+**Would reuse:** `enqueueAirtableSync` from `airtableSync.queue.ts` directly. No new worker, no new infrastructure.
+
+**Defer until:** Recurring Airtable drift is observed in production. The existing BullMQ retry (5×, exponential backoff) and the per-job `retry-failed-actions` endpoint are sufficient at current volume.
+
+**Risks to resolve before implementation:**
+
+- **Airtable rate limits** — BullMQ worker limiter is `max: 10, duration: 1000` (10 req/s); Airtable free/Plus tier allows 5 req/s. A reconciliation batch could trigger 429 errors and backpressure the shared sync queue for all other jobs.
+- **Duplicate BullMQ jobs** — BullMQ does not deduplicate by default. Multiple reconciliation calls before the first batch clears will double-queue jobs. Fix: pass `jobId` as the BullMQ `jobId` option in `enqueueAirtableSync` to enable deduplication.
+- **No `last_airtable_sync_at` signal** — no DB column tracks when a job was last successfully synced. Reconciliation can only approximate staleness via `updated_at` window; it cannot confirm an actual sync gap. Adding `last_airtable_sync_at` to `jobs` would make the query precise.
+- **`airtable_record_id IS NULL` duplicate-create risk** — jobs with no linked Airtable record trigger a POST (create) rather than a PATCH. If a prior create succeeded but the `airtable_record_id` write-back failed, a reconciliation run creates a duplicate Airtable row.
+
+---
+
 ## Portfolio Highlights
 
 - **End-to-end job lifecycle system** — designed and built a production Node.js/TypeScript/PostgreSQL backend for a real operating business, handling customer intake, Stripe payment processing, contractor dispatch via SMS, operator approval gates, and remainder billing with a fully enforced 16-status state machine.
