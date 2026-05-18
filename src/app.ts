@@ -9,6 +9,7 @@ import { stripeWebhookRouter } from './modules/payments/stripe.webhook';
 import { smsWebhookRouter } from './modules/sms/sms.routes';
 import { intakeRouter } from './modules/intake/intake.routes';
 import { jobsRouter } from './modules/jobs/jobs.routes';
+import { publicBookingRouter } from './modules/public-booking/publicBooking.routes';
 import { adminRouter } from './modules/admin/admin.routes';
 import { schemaResetRouter } from './modules/admin/schemaReset.routes';
 import { testJobsRouter } from './modules/admin/testJobs.routes';
@@ -30,6 +31,52 @@ function schemaGuard(_req: Request, res: Response, next: NextFunction): void {
   next();
 }
 
+function toOrigin(value?: string): string | null {
+  if (!value) return null;
+  try {
+    return new URL(value).origin;
+  } catch {
+    return null;
+  }
+}
+
+function isVercelOrigin(origin: string): boolean {
+  try {
+    const url = new URL(origin);
+    return url.protocol === 'https:' && url.hostname.endsWith('.vercel.app');
+  } catch {
+    return false;
+  }
+}
+
+const allowedCorsOrigins = new Set(
+  [config.APP_BASE_URL, config.FRONTEND_BASE_URL]
+    .map(toOrigin)
+    .filter((origin): origin is string => Boolean(origin)),
+);
+
+function corsOrigin(
+  origin: string | undefined,
+  callback: (err: Error | null, allow?: boolean | string) => void,
+): void {
+  if (!origin) {
+    callback(null, true);
+    return;
+  }
+
+  const normalizedOrigin = toOrigin(origin);
+  if (
+    normalizedOrigin &&
+    (allowedCorsOrigins.has(normalizedOrigin) ||
+      (config.NODE_ENV !== 'production' && isVercelOrigin(normalizedOrigin)))
+  ) {
+    callback(null, normalizedOrigin);
+    return;
+  }
+
+  callback(null, false);
+}
+
 export function createApp(): express.Application {
   const app = express();
 
@@ -40,7 +87,7 @@ export function createApp(): express.Application {
 
   // ─── Security headers ───────────────────────────────────────────────────
   app.use(helmet());
-  app.use(cors({ origin: config.APP_BASE_URL || '*', credentials: true }));
+  app.use(cors({ origin: corsOrigin, credentials: true }));
 
   // ─── Rate limiting ───────────────────────────────────────────────────────
   app.use(
@@ -117,6 +164,9 @@ export function createApp(): express.Application {
   app.use('/', schemaGuard, intakeRouter);
 
   // ─── Jobs API ────────────────────────────────────────────────────────────
+  // Public booking API
+  app.use('/public', schemaGuard, publicBookingRouter);
+
   app.use('/jobs', jobsRouter);
 
   // ─── Admin / config API ──────────────────────────────────────────────────

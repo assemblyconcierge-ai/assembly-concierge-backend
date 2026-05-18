@@ -15,6 +15,7 @@ import { parseSchedule } from '../../common/utils/scheduleUtils';
 export interface IntakeProcessResult {
   jobId: string;
   jobKey: string;
+  publicPayToken: string;
   status: string;
   serviceAreaStatus: string;
   totalAmountCents: number;
@@ -37,6 +38,7 @@ export async function processIntake(
   intakeSubmissionId: string,
   intake: CanonicalIntake,
   correlationId: string,
+  opts?: { sourceChannel?: string },
 ): Promise<IntakeProcessResult> {
   const log = logger.child({ correlationId, fn: 'processIntake' });
 
@@ -153,7 +155,7 @@ export async function processIntake(
         addressId: address.id,
         intakeSubmissionId,
         serviceTypeId: serviceTypeId ?? undefined,
-        sourceChannel: 'jotform',
+        sourceChannel: opts?.sourceChannel ?? 'jotform',
         serviceAreaStatus: effectiveAreaStatus,
         cityDetected: intake.address.city,
         rushRequested: intake.service.rushRequested,
@@ -244,5 +246,5 @@ export async function processIntake(
     });
   }
 
-  return result;
+  return { ...result, publicPayToken };
 }

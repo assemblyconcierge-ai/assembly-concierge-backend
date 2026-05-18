@@ -31,15 +31,26 @@ jobsRouter.get('/pay/:token', async (req: Request, res: Response, next: NextFunc
       return;
     }
 
-    // Fetch customer name and service type label for display
-    const customer = await queryOne<{ full_name: string }>(
-      'SELECT full_name FROM customers WHERE id = $1',
-      [job.customer_id],
-    );
-    const serviceType = await queryOne<{ display_name: string; code: string }>(
-      'SELECT display_name, code FROM service_types WHERE id = $1',
-      [job.service_type_id],
-    );
+    // Fetch customer name, service type label, and most recent active checkout URL in parallel
+    const [customer, serviceType, activePayment] = await Promise.all([
+      queryOne<{ full_name: string }>(
+        'SELECT full_name FROM customers WHERE id = $1',
+        [job.customer_id],
+      ),
+      queryOne<{ display_name: string; code: string }>(
+        'SELECT display_name, code FROM service_types WHERE id = $1',
+        [job.service_type_id],
+      ),
+      queryOne<{ checkout_url: string }>(
+        `SELECT checkout_url FROM payments
+         WHERE job_id = $1
+           AND status = 'checkout_created'
+           AND checkout_url IS NOT NULL
+         ORDER BY created_at DESC
+         LIMIT 1`,
+        [job.id],
+      ),
+    ]);
 
     res.json({
       jobKey: job.job_key,
@@ -53,6 +64,7 @@ jobsRouter.get('/pay/:token', async (req: Request, res: Response, next: NextFunc
       depositAmountCents: job.deposit_amount_cents,
       remainderAmountCents: job.remainder_amount_cents,
       paymentMode: job.payment_mode,
+      checkoutUrl: activePayment?.checkout_url ?? null,
     });
   } catch (err) {
     next(err);
