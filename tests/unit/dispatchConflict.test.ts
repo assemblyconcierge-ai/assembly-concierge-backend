@@ -20,6 +20,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import type { PoolClient } from 'pg';
 
 // ── Hoist mock variables ──────────────────────────────────────────────────────
 // mockQuery is used by the standalone (no-client) path in checkScheduleConflict
@@ -92,11 +93,12 @@ function conflictRow(jobKey = 'AC-2026-CONF') {
 /**
  * Mock PoolClient for the transactional dispatch path.
  * client.query() always returns the supplied rows (wraps in { rows }).
+ * Cast through unknown: PoolClient has 25 required properties we do not need.
  */
-function makeClient(rows: object[]) {
+function makeClient(rows: object[]): PoolClient {
   return {
     query: vi.fn().mockResolvedValue({ rows }),
-  };
+  } as unknown as PoolClient;
 }
 
 beforeEach(() => {
@@ -294,7 +296,7 @@ describe('checkScheduleConflict', () => {
 
       // client.query was called once with CONFLICT_SQL and 6 params
       expect(client.query).toHaveBeenCalledTimes(1);
-      const params: any[] = client.query.mock.calls[0][1];
+      const params: any[] = (client.query as any).mock.calls[0][1];
       // $3 = scheduledStart derived from 8am EDT on 2026-06-01
       expect(params[2]).toEqual(new Date('2026-06-01T12:00:00.000Z'));
       // $4 = scheduledEnd derived from 12pm EDT on 2026-06-01
