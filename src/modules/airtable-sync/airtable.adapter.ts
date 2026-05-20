@@ -268,6 +268,10 @@ export async function syncJobToAirtable(record: AirtableJobRecord): Promise<stri
     'Deposit Amount': record.depositAmountCents / 100,
     // Lifecycle status → Airtable "Status" field (confirmed allowed values: pending_payment, paid, etc.)
     'Status':         mapJobStatus(record.status ?? 'intake_received'),
+    'Backend Job Status': record.status,
+    'Backend Updated At': record.createdAt,
+    'Last Backend Sync At': new Date().toISOString(),
+    'Backend Sync Error': '',
     'Created At':     record.createdAt,
   };
 
@@ -502,3 +506,4 @@ export async function logIntegrationFailure(params: {
     logger.error({ dbErr }, '[Airtable] Failed to log integration failure');
   }
 }
+

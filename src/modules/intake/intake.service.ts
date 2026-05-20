@@ -70,6 +70,10 @@ export async function processIntake(
   let serviceTypeId: string | null = null;
   let paymentMode = 'full';
 
+  // Derive requested checkout/payment type once so job mirror and Stripe checkout stay aligned.
+  const rawPaymentType = (intake.financials?.paymentType ?? '').toLowerCase();
+  const checkoutType: 'full' | 'deposit' = rawPaymentType.includes('full') ? 'full' : 'deposit';
+
   if (effectiveAreaStatus === 'in_area' && intake.service.typeCode !== 'custom') {
     try {
       const rushTier = normalizeRushTier(intake.service.rushType ?? intake.service.rushRequested);
@@ -160,7 +164,7 @@ export async function processIntake(
         cityDetected: intake.address.city,
         rushRequested: intake.service.rushRequested,
         rushType: rushTierLabel(normalizeRushTier(intake.service.rushType ?? intake.service.rushRequested)),
-        paymentMode,
+        paymentMode: initialStatus === 'awaiting_payment' ? checkoutType : paymentMode,
         subtotalAmountCents: pricing?.subtotalCents ?? 0,
         rushAmountCents: pricing?.rushAmountCents ?? 0,
         depositAmountCents: pricing?.depositCents ?? 0,
@@ -223,8 +227,6 @@ export async function processIntake(
 
   // 6. Auto-trigger checkout session creation if payment is required (fire-and-forget)
   // This ensures payment ownership remains with backend + Stripe, not Jotform or Make.
-  const rawPaymentType = (intake.financials?.paymentType ?? '').toLowerCase();
-  const checkoutType: 'full' | 'deposit' = rawPaymentType.includes('full') ? 'full' : 'deposit';
   if (result.checkoutRequired) {
     setImmediate(async () => {
       try {
@@ -248,3 +250,4 @@ export async function processIntake(
 
   return { ...result, publicPayToken };
 }
+
