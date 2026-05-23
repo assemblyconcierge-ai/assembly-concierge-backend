@@ -1,6 +1,7 @@
 import express, { NextFunction, Request, Response } from 'express';
 import request from 'supertest';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { query } from '../../../src/db/pool';
 import { publicBookingRouter } from '../../../src/modules/public-booking/publicBooking.routes';
 import {
   createIntakeSubmission,
@@ -9,6 +10,7 @@ import {
   markProcessing,
 } from '../../../src/modules/intake/intake.repository';
 import { processIntake } from '../../../src/modules/intake/intake.service';
+import { classifyServiceArea } from '../../../src/modules/service-areas/serviceArea.service';
 
 vi.mock('../../../src/modules/intake/intake.repository', () => ({
   createIntakeSubmission: vi.fn(),
@@ -19,6 +21,10 @@ vi.mock('../../../src/modules/intake/intake.repository', () => ({
 
 vi.mock('../../../src/modules/intake/intake.service', () => ({
   processIntake: vi.fn(),
+}));
+
+vi.mock('../../../src/modules/service-areas/serviceArea.service', () => ({
+  classifyServiceArea: vi.fn(),
 }));
 
 function createTestApp() {
@@ -39,8 +45,23 @@ const validPayload = {
   addressLine1: '123 Main St',
   city: 'Hampton',
   serviceType: 'small',
+  appointmentDate: '2099-06-15',
   appointmentWindow: 'Morning(8am-12pm)',
 };
+
+function capacityRows(...serviceCodes: Array<string | null>) {
+  return serviceCodes.map((service_type_code) => ({ service_type_code }));
+}
+
+function expectRecoverableCapacityResponse(body: Record<string, unknown>) {
+  expect(body).toMatchObject({
+    error: 'APPOINTMENT_SLOT_UNAVAILABLE',
+    recoverable: true,
+    manualReviewAvailable: true,
+    message: 'This window is full for instant booking. Please choose another window or request manual review.',
+    correlationId: expect.any(String),
+  });
+}
 
 describe('POST /public/bookings', () => {
   beforeEach(() => {
@@ -61,6 +82,12 @@ describe('POST /public/bookings', () => {
     vi.mocked(markProcessing).mockResolvedValue();
     vi.mocked(markProcessed).mockResolvedValue();
     vi.mocked(markFailed).mockResolvedValue();
+    vi.mocked(classifyServiceArea).mockResolvedValue({
+      status: 'in_area',
+      city: 'Hampton',
+      state: 'GA',
+    });
+    vi.mocked(query).mockResolvedValue([]);
     vi.mocked(processIntake).mockResolvedValue({
       jobId: 'job-123',
       jobKey: 'AC-2026-TEST',
@@ -124,6 +151,7 @@ describe('POST /public/bookings', () => {
         rushType: 'No Rush',
       },
       appointment: {
+        date: '2099-06-15',
         window: 'Morning(8am-12pm)',
       },
       financials: {
@@ -143,7 +171,7 @@ describe('POST /public/bookings', () => {
   it.each([
     ['custom'],
     ['fitness_equipment'],
-  ])('rejects unsupported service type %s', async (serviceType) => {
+  ])('rejects quote-only service type %s before checkout', async (serviceType) => {
     const app = createTestApp();
 
     const res = await request(app)
@@ -153,6 +181,181 @@ describe('POST /public/bookings', () => {
 
     expect(res.body.error).toBe('VALIDATION_ERROR');
     expect(createIntakeSubmission).not.toHaveBeenCalled();
+    expect(processIntake).not.toHaveBeenCalled();
+  });
+
+  it('rejects missing appointmentDate before persistence', async () => {
+    const app = createTestApp();
+    const { appointmentDate, ...payload } = validPayload;
+
+    const res = await request(app)
+      .post('/public/bookings')
+      .send(payload)
+      .expect(400);
+
+    expect(res.body.error).toBe('VALIDATION_ERROR');
+    expect(createIntakeSubmission).not.toHaveBeenCalled();
+    expect(processIntake).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['not-a-date', 'VALIDATION_ERROR'],
+    ['2026-02-30', 'INVALID_APPOINTMENT_DATE'],
+  ])('rejects malformed or impossible appointmentDate %s', async (appointmentDate, expectedError) => {
+    const app = createTestApp();
+
+    const res = await request(app)
+      .post('/public/bookings')
+      .send({ ...validPayload, appointmentDate })
+      .expect(400);
+
+    expect(res.body.error).toBe(expectedError);
+    expect(createIntakeSubmission).not.toHaveBeenCalled();
+    expect(processIntake).not.toHaveBeenCalled();
+  });
+
+  it('rejects past appointmentDate before persistence', async () => {
+    const app = createTestApp();
+
+    const res = await request(app)
+      .post('/public/bookings')
+      .send({ ...validPayload, appointmentDate: '2000-01-01' })
+      .expect(400);
+
+    expect(res.body.error).toBe('PAST_APPOINTMENT_DATE');
+    expect(createIntakeSubmission).not.toHaveBeenCalled();
+    expect(processIntake).not.toHaveBeenCalled();
+  });
+
+  it('rejects invalid appointmentWindow before persistence', async () => {
+    const app = createTestApp();
+
+    const res = await request(app)
+      .post('/public/bookings')
+      .send({ ...validPayload, appointmentWindow: 'Late Night' })
+      .expect(400);
+
+    expect(res.body.error).toBe('VALIDATION_ERROR');
+    expect(createIntakeSubmission).not.toHaveBeenCalled();
+    expect(processIntake).not.toHaveBeenCalled();
+  });
+
+  it('rejects Same Day when the public launch flag is disabled', async () => {
+    const app = createTestApp();
+
+    const res = await request(app)
+      .post('/public/bookings')
+      .send({ ...validPayload, rushType: 'Same-day (+30)' })
+      .expect(422);
+
+    expect(res.body.error).toBe('SAME_DAY_UNAVAILABLE');
+    expect(createIntakeSubmission).not.toHaveBeenCalled();
+    expect(processIntake).not.toHaveBeenCalled();
+  });
+
+  it('rejects unsupported service city before persistence', async () => {
+    const app = createTestApp();
+    vi.mocked(classifyServiceArea).mockResolvedValueOnce({
+      status: 'quote_only',
+      city: 'Atlanta',
+      state: 'GA',
+    });
+
+    const res = await request(app)
+      .post('/public/bookings')
+      .send({ ...validPayload, city: 'Atlanta' })
+      .expect(422);
+
+    expect(res.body.error).toBe('UNSUPPORTED_SERVICE_AREA');
+    expect(createIntakeSubmission).not.toHaveBeenCalled();
+    expect(processIntake).not.toHaveBeenCalled();
+  });
+
+  it('allows existing small and medium jobs under configured unit capacity', async () => {
+    const app = createTestApp();
+    vi.mocked(query).mockResolvedValueOnce(capacityRows('small', 'medium'));
+
+    await request(app)
+      .post('/public/bookings')
+      .send({ ...validPayload, serviceType: 'small' })
+      .expect(201);
+
+    expect(createIntakeSubmission).toHaveBeenCalled();
+    expect(processIntake).toHaveBeenCalled();
+  });
+
+  it('allows large plus large to fill configured unit capacity exactly', async () => {
+    const app = createTestApp();
+    vi.mocked(query).mockResolvedValueOnce(capacityRows('large'));
+
+    await request(app)
+      .post('/public/bookings')
+      .send({ ...validPayload, serviceType: 'large' })
+      .expect(201);
+
+    expect(createIntakeSubmission).toHaveBeenCalled();
+    expect(processIntake).toHaveBeenCalled();
+  });
+
+  it('rejects large plus large plus small before checkout creation', async () => {
+    const app = createTestApp();
+    vi.mocked(query).mockResolvedValueOnce(capacityRows('large', 'large'));
+
+    const res = await request(app)
+      .post('/public/bookings')
+      .send(validPayload)
+      .expect(409);
+
+    expectRecoverableCapacityResponse(res.body);
+    expect(createIntakeSubmission).not.toHaveBeenCalled();
+    expect(processIntake).not.toHaveBeenCalled();
+  });
+
+  it('rejects treadmill when existing jobs already use all configured units', async () => {
+    const app = createTestApp();
+    vi.mocked(query).mockResolvedValueOnce(capacityRows('treadmill', 'treadmill'));
+
+    const res = await request(app)
+      .post('/public/bookings')
+      .send({ ...validPayload, serviceType: 'treadmill' })
+      .expect(409);
+
+    expectRecoverableCapacityResponse(res.body);
+    expect(createIntakeSubmission).not.toHaveBeenCalled();
+    expect(processIntake).not.toHaveBeenCalled();
+  });
+
+  it('counts awaiting_payment jobs in the capacity status filter', async () => {
+    const app = createTestApp();
+    vi.mocked(query).mockResolvedValueOnce(capacityRows('large', 'large'));
+
+    const res = await request(app)
+      .post('/public/bookings')
+      .send(validPayload)
+      .expect(409);
+
+    expectRecoverableCapacityResponse(res.body);
+    const statusParam = vi.mocked(query).mock.calls[0][1]?.[3];
+    expect(statusParam).toContain('awaiting_payment');
+    expect(createIntakeSubmission).not.toHaveBeenCalled();
+    expect(processIntake).not.toHaveBeenCalled();
+  });
+
+  it('keeps cancelled and terminal jobs out of the capacity status filter', async () => {
+    const app = createTestApp();
+
+    await request(app)
+      .post('/public/bookings')
+      .send(validPayload)
+      .expect(201);
+
+    const statusParam = vi.mocked(query).mock.calls[0][1]?.[3];
+    expect(statusParam).not.toEqual(expect.arrayContaining([
+      'cancelled',
+      'closed_paid',
+      'work_completed',
+      'error_review',
+    ]));
   });
 
   it('rejects unknown fields', async () => {

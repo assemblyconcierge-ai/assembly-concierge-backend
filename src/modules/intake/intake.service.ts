@@ -74,7 +74,9 @@ export async function processIntake(
   const rawPaymentType = (intake.financials?.paymentType ?? '').toLowerCase();
   const checkoutType: 'full' | 'deposit' = rawPaymentType.includes('full') ? 'full' : 'deposit';
 
-  if (effectiveAreaStatus === 'in_area' && intake.service.typeCode !== 'custom') {
+  const REVIEW_ONLY_TYPES = new Set(['custom', 'fitness_equipment']);
+
+  if (effectiveAreaStatus === 'in_area' && !REVIEW_ONLY_TYPES.has(intake.service.typeCode)) {
     try {
       const rushTier = normalizeRushTier(intake.service.rushType ?? intake.service.rushRequested);
       pricing = await calculatePricing(intake.service.typeCode, rushTier);
@@ -87,7 +89,7 @@ export async function processIntake(
     } catch (err) {
       log.warn({ err, typeCode: intake.service.typeCode }, 'Pricing lookup failed — routing to error_review');
     }
-  } else if (intake.service.typeCode === 'custom') {
+  } else if (REVIEW_ONLY_TYPES.has(intake.service.typeCode)) {
     paymentMode = 'custom_review';
   } else {
     paymentMode = 'quote_only';

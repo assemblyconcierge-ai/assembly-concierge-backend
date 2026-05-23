@@ -49,6 +49,15 @@ const envSchema = z.object({
   FRONTEND_BASE_URL: z.string().optional(),
   ADMIN_JWT_SECRET: z.string().min(1),
 
+  // Public booking launch guards
+  PUBLIC_BOOKING_SAME_DAY_ENABLED: z.string().default('false'),
+  PUBLIC_BOOKING_FALLBACK_CONTRACTOR_COUNT: z.coerce.number().int().positive().default(2),
+  PUBLIC_BOOKING_UNITS_PER_CONTRACTOR_WINDOW: z.coerce.number().int().positive().default(2),
+  PUBLIC_BOOKING_SMALL_UNITS: z.coerce.number().int().positive().default(1),
+  PUBLIC_BOOKING_MEDIUM_UNITS: z.coerce.number().int().positive().default(1),
+  PUBLIC_BOOKING_LARGE_UNITS: z.coerce.number().int().positive().default(2),
+  PUBLIC_BOOKING_TREADMILL_UNITS: z.coerce.number().int().positive().default(2),
+
   // Webhook security
   JOTFORM_WEBHOOK_SECRET: z.string().optional(),
   MAKE_WEBHOOK_SECRET: z.string().optional(),
