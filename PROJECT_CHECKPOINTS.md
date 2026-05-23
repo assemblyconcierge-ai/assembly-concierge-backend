@@ -82,3 +82,47 @@ Next backend task:
 
 Do not start frontend contract until the review-request path is designed.
 
+
+
+## 2026-05-23 - Manual Review Request Endpoint Deployed
+
+Commit: 8a277a7
+
+Message: feat(public-booking): add manual review request endpoint
+
+Deploy: Live on Render
+
+Completed:
+- Added POST /public/review-requests.
+- Reused jobs + intake_submissions.
+- Used processIntake(..., { sourceChannel: 'web', forceReviewOnly: true }).
+- Kept sourceChannel as web.
+- Set source.formName to web-review-request.
+- Added no new table, migration, or job status.
+- Supported review reasons: custom_job, fitness_equipment, slot_full_manual_review, other_uncertain.
+- Returned only requestId, status, message, and correlationId.
+- Did not return publicPayToken, checkoutUrl, paymentToken, jobId, pricing fields, or Stripe fields.
+- forceReviewOnly skips calculatePricing before pricing logic and prevents checkout creation.
+- service_type_id is preserved before the pricing skip.
+- In-area review jobs become intake_validated, custom_review, and zero-dollar.
+- Outside-area behavior preserves existing quoted_outside_area behavior.
+
+Production validation:
+- Render deployed 8a277a7.
+- POST /public/review-requests returned HTTP 201.
+- Test job: AC-2026-BFYE.
+- Response contained no forbidden payment/internal fields.
+- Airtable received the record.
+- Airtable record showed review reason in customer notes.
+- Airtable expected-status formula was updated so intake_validated zero-dollar manual review jobs match instead of showing reconciliation mismatch.
+
+Tests/build:
+- npm.cmd test -- tests/modules/public-booking/publicBooking.routes.test.ts tests/unit/intakeQuoteOnly.test.ts
+- Result: 2 files passed, 27 tests passed.
+- npm.cmd run build passed.
+
+Remaining notes:
+- DB/payment-row absence was not directly verified from Codex environment.
+- Airtable mirror and zero-dollar/non-dispatch-eligible behavior were verified through the record.
+- Public booking frontend contract still needs to handle checkoutUrl null polling for fixed-price bookings.
+- No frontend work started yet.
