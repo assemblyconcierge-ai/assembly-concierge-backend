@@ -49,6 +49,12 @@ const validPayload = {
   appointmentWindow: 'Morning(8am-12pm)',
 };
 
+const validReviewPayload = {
+  ...validPayload,
+  serviceType: 'small',
+  details: 'The preferred window was full, but I would like the owner to review it.',
+};
+
 function capacityRows(...serviceCodes: Array<string | null>) {
   return serviceCodes.map((service_type_code) => ({ service_type_code }));
 }
@@ -63,7 +69,7 @@ function expectRecoverableCapacityResponse(body: Record<string, unknown>) {
   });
 }
 
-describe('POST /public/bookings', () => {
+describe('publicBookingRouter', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(createIntakeSubmission).mockResolvedValue({
@@ -166,6 +172,95 @@ describe('POST /public/bookings', () => {
     expect(intake.meta).toBeUndefined();
     expect(markProcessing).toHaveBeenCalledWith('sub-123');
     expect(markProcessed).toHaveBeenCalledWith('sub-123', intake);
+  });
+
+  it('creates a manual review request and returns only the customer-safe payload', async () => {
+    const app = createTestApp();
+
+    const res = await request(app)
+      .post('/public/review-requests')
+      .send(validReviewPayload)
+      .expect(201);
+
+    expect(res.body).toEqual({
+      requestId: 'AC-2026-TEST',
+      status: 'received',
+      message: 'Your request was received for manual review.',
+      correlationId: expect.any(String),
+    });
+    expect(res.body).not.toHaveProperty('publicPayToken');
+    expect(res.body).not.toHaveProperty('checkoutUrl');
+    expect(res.body).not.toHaveProperty('paymentToken');
+    expect(res.body).not.toHaveProperty('jobId');
+    expect(res.body).not.toHaveProperty('totalAmountCents');
+    expect(res.body).not.toHaveProperty('stripeCheckoutSessionId');
+    expect(res.body).not.toHaveProperty('stripePaymentIntentId');
+
+    const createArgs = vi.mocked(createIntakeSubmission).mock.calls[0][0];
+    expect(createArgs.source).toBe('web');
+    expect(createArgs.externalSubmissionId).toMatch(/^web-review-/);
+    expect(createArgs.idempotencyKey).toBe(`web:${createArgs.externalSubmissionId}`);
+    expect(createArgs.rawPayload).toMatchObject({
+      ...validReviewPayload,
+      state: 'GA',
+      reviewReason: 'other_uncertain',
+      rushType: 'No Rush',
+      requestType: 'manual_review',
+    });
+
+    const [submissionId, intake, correlationId, opts] = vi.mocked(processIntake).mock.calls[0];
+    expect(submissionId).toBe('sub-123');
+    expect(correlationId).toEqual(expect.any(String));
+    expect(opts).toEqual({ sourceChannel: 'web', forceReviewOnly: true });
+    expect(intake).toMatchObject({
+      externalSubmissionId: createArgs.externalSubmissionId,
+      customer: {
+        firstName: 'Jane',
+        lastName: 'Smith',
+        fullName: 'Jane Smith',
+        email: 'jane@example.com',
+        phone: '+14045551234',
+      },
+      address: {
+        line1: '123 Main St',
+        city: 'Hampton',
+        state: 'GA',
+      },
+      service: {
+        typeCode: 'small',
+        rushRequested: false,
+        rushType: 'No Rush',
+        customJobDetails: `Review reason: other_uncertain\n${validReviewPayload.details}`,
+      },
+      appointment: {
+        date: '2099-06-15',
+        window: 'Morning(8am-12pm)',
+      },
+      source: {
+        formName: 'web-review-request',
+        raw: createArgs.rawPayload,
+      },
+    });
+    expect(markProcessing).toHaveBeenCalledWith('sub-123');
+    expect(markProcessed).toHaveBeenCalledWith('sub-123', intake);
+  });
+
+  it.each([
+    ['custom'],
+    ['fitness_equipment'],
+    ['unknown'],
+    ['uncertain'],
+  ])('accepts review-only service type %s for manual review', async (serviceType) => {
+    const app = createTestApp();
+
+    await request(app)
+      .post('/public/review-requests')
+      .send({ ...validReviewPayload, serviceType })
+      .expect(201);
+
+    const [, intake, , opts] = vi.mocked(processIntake).mock.calls[0];
+    expect(opts).toEqual({ sourceChannel: 'web', forceReviewOnly: true });
+    expect(intake.service.typeCode).toBe(serviceType);
   });
 
   it.each([

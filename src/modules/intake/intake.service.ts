@@ -38,7 +38,7 @@ export async function processIntake(
   intakeSubmissionId: string,
   intake: CanonicalIntake,
   correlationId: string,
-  opts?: { sourceChannel?: string },
+  opts?: { sourceChannel?: string; forceReviewOnly?: boolean },
 ): Promise<IntakeProcessResult> {
   const log = logger.child({ correlationId, fn: 'processIntake' });
 
@@ -75,17 +75,20 @@ export async function processIntake(
   const checkoutType: 'full' | 'deposit' = rawPaymentType.includes('full') ? 'full' : 'deposit';
 
   const REVIEW_ONLY_TYPES = new Set(['custom', 'fitness_equipment']);
+  const forceReviewOnly = opts?.forceReviewOnly === true;
 
-  if (effectiveAreaStatus === 'in_area' && !REVIEW_ONLY_TYPES.has(intake.service.typeCode)) {
+  const stRows = await query<{ id: string }>(
+    'SELECT id FROM service_types WHERE code = $1 AND is_active = TRUE LIMIT 1',
+    [intake.service.typeCode],
+  );
+  serviceTypeId = stRows[0]?.id ?? null;
+
+  if (forceReviewOnly) {
+    paymentMode = 'custom_review';
+  } else if (effectiveAreaStatus === 'in_area' && !REVIEW_ONLY_TYPES.has(intake.service.typeCode)) {
     try {
       const rushTier = normalizeRushTier(intake.service.rushType ?? intake.service.rushRequested);
       pricing = await calculatePricing(intake.service.typeCode, rushTier);
-      // Lookup service_type_id
-      const stRows = await query<{ id: string }>(
-        'SELECT id FROM service_types WHERE code = $1 AND is_active = TRUE LIMIT 1',
-        [intake.service.typeCode],
-      );
-      serviceTypeId = stRows[0]?.id ?? null;
     } catch (err) {
       log.warn({ err, typeCode: intake.service.typeCode }, 'Pricing lookup failed — routing to error_review');
     }

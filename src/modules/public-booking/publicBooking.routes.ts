@@ -58,8 +58,38 @@ const publicBookingSchema = z
   })
   .strict();
 
+const publicReviewRequestSchema = z
+  .object({
+    firstName: z.string().trim().min(1),
+    lastName: z.string().trim().min(1),
+    email: z.string().trim().email(),
+    phone: z.string().trim().min(7),
+    addressLine1: z.string().trim().min(1),
+    city: z.string().trim().min(1),
+    state: z
+      .string()
+      .trim()
+      .length(2)
+      .default('GA')
+      .transform((value) => value.toUpperCase()),
+    postalCode: z.string().trim().min(1).optional(),
+    serviceType: z
+      .enum(['small', 'medium', 'large', 'treadmill', 'custom', 'fitness_equipment', 'unknown', 'uncertain'])
+      .default('unknown'),
+    reviewReason: z
+      .enum(['custom_job', 'fitness_equipment', 'slot_full_manual_review', 'other_uncertain'])
+      .default('other_uncertain'),
+    rushType: z.enum(['No Rush', 'Same-day (+30)', 'Next-day (+20)']).default('No Rush'),
+    appointmentDate: z.string().regex(isoDatePattern).optional(),
+    appointmentWindow: z.enum(['Morning(8am-12pm)', 'Afternoon(12pm-4pm)', 'Evening(4pm-8pm)']).optional(),
+    details: z.string().trim().min(1),
+    customJobDetails: z.string().trim().min(1).optional(),
+  })
+  .strict();
+
 type PublicBookingRequest = z.infer<typeof publicBookingSchema>;
 type PublicFixedPriceServiceType = PublicBookingRequest['serviceType'];
+type PublicReviewRequest = z.infer<typeof publicReviewRequestSchema>;
 
 interface CapacityJobRow {
   service_type_code: string | null;
@@ -123,6 +153,56 @@ function validateSchedule(body: PublicBookingRequest): { error?: string; message
   return {};
 }
 
+function validateOptionalSchedule(
+  body: Pick<PublicReviewRequest, 'appointmentDate' | 'appointmentWindow'>,
+): { error?: string; message?: string } {
+  if (!body.appointmentDate && !body.appointmentWindow) {
+    return {};
+  }
+
+  if (body.appointmentWindow && !body.appointmentDate) {
+    return {
+      error: 'MISSING_APPOINTMENT_DATE',
+      message: 'appointmentDate is required when appointmentWindow is provided.',
+    };
+  }
+
+  if (!body.appointmentDate) {
+    return {};
+  }
+
+  const appointmentDate = DateTime.fromISO(body.appointmentDate, {
+    zone: PUBLIC_BOOKING_TIMEZONE,
+  });
+  if (!appointmentDate.isValid || appointmentDate.toISODate() !== body.appointmentDate) {
+    return {
+      error: 'INVALID_APPOINTMENT_DATE',
+      message: 'appointmentDate must be a real calendar date in YYYY-MM-DD format.',
+    };
+  }
+
+  const today = DateTime.now().setZone(PUBLIC_BOOKING_TIMEZONE).startOf('day');
+  if (appointmentDate.startOf('day') < today) {
+    return {
+      error: 'PAST_APPOINTMENT_DATE',
+      message: 'appointmentDate must not be in the past.',
+    };
+  }
+
+  if (body.appointmentWindow) {
+    try {
+      parseSchedule(body.appointmentDate, body.appointmentWindow, PUBLIC_BOOKING_TIMEZONE);
+    } catch {
+      return {
+        error: 'SCHEDULE_PARSE_FAILED',
+        message: 'appointmentDate and appointmentWindow could not be converted to a schedule.',
+      };
+    }
+  }
+
+  return {};
+}
+
 function serviceUnits(serviceType: string | null | undefined): number {
   const unitsByService: Record<PublicFixedPriceServiceType, number> = {
     small: config.PUBLIC_BOOKING_SMALL_UNITS,
@@ -136,6 +216,10 @@ function serviceUnits(serviceType: string | null | undefined): number {
   }
 
   return Math.max(...Object.values(unitsByService));
+}
+
+function reviewDetails(body: PublicReviewRequest): string {
+  return `Review reason: ${body.reviewReason}\n${body.details}`;
 }
 
 function totalCapacityUnits(): number {
@@ -199,6 +283,45 @@ function toCanonicalIntake(
     source: {
       formName: 'web-booking',
       raw: body,
+    },
+  };
+}
+
+function toReviewCanonicalIntake(
+  body: PublicReviewRequest,
+  externalSubmissionId: string,
+  rawPayload: Record<string, unknown>,
+): CanonicalIntake {
+  return {
+    externalSubmissionId,
+    submittedAt: new Date().toISOString(),
+    customer: {
+      firstName: body.firstName,
+      lastName: body.lastName,
+      fullName: `${body.firstName} ${body.lastName}`.trim(),
+      email: body.email,
+      phone: normalizePhone(body.phone),
+    },
+    address: {
+      line1: body.addressLine1,
+      city: body.city,
+      state: body.state,
+      postalCode: body.postalCode,
+    },
+    service: {
+      typeCode: body.serviceType,
+      rushRequested: isRushRequested(body.rushType),
+      rushType: body.rushType,
+      customJobDetails: reviewDetails(body),
+    },
+    appointment: {
+      date: body.appointmentDate,
+      window: body.appointmentWindow,
+    },
+    media: [],
+    source: {
+      formName: 'web-review-request',
+      raw: rawPayload,
     },
   };
 }
@@ -295,6 +418,79 @@ publicBookingRouter.post(
           await markFailed(submissionId, message);
         } catch (markErr) {
           logger.error({ err: markErr, submissionId, correlationId }, 'Failed to mark public booking submission failed');
+        }
+      }
+      next(err);
+    }
+  },
+);
+
+publicBookingRouter.post(
+  '/review-requests',
+  publicBookingRateLimiter,
+  async (req: Request, res: Response, next: NextFunction) => {
+    const correlationId = req.correlationId || uuidv4();
+    const parsed = publicReviewRequestSchema.safeParse(req.body);
+
+    if (!parsed.success) {
+      res.status(400).json({
+        error: 'VALIDATION_ERROR',
+        message: 'Request validation failed',
+        details: parsed.error.flatten(),
+        correlationId,
+      });
+      return;
+    }
+
+    let submissionId: string | undefined;
+
+    try {
+      const scheduleValidation = validateOptionalSchedule(parsed.data);
+      if (scheduleValidation.error) {
+        res.status(400).json({
+          error: scheduleValidation.error,
+          message: scheduleValidation.message,
+          correlationId,
+        });
+        return;
+      }
+
+      const externalSubmissionId = `web-review-${uuidv4()}`;
+      const idempotencyKey = computeIdempotencyKey('web', externalSubmissionId);
+      const rawPayload = {
+        ...parsed.data,
+        requestType: 'manual_review',
+      };
+      const intake = toReviewCanonicalIntake(parsed.data, externalSubmissionId, rawPayload);
+      const submission = await createIntakeSubmission({
+        source: 'web',
+        externalSubmissionId,
+        rawPayload,
+        idempotencyKey,
+        correlationId,
+      });
+      submissionId = submission.id;
+
+      await markProcessing(submission.id);
+      const result = await processIntake(submission.id, intake, correlationId, {
+        sourceChannel: 'web',
+        forceReviewOnly: true,
+      });
+      await markProcessed(submission.id, intake);
+
+      res.status(201).json({
+        requestId: result.jobKey,
+        status: 'received',
+        message: 'Your request was received for manual review.',
+        correlationId,
+      });
+    } catch (err) {
+      if (submissionId) {
+        const message = err instanceof Error ? err.message : String(err);
+        try {
+          await markFailed(submissionId, message);
+        } catch (markErr) {
+          logger.error({ err: markErr, submissionId, correlationId }, 'Failed to mark public review request failed');
         }
       }
       next(err);
