@@ -8,6 +8,7 @@ import { recordAuditEvent } from '../audit/audit.service';
 import { generateJobKey, generatePublicPayToken } from '../../common/utils';
 import { enqueueAirtableSync } from '../airtable-sync/airtableSync.queue';
 import { createJobCheckoutSession } from '../payments/payment.service';
+import { sendPaymentLinkSms } from '../notifications/paymentLink.sms';
 import { logger } from '../../common/logger';
 import { query } from '../../db/pool';
 import { parseSchedule } from '../../common/utils/scheduleUtils';
@@ -235,7 +236,7 @@ export async function processIntake(
   if (result.checkoutRequired) {
     setImmediate(async () => {
       try {
-        const { checkoutUrl, sessionId } = await createJobCheckoutSession(
+        const { checkoutUrl, sessionId, customerPhone } = await createJobCheckoutSession(
           result.jobId,
           checkoutType,
           correlationId,
@@ -244,6 +245,12 @@ export async function processIntake(
           { jobId: result.jobId, sessionId, checkoutUrl },
           'Checkout session auto-created after intake',
         );
+        if (customerPhone) {
+          sendPaymentLinkSms(result.jobId, customerPhone, checkoutUrl, correlationId).catch(
+            (smsErr) =>
+              log.warn({ err: smsErr, jobId: result.jobId }, '[Intake] Payment link SMS failed'),
+          );
+        }
       } catch (err) {
         log.error(
           { err, jobId: result.jobId, correlationId },

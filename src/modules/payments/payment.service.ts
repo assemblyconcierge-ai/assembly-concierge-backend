@@ -88,7 +88,7 @@ export async function createJobCheckoutSession(
   jobId: string,
   paymentType: 'full' | 'deposit' | 'remainder',
   correlationId: string,
-): Promise<{ checkoutUrl: string; paymentId: string; sessionId: string }> {
+): Promise<{ checkoutUrl: string; paymentId: string; sessionId: string; customerPhone: string }> {
   const job = await getJobById(jobId);
   if (!job) throw new Error(`Job not found: ${jobId}`);
 
@@ -107,8 +107,8 @@ export async function createJobCheckoutSession(
   }
 
   // Get customer info
-  const customerRows = await query<{ full_name: string; email: string }>(
-    'SELECT full_name, email FROM customers WHERE id = $1',
+  const customerRows = await query<{ full_name: string; email: string; phone_e164: string }>(
+    'SELECT full_name, email, phone_e164 FROM customers WHERE id = $1',
     [job.customer_id],
   );
   const customer = customerRows[0];
@@ -226,5 +226,6 @@ export async function createJobCheckoutSession(
     checkoutUrl: session.url!,
     paymentId: payment.id,
     sessionId: session.id,
+    customerPhone: customer.phone_e164,
   };
 }

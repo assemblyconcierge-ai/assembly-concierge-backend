@@ -541,4 +541,12 @@ ALTER TABLE jobs
   ADD COLUMN IF NOT EXISTS customer_confirm_text_status  TEXT;
 `,
   },
+  {
+    filename: '012_add_payment_link_sms_fields.sql',
+    sql: `
+ALTER TABLE jobs
+  ADD COLUMN IF NOT EXISTS payment_link_sms_sent_at TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS payment_link_sms_status  TEXT;
+`,
+  },
 ];
