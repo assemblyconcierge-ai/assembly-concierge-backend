@@ -26,16 +26,17 @@
 16. [Production SMS Command Routing and Lifecycle Hardening](#phase-13)
 17. [Phase 14 — SMS Lifecycle Hardening: OTW Guard and Customer Confirmation (May 2026)](#phase-14)
 18. [Phase 15 — Cancel Job Endpoint and Airtable Operator Workflow (May 2026)](#phase-15)
-19. [Current Architecture](#current-architecture)
-20. [Job State Machine](#job-state-machine)
-21. [SMS Command Protocol](#sms-command-protocol)
-22. [API Reference](#api-reference)
-23. [Admin Endpoint Reference](#admin-endpoint-reference)
-24. [Airtable Operator Interface](#airtable-operator-interface)
-25. [Key Engineering Decisions](#key-engineering-decisions)
-26. [Deployment](#deployment)
-27. [Environment Variables](#environment-variables)
-28. [Commit History](#commit-history--key-milestones)
+19. [Phase 16 — Public Booking: Scheduler-First Intake, Manual Review, and SMS Payment Link Fallback (May 2026)](#phase-16)
+20. [Current Architecture](#current-architecture)
+21. [Job State Machine](#job-state-machine)
+22. [SMS Command Protocol](#sms-command-protocol)
+23. [API Reference](#api-reference)
+24. [Admin Endpoint Reference](#admin-endpoint-reference)
+25. [Airtable Operator Interface](#airtable-operator-interface)
+26. [Key Engineering Decisions](#key-engineering-decisions)
+27. [Deployment](#deployment)
+28. [Environment Variables](#environment-variables)
+29. [Commit History](#commit-history--key-milestones)
 
 ---
 
@@ -931,6 +932,119 @@ Both `Cancel Job Requested` and `Cancel Job Confirmed` must be checked before th
 
 ---
 
+<a name="phase-16"></a>
+## Phase 16 — Public Booking: Scheduler-First Intake, Manual Review, and SMS Payment Link Fallback (May 2026)
+
+Commits: `d6db9e6`, `8a277a7`, `1bae5a6`, `f6aea0d`
+
+### 16.1 Scheduler-first public booking intake
+
+`POST /public/bookings` was hardened to require a scheduled appointment before a job is created.
+
+**Changes:**
+
+- `appointmentDate` is now **required** on all fixed-price public bookings. Requests without it return `400 VALIDATION_ERROR`.
+- Invalid calendar dates (e.g., `2026-02-30`) return `400 INVALID_APPOINTMENT_DATE`.
+- Past dates return `400 PAST_APPOINTMENT_DATE`.
+- Same-day public booking is disabled. Requests for today's date return `422 SAME_DAY_UNAVAILABLE`.
+- Capacity is now **unit-based** rather than a flat booking count:
+  - Default capacity = 2 fallback contractors × 2 units = 4 units per city/date/window.
+  - `small` and `medium` = 1 unit. `large` and `treadmill` = 2 units.
+- A full or overbooked slot returns `409 APPOINTMENT_SLOT_UNAVAILABLE` with `recoverable: true` and `manualReviewAvailable: true` rather than a dead-end error.
+- `fitness_equipment` is protected from zero-dollar checkout by routing through `forceReviewOnly` in core intake before the pricing lookup runs.
+- `GET /jobs/pay/:publicPayToken` was hardened to remain safe when `checkoutUrl` is temporarily null while the Stripe session is still being created asynchronously.
+
+**`appointmentWindow` values (exact strings, validated server-side):**
+
+- `Morning(8am-12pm)`
+- `Afternoon(12pm-4pm)`
+- `Evening(4pm-8pm)`
+
+### 16.2 Manual review request endpoint
+
+`POST /public/review-requests` was added to handle all non-fixed-price intake paths.
+
+**Routes to this endpoint:**
+
+| `reviewReason` | Use case |
+|---|---|
+| `custom_job` | Customer describes a custom assembly project |
+| `fitness_equipment` | Fitness equipment requiring manual scoping |
+| `slot_full_manual_review` | Fixed-price slot full — customer requests the window anyway |
+| `other_uncertain` | Uncertain or out-of-category service type |
+
+**What the backend does:**
+
+- Reuses `processIntake()` with `{ sourceChannel: 'web', forceReviewOnly: true }`.
+- Job status: `intake_validated`. Payment mode: `custom_review`. Amount: `$0`.
+- No Stripe checkout session is created. No payment-link SMS is sent.
+- Job is not eligible for contractor dispatch.
+- Airtable receives the record for owner review and follow-up.
+- Response returns only: `requestId` (job key), `status`, `message`, `correlationId`. No `publicPayToken` or payment fields.
+
+**Validation:**
+
+- `details` is required (minimum 1 character).
+- `appointmentDate` and `appointmentWindow` are both optional. Sending `appointmentWindow` without `appointmentDate` returns `400 MISSING_APPOINTMENT_DATE`.
+- Strict schema — undeclared fields are rejected.
+
+### 16.3 SMS payment link fallback
+
+After a fixed-price job is created and its Stripe checkout session is generated, the customer receives a payment link by SMS.
+
+**New module:** `src/modules/notifications/paymentLink.sms.ts`
+
+**SMS message:** `Assembly Concierge: Complete your deposit to secure your preferred appointment window: <checkoutUrl>`
+
+**Duplicate guard (claim-before-send):**
+
+The send is gated on an atomic `UPDATE jobs SET payment_link_sms_sent_at = NOW() WHERE id = $1 AND payment_link_sms_sent_at IS NULL RETURNING id`. If the column is already set, the UPDATE returns zero rows and the send is skipped. This makes the function safe to call from fire-and-forget `setImmediate` contexts.
+
+**Status tracking:** `payment_link_sms_status` column on `jobs` tracks `in_flight → sent` on success or `in_flight → failed` on provider error.
+
+**Migration:** `012_add_payment_link_sms_fields.sql` adds `payment_link_sms_sent_at TIMESTAMPTZ` and `payment_link_sms_status TEXT` to `jobs`.
+
+**Integration point:** Triggered from the existing `setImmediate` block in `intake.service.ts` immediately after `createJobCheckoutSession` returns. SMS errors are isolated from checkout errors — a thrown SMS error cannot propagate into the checkout failure audit path.
+
+**Scope:**
+
+- Fixed-price jobs with `checkoutRequired: true` only.
+- No SMS is sent for manual review / `custom_review` jobs.
+- No admin resend endpoint. No retry cron. No email fallback. No short links.
+
+### 16.4 Frontend contract
+
+`docs/public-booking-frontend-contract.md` was created as the authoritative API contract for frontend integration of the scheduler-first booking flow.
+
+**Covers:**
+
+- Fixed-price available-slot flow and checkout polling behavior (`GET /jobs/pay/:publicPayToken`).
+- Fixed-price unavailable-slot recovery: two explicit choices — choose another window, or request the window anyway via `POST /public/review-requests`.
+- Manual review flow across all four `reviewReason` values.
+- Complete request/response shapes for all three endpoints.
+- Error table mapping every HTTP status code to a specific frontend action.
+- Customer-facing wording guidance (what to say and what to avoid).
+- Explicit list of what not to build yet.
+
+### 16.5 Validation
+
+- `npm run build` passed.
+- Targeted tests passed for public booking routes, intake quote-only behavior, and payment-link SMS unit tests (`32/32`).
+- Full test suite passed (`183/183`).
+- Render deployed `d6db9e6` and `8a277a7`.
+- Production `/health` returned `status ok`, `version 2.0.0`, `production`.
+- `POST /public/review-requests` returned `HTTP 201` in production; Airtable received the record.
+- Test job: `AC-2026-BFYE`.
+
+### 16.6 Notes
+
+- The SMS fallback is a safety net for customers who leave the page after booking. The primary customer path is `POST /public/bookings → poll GET /jobs/pay/:publicPayToken → redirect to Stripe`. The SMS payment link is not the primary redirect mechanism.
+- `checkoutUrl` is null on the first poll; this is expected and not an error. Frontend must poll up to ~15 attempts (30s) before showing the SMS fallback message.
+- Manual review jobs create a zero-dollar job record and sync to Airtable. Owner follow-up and pricing happen outside the automated backend flow.
+- `in_flight` SMS status persists if the process dies between the CAS guard UPDATE and the `sendSms` call. No auto-recovery for this edge case in v1; logging provides visibility.
+
+---
+
 ## Current Architecture
 
 ```
@@ -1274,6 +1388,10 @@ Hosted on **Render** (Oregon region).
 | `fix(sms): improve contractor command helper messages` (`6002479`) | Ambiguity SMS lists active job codes; confirm-first helpers guide out-of-order OTW/DONE/FINISH replies |
 | `fix(sms): improve contractor and customer confirmation messaging` (`697eee7`) | Migration 011; `customer_confirm_text_sent_at/status`; customer confirmation SMS after CONFIRM; confirm-first helper for plain OTW before CONFIRM on single pending job |
 | `feat(jobs): add admin cancel job endpoint` (`8bc2ec2`) | `POST /jobs/:jobId/cancel` — locks job row, transitions to `cancelled`, cancels active assignments, expires dispatches, writes `job.cancelled` audit event; Airtable double-confirmation safety gate via Make |
+| `fix(public-booking): harden scheduled fixed-price intake` (`d6db9e6`) | `appointmentDate` required; date validation (invalid, past, same-day); unit-based capacity; recoverable 409 with `manualReviewAvailable`; `fitness_equipment` zero-dollar guard |
+| `feat(public-booking): add manual review request endpoint` (`8a277a7`) | `POST /public/review-requests` — four `reviewReason` values; reuses `processIntake` with `forceReviewOnly`; zero-dollar, no checkout, no dispatch, Airtable sync |
+| `feat(payments): text checkout link after session creation` (`1bae5a6`) | Migration 012; `paymentLink.sms.ts`; claim-before-send CAS guard; `payment_link_sms_sent_at/status` columns; integrated into intake `setImmediate` block after checkout creation |
+| `docs(public-booking): add frontend scheduler contract` (`f6aea0d`) | `docs/public-booking-frontend-contract.md` — full frontend API contract for all three public booking paths, polling behavior, error table, wording guidance |
 
 ---
 
