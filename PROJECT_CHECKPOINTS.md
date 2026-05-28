@@ -126,3 +126,31 @@ Remaining notes:
 - Airtable mirror and zero-dollar/non-dispatch-eligible behavior were verified through the record.
 - Public booking frontend contract still needs to handle checkoutUrl null polling for fixed-price bookings.
 - No frontend work started yet.
+
+## 2026-05-28 — Frontend Scheduler Deployed
+
+Commits: 4231720 (backend), d5283b4 (backend), c1dc86f (frontend)
+
+Frontend repo: https://github.com/assemblyconcierge-ai/assembly-concierge-frontend
+
+Completed:
+- Next.js 16 frontend built and deployed to Vercel.
+- /book: 4-step scheduler stepper (service → contact/address → scheduling → review/submit).
+- /book/waiting: polls GET /jobs/pay/:publicPayToken until checkoutUrl is ready, then redirects to Stripe.
+- Fixed-price path (Small/Medium/Large/Treadmill) reaches Stripe Checkout.
+- Quote/manual-review path (Fitness Equipment/Custom) shows inline confirmation card after POST /public/review-requests.
+- CORS fix: CORS_ALLOWED_ORIGINS env var added to backend; frontend preflight requests unblocked.
+- Airtable fix: intake_validated maps to manual_review (was pending_payment) for quote/review records.
+- Quote details validation: blank submit focuses textarea and shows inline error message; does not reach API.
+
+Validation:
+- Backend: npm run build passed. npm test passed — 14 files, 183 tests.
+- Frontend: npm run build passed.
+- CORS OPTIONS preflight to both /public/review-requests and /public/bookings returned 204 with correct Access-Control-Allow-Origin header.
+- Smoke test records: AC-2026-THI0, AC-2026-UOQC (manual_review / intake_validated ✓), AC-2026-UDF8 (awaiting_payment / checkout reached ✓).
+
+Known remaining:
+- Root "/" shows default Next.js starter page; /book is the scheduler entry point.
+- No custom domain connected yet.
+- Stripe payment was not completed in smoke test (intentional).
+- Older manual-review records may show pending_payment until their next Airtable sync event.

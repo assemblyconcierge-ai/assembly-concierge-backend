@@ -27,16 +27,17 @@
 17. [Phase 14 — SMS Lifecycle Hardening: OTW Guard and Customer Confirmation (May 2026)](#phase-14)
 18. [Phase 15 — Cancel Job Endpoint and Airtable Operator Workflow (May 2026)](#phase-15)
 19. [Phase 16 — Public Booking: Scheduler-First Intake, Manual Review, and SMS Payment Link Fallback (May 2026)](#phase-16)
-20. [Current Architecture](#current-architecture)
-21. [Job State Machine](#job-state-machine)
-22. [SMS Command Protocol](#sms-command-protocol)
-23. [API Reference](#api-reference)
-24. [Admin Endpoint Reference](#admin-endpoint-reference)
-25. [Airtable Operator Interface](#airtable-operator-interface)
-26. [Key Engineering Decisions](#key-engineering-decisions)
-27. [Deployment](#deployment)
-28. [Environment Variables](#environment-variables)
-29. [Commit History](#commit-history--key-milestones)
+20. [Phase 17 — Frontend Scheduler: Public Booking UI Deployed (May 2026)](#phase-17)
+21. [Current Architecture](#current-architecture)
+22. [Job State Machine](#job-state-machine)
+23. [SMS Command Protocol](#sms-command-protocol)
+24. [API Reference](#api-reference)
+25. [Admin Endpoint Reference](#admin-endpoint-reference)
+26. [Airtable Operator Interface](#airtable-operator-interface)
+27. [Key Engineering Decisions](#key-engineering-decisions)
+28. [Deployment](#deployment)
+29. [Environment Variables](#environment-variables)
+30. [Commit History](#commit-history--key-milestones)
 
 ---
 
@@ -1045,6 +1046,96 @@ The send is gated on an atomic `UPDATE jobs SET payment_link_sms_sent_at = NOW()
 
 ---
 
+<a name="phase-17"></a>
+## Phase 17 — Frontend Scheduler: Public Booking UI Deployed (May 2026)
+
+Commits: `4231720`, `d5283b4` (backend) · `c1dc86f` (frontend)
+
+Frontend repo: https://github.com/assemblyconcierge-ai/assembly-concierge-frontend
+
+### 17.1 Frontend scaffold and booking flow
+
+A Next.js 16 frontend was built and deployed to Vercel as the public-facing customer scheduler.
+
+**Routes:**
+- `/book` — 4-step booking stepper: service type → contact/address → scheduling → review/submit
+- `/book/waiting` — payment polling page; polls `GET /jobs/pay/:publicPayToken` until `checkoutUrl` is available, then redirects to Stripe Checkout
+
+**Service paths handled by the frontend:**
+
+| Service type | Frontend path | Backend endpoint |
+|---|---|---|
+| Small, Medium, Large, Treadmill | Fixed-price booking → Stripe | `POST /public/bookings` → `/book/waiting` |
+| Fitness Equipment, Custom | Quote/manual-review | `POST /public/review-requests` → inline confirmation card |
+
+**Stack:** Next.js 16 (App Router) · TypeScript · Tailwind CSS · Deployed on Vercel
+
+### 17.2 Backend CORS fix (`4231720`)
+
+The frontend's `fetch` calls were blocked at preflight. The backend returned HTTP 200 on OPTIONS requests but emitted no `Access-Control-*` headers for the frontend origin.
+
+**Root cause:** `allowedCorsOrigins` in `src/app.ts` was built only from `APP_BASE_URL` and `FRONTEND_BASE_URL`. In production, `APP_BASE_URL` is the backend's own Render domain and `FRONTEND_BASE_URL` was unset — so no frontend origin was ever in the allowed set.
+
+**Fix:**
+- Added `CORS_ALLOWED_ORIGINS` to `src/common/config.ts` — optional, comma-separated list of full URLs.
+- Added `parseCorsAllowedOrigins()` in `src/app.ts` — splits on comma, trims whitespace, ignores empty tokens, normalizes each via the existing `toOrigin()` helper. Wildcards are silently rejected (the URL parser throws on non-URL values).
+- Parsed origins are merged into `allowedCorsOrigins` alongside the existing `APP_BASE_URL` / `FRONTEND_BASE_URL` entries. All other CORS logic unchanged.
+
+**Verification:** OPTIONS preflight to `/public/review-requests` and `/public/bookings` with `Origin: http://localhost:3000` returned HTTP 204 with `Access-Control-Allow-Origin: http://localhost:3000`.
+
+### 17.3 Airtable Status fix for manual-review records (`d5283b4`)
+
+Quote/manual-review jobs (`fitness_equipment`, `custom`) have backend status `intake_validated` permanently — they never proceed to payment. `JOB_STATUS_MAP` was mapping `intake_validated → 'pending_payment'`, so these records appeared in Airtable as `pending_payment` despite being zero-dollar review records.
+
+**Root cause confirmed:** `intake_validated` is only ever assigned to `custom_review` jobs (`intake.service.ts:108–109`). Fixed-price in-area jobs go directly to `awaiting_payment` — they never land on `intake_validated`. The mapping change is therefore safe and does not affect fixed-price records.
+
+**Fix:** Added `manual_review` as a new Airtable "Status" single-select option, then changed one line:
+
+```diff
+-  intake_validated: 'pending_payment',
++  intake_validated: 'manual_review',
+```
+
+New records sync with `Status = manual_review`. Records created before this fix continue to show `pending_payment` until their next sync event.
+
+### 17.4 Frontend UX fix: quote details validation (`c1dc86f`)
+
+Submitting the quote/manual-review form with a blank "Job details" field sent the request to the backend, which returned `VALIDATION_ERROR`. The generic error banner ("Some fields are invalid — please review your information and try again.") appeared above the Submit button, displaced from the field and without naming it.
+
+**Fix:**
+- Client-side guard in `handleSubmit`: if `isQuote && details.trim() === ''`, set `detailsError` state, focus the textarea via `detailsRef`, reset submitting, and return — the API is never called.
+- Inline error renders directly under the textarea: *"Please describe the item(s) so we can prepare an accurate quote."*
+- Error clears on the user's first keystroke via `onChange`.
+- No change to the fixed-price booking flow or the existing API error banner.
+
+### 17.5 Smoke test results (2026-05-28)
+
+| Record | Service | Backend Status | Airtable Status | Result |
+|---|---|---|---|---|
+| AC-2026-UDF8 | Large Assembly (fixed-price) | `awaiting_payment` | `pending_payment` | Reached Stripe checkout/waiting — ✓ |
+| AC-2026-THI0 | Custom (manual review) | `intake_validated` | `manual_review` | Inline confirmation card shown — ✓ |
+| AC-2026-UOQC | Custom (manual review) | `intake_validated` | `manual_review` | Inline confirmation card shown — ✓ |
+
+Stripe payment was not completed (intentional — no test charge made).
+
+### 17.6 Known remaining items
+
+- Root `/` shows the default Next.js starter page. A redirect to `/book` or a landing page is deferred.
+- No custom domain connected. Frontend is on a Vercel-generated URL.
+- Older manual-review records created before the Airtable fix continue to show `pending_payment` until their next sync event.
+- `Overall Payment Status` formula may show `partial_or_in_progress` for $0 manual-review records — cosmetic, not a data integrity issue.
+
+### 17.7 Validation
+
+- `npm run build` passed (TypeScript clean) — both repos.
+- `npm test` passed — 14 files, 183 tests (backend).
+- Backend commits `4231720` and `d5283b4` deployed live on Render.
+- Frontend commit `c1dc86f` was pushed to GitHub; Vercel deployment was live and `/book` was smoke tested.
+- CORS preflights verified via PowerShell OPTIONS requests to both public endpoints.
+- Quote and fixed-price booking flows manually smoke tested against the production backend.
+
+---
+
 ## Current Architecture
 
 ```
@@ -1343,6 +1434,7 @@ Hosted on **Render** (Oregon region).
 | `QUO_PHONE_NUMBER_ID` | Yes | Quo sending number ID |
 | `REDIS_URL` | No | BullMQ degrades to in-process if absent |
 | `ENABLE_TEST_ROUTES` | No | Set true only in staging |
+| `CORS_ALLOWED_ORIGINS` | No | Comma-separated browser origins allowed by CORS. |
 
 ---
 
@@ -1392,6 +1484,9 @@ Hosted on **Render** (Oregon region).
 | `feat(public-booking): add manual review request endpoint` (`8a277a7`) | `POST /public/review-requests` — four `reviewReason` values; reuses `processIntake` with `forceReviewOnly`; zero-dollar, no checkout, no dispatch, Airtable sync |
 | `feat(payments): text checkout link after session creation` (`1bae5a6`) | Migration 012; `paymentLink.sms.ts`; claim-before-send CAS guard; `payment_link_sms_sent_at/status` columns; integrated into intake `setImmediate` block after checkout creation |
 | `docs(public-booking): add frontend scheduler contract` (`f6aea0d`) | `docs/public-booking-frontend-contract.md` — full frontend API contract for all three public booking paths, polling behavior, error table, wording guidance |
+| `fix(cors): support multiple allowed frontend origins` (`4231720`) | `CORS_ALLOWED_ORIGINS` env var; `parseCorsAllowedOrigins()` merges comma-separated origins into `allowedCorsOrigins` alongside `APP_BASE_URL`/`FRONTEND_BASE_URL` |
+| `fix(airtable): map review intake status to manual review` (`d5283b4`) | `intake_validated` in `JOB_STATUS_MAP` maps to `manual_review` instead of `pending_payment`; applies to quote/manual-review jobs only |
+| `fix(frontend): clarify quote details validation` (`c1dc86f`) | Client-side guard for blank quote details; inline field-level error under textarea; focus on submit attempt; clears on keystroke |
 
 ---
 
