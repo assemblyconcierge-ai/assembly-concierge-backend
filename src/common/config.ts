@@ -47,6 +47,9 @@ const envSchema = z.object({
   // Set to the customer-facing website domain (not the API domain).
   // Falls back to APP_BASE_URL if not set.
   FRONTEND_BASE_URL: z.string().optional(),
+  // Comma-separated allowed CORS origins, for example:
+  // "http://localhost:3000,https://staging.example.com"
+  CORS_ALLOWED_ORIGINS: z.string().optional(),
   ADMIN_JWT_SECRET: z.string().min(1),
 
   // Public booking launch guards

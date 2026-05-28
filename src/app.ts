@@ -49,11 +49,20 @@ function isVercelOrigin(origin: string): boolean {
   }
 }
 
-const allowedCorsOrigins = new Set(
-  [config.APP_BASE_URL, config.FRONTEND_BASE_URL]
+function parseCorsAllowedOrigins(raw: string | undefined): string[] {
+  if (!raw) return [];
+  return raw
+    .split(',')
+    .map((s) => toOrigin(s.trim()))
+    .filter((o): o is string => Boolean(o));
+}
+
+const allowedCorsOrigins = new Set([
+  ...[config.APP_BASE_URL, config.FRONTEND_BASE_URL]
     .map(toOrigin)
     .filter((origin): origin is string => Boolean(origin)),
-);
+  ...parseCorsAllowedOrigins(config.CORS_ALLOWED_ORIGINS),
+]);
 
 function corsOrigin(
   origin: string | undefined,
