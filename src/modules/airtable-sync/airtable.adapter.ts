@@ -38,12 +38,16 @@ const SERVICE_TYPE_FALLBACK = 'Custom Job';
  * Confirmed allowed values in Airtable "Status" field (2026-03-15):
  *   pending_payment | paid | dispatch_ready | assigned | in_progress | completed | cancelled
  *
+ * Added 2026-05-28:
+ *   manual_review — used for quote/manual-review jobs (fitness_equipment, custom) whose
+ *   terminal backend status is intake_validated. These jobs never proceed to payment.
+ *
  * Multiple internal states collapse to the same Airtable label because the
  * Airtable field represents a coarser operational view than the internal lifecycle.
  */
 const JOB_STATUS_MAP: Record<string, string> = {
   intake_received:            'pending_payment',
-  intake_validated:           'pending_payment',
+  intake_validated:           'manual_review',
   quoted_outside_area:        'pending_payment',
   awaiting_payment:           'pending_payment',
   deposit_paid:               'paid',
