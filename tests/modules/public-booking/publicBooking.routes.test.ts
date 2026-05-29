@@ -184,11 +184,11 @@ describe('publicBookingRouter', () => {
 
     expect(res.body).toEqual({
       requestId: 'AC-2026-TEST',
+      publicPayToken: 'ppt_test',
       status: 'received',
       message: 'Your request was received for manual review.',
       correlationId: expect.any(String),
     });
-    expect(res.body).not.toHaveProperty('publicPayToken');
     expect(res.body).not.toHaveProperty('checkoutUrl');
     expect(res.body).not.toHaveProperty('paymentToken');
     expect(res.body).not.toHaveProperty('jobId');

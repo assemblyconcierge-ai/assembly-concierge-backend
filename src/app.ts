@@ -10,6 +10,7 @@ import { smsWebhookRouter } from './modules/sms/sms.routes';
 import { intakeRouter } from './modules/intake/intake.routes';
 import { jobsRouter } from './modules/jobs/jobs.routes';
 import { publicBookingRouter } from './modules/public-booking/publicBooking.routes';
+import { photosRouter } from './modules/public-booking/photos.routes';
 import { adminRouter } from './modules/admin/admin.routes';
 import { schemaResetRouter } from './modules/admin/schemaReset.routes';
 import { testJobsRouter } from './modules/admin/testJobs.routes';
@@ -175,6 +176,7 @@ export function createApp(): express.Application {
   // ─── Jobs API ────────────────────────────────────────────────────────────
   // Public booking API
   app.use('/public', schemaGuard, publicBookingRouter);
+  app.use('/public/photos', schemaGuard, photosRouter);
 
   app.use('/jobs', jobsRouter);
 
