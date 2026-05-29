@@ -122,8 +122,15 @@ photosRouter.post(
         return;
       }
 
-      // Generate storage key
-      const fileExt = filename.split('.').pop() || 'jpg';
+      // Generate storage key — extension derived from validated MIME type, not client filename
+      const MIME_TO_EXT: Record<string, string> = {
+        'image/jpeg': 'jpg',
+        'image/png': 'png',
+        'image/webp': 'webp',
+        'image/heic': 'heic',
+        'image/heif': 'heif',
+      };
+      const fileExt = MIME_TO_EXT[mimeType] ?? 'jpg';
       const storageKey = `jobs/${job.job_key}/${uuidv4()}.${fileExt}`;
 
       // Insert pending row
