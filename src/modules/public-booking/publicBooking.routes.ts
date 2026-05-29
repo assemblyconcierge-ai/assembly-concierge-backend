@@ -480,6 +480,7 @@ publicBookingRouter.post(
 
       res.status(201).json({
         requestId: result.jobKey,
+        publicPayToken: result.publicPayToken,
         status: 'received',
         message: 'Your request was received for manual review.',
         correlationId,
