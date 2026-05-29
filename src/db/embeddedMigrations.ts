@@ -549,4 +549,11 @@ ALTER TABLE jobs
   ADD COLUMN IF NOT EXISTS payment_link_sms_status  TEXT;
 `,
   },
+  {
+        filename: '013_add_confirmed_at_to_uploaded_media.sql',
+        sql: `
+        ALTER TABLE uploaded_media
+          ADD COLUMN IF NOT EXISTS confirmed_at TIMESTAMPTZ;
+          `,
+  },
 ];
