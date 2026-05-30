@@ -257,6 +257,10 @@ async function processSyncJob(jobId: string, correlationId: string): Promise<voi
       customer_otw_text_status: string | null;
       // Most recent dispatch status (null if no dispatch exists yet)
       dispatch_status: string | null;
+      // Photo stats (Phase 1.5-C)
+      photo_count: string;            // COUNT returns text from pg driver
+      last_photo_uploaded_at: Date | null;
+      operator_photo_token: string | null;
     }>(
       `SELECT
          j.id, j.job_key, j.city_detected, j.service_area_status, j.rush_requested,
@@ -272,13 +276,16 @@ async function processSyncJob(jobId: string, correlationId: string): Promise<voi
          j.completed_at, j.contractor_en_route_at,
          j.customer_otw_text_sent_at, j.customer_otw_text_status,
          j.airtable_record_id, j.created_at, j.updated_at,
+         j.operator_photo_token,
          c.full_name AS customer_full_name, c.email AS customer_email, c.phone_e164 AS customer_phone,
          COALESCE(st.code, 'unknown') AS service_type_code,
          a.line1 AS addr_line1, a.state AS addr_state, a.postal_code AS addr_postal,
          p.provider_session_id AS stripe_session_id,
          p.provider_payment_intent_id AS stripe_intent_id,
          s.raw_payload_json,
-         d.dispatch_status
+         d.dispatch_status,
+         COALESCE(ph.photo_count, 0) AS photo_count,
+         ph.last_photo_uploaded_at
        FROM jobs j
        JOIN customers c ON c.id = j.customer_id
        JOIN addresses a ON a.id = j.address_id
@@ -296,6 +303,11 @@ async function processSyncJob(jobId: string, correlationId: string): Promise<voi
          WHERE job_id = j.id
          ORDER BY created_at DESC LIMIT 1
        ) d ON TRUE
+       LEFT JOIN LATERAL (
+         SELECT COUNT(*) AS photo_count, MAX(confirmed_at) AS last_photo_uploaded_at
+         FROM uploaded_media
+         WHERE job_id = j.id AND confirmed_at IS NOT NULL
+       ) ph ON TRUE
        WHERE j.id = $1`,
       [jobId],
     );
@@ -389,6 +401,15 @@ async function processSyncJob(jobId: string, correlationId: string): Promise<voi
       stripeFeeCents: row.stripe_fee_cents,
       rushPlatformShareCents: row.rush_platform_share_cents,
       jobMarginCents: row.job_margin_cents,
+      // Photo stats (Phase 1.5-C)
+      photoCount: parseInt(row.photo_count, 10),
+      photosUploaded: parseInt(row.photo_count, 10) > 0,
+      lastPhotoUploadedAt: row.last_photo_uploaded_at
+        ? row.last_photo_uploaded_at.toISOString()
+        : undefined,
+      operatorPhotoLink: row.operator_photo_token
+        ? `${config.APP_BASE_URL}/public/photos/review/${row.operator_photo_token}`
+        : undefined,
     };
 
     if (row.airtable_record_id) {

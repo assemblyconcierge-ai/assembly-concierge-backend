@@ -1,4 +1,4 @@
-import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
+import { S3Client, PutObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { config } from '../../common/config';
 import { logger } from '../../common/logger';
@@ -51,5 +51,34 @@ export async function generatePresignedUploadUrl(
   } catch (err) {
     logger.error({ err, storageKey }, 'Failed to generate presigned upload URL');
     throw new Error('Failed to generate upload URL');
+  }
+}
+
+/**
+ * Generate a short-lived presigned GET URL for a private R2 object.
+ * MUST NOT be stored anywhere — generated at request time only.
+ * MUST NOT be logged.
+ */
+export async function generatePresignedDownloadUrl(
+  storageKey: string,
+  expiresInSeconds = 3600,
+): Promise<string> {
+  if (!config.STORAGE_BUCKET) {
+    throw new Error('STORAGE_BUCKET is not configured.');
+  }
+
+  const client = getClient();
+  const command = new GetObjectCommand({
+    Bucket: config.STORAGE_BUCKET,
+    Key: storageKey,
+  });
+
+  try {
+    const url = await getSignedUrl(client, command, { expiresIn: expiresInSeconds });
+    // Intentionally not logging the URL — it is a bearer credential
+    return url;
+  } catch (err) {
+    logger.error({ err, storageKey }, 'Failed to generate presigned download URL');
+    throw new Error('Failed to generate download URL');
   }
 }

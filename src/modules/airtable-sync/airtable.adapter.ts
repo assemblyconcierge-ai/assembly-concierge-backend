@@ -246,6 +246,11 @@ export interface AirtableJobRecord {
   stripeFeeCents?: number;
   rushPlatformShareCents?: number;
   jobMarginCents?: number;
+  // Photo stats (Phase 1.5-C)
+  photoCount?: number;                  // count of confirmed uploaded_media rows
+  lastPhotoUploadedAt?: string;         // ISO 8601 — MAX(confirmed_at) across confirmed photos
+  photosUploaded?: boolean;             // true if photoCount > 0
+  operatorPhotoLink?: string;           // static review page URL (not a presigned URL)
 }
 
 /** Push a job record to Airtable. Returns the Airtable record ID. */
@@ -344,6 +349,20 @@ export async function syncJobToAirtable(record: AirtableJobRecord): Promise<stri
     fields['Rush Platform Share'] = record.rushPlatformShareCents / 100;
   if (record.jobMarginCents !== undefined)
     fields['Job Margin'] = record.jobMarginCents / 100;
+
+  // Photo stats (Phase 1.5-C) — fields must be created manually in Airtable
+  if (record.photoCount !== undefined) {
+    fields['Photo Count'] = record.photoCount;
+  }
+  if (record.photosUploaded !== undefined) {
+    fields['Photos Uploaded?'] = record.photosUploaded;
+  }
+  if (record.lastPhotoUploadedAt) {
+    fields['Last Photo Uploaded At'] = record.lastPhotoUploadedAt;
+  }
+  if (record.operatorPhotoLink) {
+    fields['Operator Photo Link'] = record.operatorPhotoLink;
+  }
 
   if (record.completionReportedAt) {
     fields['Completion Reported At'] = record.completionReportedAt;
