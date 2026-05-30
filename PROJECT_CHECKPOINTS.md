@@ -198,3 +198,45 @@ Known remaining:
 - No custom domain connected yet.
 - Stripe payment was not completed in smoke test (intentional).
 - Older manual-review records may show pending_payment until their next Airtable sync event.
+
+## 2026-05-29 — Phase 18: Customer Photo Upload and Frontend Booking Polish
+
+Backend photo intake:
+- Added public photo upload endpoints:
+  - POST /public/photos/presign
+  - POST /public/photos/confirm
+- Presign flow issues scoped upload URLs for private Cloudflare R2 storage.
+- Confirm flow records uploaded media confirmation state in the backend.
+- Cloudflare R2 bucket remains private.
+- R2 CORS configured for the Vercel frontend origin.
+- Migration 013 added confirmed_at support for uploaded_media through the embedded migration path.
+- Production smoke test passed: review request → public token → presign → R2 PUT → confirm → confirmedAt returned.
+
+Frontend booking/photo intake:
+- Added /book/photos?token=... customer photo upload page.
+- Added post-submission photo upload CTA.
+- Added customer-facing reference/job key display in booking and photo flows.
+- Improved photo upload completion messaging.
+- Added field-level inline validation errors across the booking form.
+- Added scroll/focus behavior for invalid backend validation fields.
+- Replaced raw schema/backend validation copy with customer-friendly messages.
+- Added phone normalization.
+- Replaced realistic phone placeholder with fictional placeholder: (555) 010-1234.
+- Added per-step frontend validation before customers can advance.
+- Required service, contact/address fields, preferred date/window, state, and ZIP before advancing.
+- Added valid/future date validation for preferred appointment date.
+- Made step indicator actionable for current/prior steps only.
+
+Production validation:
+- Frontend changes passed build and lint before merge.
+- PR #6 merged: step-level validation and actionable step navigation.
+- PR #7 merged: required State and ZIP validation.
+- Vercel production deploy completed and was smoke-tested.
+- Merged feature branches were deleted after merge.
+
+Not yet complete:
+- Airtable photo visibility / photo review fields
+- Operator photo review links
+- Backend-triggered customer/operator/contractor emails
+- Secure contractor job packet/photo access
+- Public business launch claims should remain avoided until launch is confirmed

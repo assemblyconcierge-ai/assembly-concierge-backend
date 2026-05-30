@@ -28,16 +28,17 @@
 18. [Phase 15 — Cancel Job Endpoint and Airtable Operator Workflow (May 2026)](#phase-15)
 19. [Phase 16 — Public Booking: Scheduler-First Intake, Manual Review, and SMS Payment Link Fallback (May 2026)](#phase-16)
 20. [Phase 17 — Frontend Scheduler: Public Booking UI Deployed (May 2026)](#phase-17)
-21. [Current Architecture](#current-architecture)
-22. [Job State Machine](#job-state-machine)
-23. [SMS Command Protocol](#sms-command-protocol)
-24. [API Reference](#api-reference)
-25. [Admin Endpoint Reference](#admin-endpoint-reference)
-26. [Airtable Operator Interface](#airtable-operator-interface)
-27. [Key Engineering Decisions](#key-engineering-decisions)
-28. [Deployment](#deployment)
-29. [Environment Variables](#environment-variables)
-30. [Commit History](#commit-history--key-milestones)
+21. [Phase 18 — Customer Photo Upload and Frontend Booking Polish (May 2026)](#phase-18)
+22. [Current Architecture](#current-architecture)
+23. [Job State Machine](#job-state-machine)
+24. [SMS Command Protocol](#sms-command-protocol)
+25. [API Reference](#api-reference)
+26. [Admin Endpoint Reference](#admin-endpoint-reference)
+27. [Airtable Operator Interface](#airtable-operator-interface)
+28. [Key Engineering Decisions](#key-engineering-decisions)
+29. [Deployment](#deployment)
+30. [Environment Variables](#environment-variables)
+31. [Commit History](#commit-history--key-milestones)
 
 ---
 
@@ -1133,6 +1134,38 @@ Stripe payment was not completed (intentional — no test charge made).
 - Frontend commit `c1dc86f` was pushed to GitHub; Vercel deployment was live and `/book` was smoke tested.
 - CORS preflights verified via PowerShell OPTIONS requests to both public endpoints.
 - Quote and fixed-price booking flows manually smoke tested against the production backend.
+
+---
+
+<a name="phase-18"></a>
+## Phase 18 — Customer Photo Upload and Frontend Booking Polish (May 2026)
+
+**Backend photo intake:**
+- Added public photo upload endpoints: `POST /public/photos/presign` and `POST /public/photos/confirm`
+- Presign flow issues scoped upload URLs for private Cloudflare R2 storage
+- Confirm flow records uploaded media confirmation state in the backend
+- Cloudflare R2 bucket remains private; R2 CORS configured for Vercel frontend origin
+- Migration 013 added `confirmed_at` support for `uploaded_media` through the embedded migration path
+- Production smoke test passed: review request → public token → presign → R2 PUT → confirm → `confirmedAt` returned
+
+**Frontend booking/photo intake:**
+- Added `/book/photos?token=...` customer photo upload page and post-submission photo upload CTA
+- Added customer-facing reference/job key display in booking and photo flows
+- Improved photo upload completion messaging
+- Added field-level inline validation errors across the booking form
+- Added scroll/focus behavior for invalid backend validation fields
+- Replaced raw schema/backend validation copy with customer-friendly messages
+- Added phone normalization and fictional phone placeholder `(555) 010-1234`
+- Added per-step frontend validation before customers can advance
+- Required service, contact/address fields, preferred date/window, state, and ZIP before advancing
+- Added valid/future date validation for preferred appointment date
+- Made step indicator actionable for current/prior steps only
+
+**Production validation:**
+- PR #6 merged: step-level validation and actionable step navigation
+- PR #7 merged: required State and ZIP validation
+- Vercel production deploy completed and was smoke-tested
+- Merged feature branches were deleted after merge
 
 ---
 
