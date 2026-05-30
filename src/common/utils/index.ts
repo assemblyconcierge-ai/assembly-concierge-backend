@@ -12,6 +12,15 @@ export function generatePublicPayToken(): string {
   return `ppt_${uuidv4().replace(/-/g, '')}`;
 }
 
+/**
+ * Generate a cryptographically random operator photo token.
+ * Scoped read-only token used exclusively to build the Airtable Operator Photo Link.
+ * MUST NOT be logged or returned in general API responses.
+ */
+export function generateOperatorPhotoToken(): string {
+  return `opt_${uuidv4().replace(/-/g, '')}`;
+}
+
 /** Normalize phone to E.164 format (US numbers only for now) */
 export function normalizePhone(raw: string): string {
   const digits = raw.replace(/\D/g, '');

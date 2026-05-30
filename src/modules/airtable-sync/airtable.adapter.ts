@@ -246,6 +246,11 @@ export interface AirtableJobRecord {
   stripeFeeCents?: number;
   rushPlatformShareCents?: number;
   jobMarginCents?: number;
+  // Photo stats (Phase 1.5-C)
+  photoCount?: number;                  // count of confirmed uploaded_media rows
+  lastPhotoUploadedAt?: string;         // ISO 8601 — MAX(confirmed_at) across confirmed photos
+  photosUploaded?: boolean;             // true if photoCount > 0
+  operatorPhotoLink?: string;           // static review page URL (not a presigned URL)
 }
 
 /** Push a job record to Airtable. Returns the Airtable record ID. */
@@ -345,6 +350,20 @@ export async function syncJobToAirtable(record: AirtableJobRecord): Promise<stri
   if (record.jobMarginCents !== undefined)
     fields['Job Margin'] = record.jobMarginCents / 100;
 
+  // Photo stats (Phase 1.5-C) — fields must be created manually in Airtable
+  if (record.photoCount !== undefined) {
+    fields['Photo Count'] = record.photoCount;
+  }
+  if (record.photosUploaded !== undefined) {
+    fields['Photos Uploaded?'] = record.photosUploaded;
+  }
+  if (record.lastPhotoUploadedAt) {
+    fields['Last Photo Uploaded At'] = record.lastPhotoUploadedAt;
+  }
+  if (record.operatorPhotoLink) {
+    fields['Operator Photo Link'] = record.operatorPhotoLink;
+  }
+
   if (record.completionReportedAt) {
     fields['Completion Reported At'] = record.completionReportedAt;
   }
@@ -415,7 +434,11 @@ export async function updateAirtableRecord(
  *  Writes to Airtable "Status" field using confirmed allowed values.
  *  Also writes the four backend mirror fields:
  *    Backend Job Status, Backend Updated At, Last Backend Sync At, Backend Sync Error
- *  Does NOT write to the legacy "Job Status (Canonical Lifecycle)" field. */
+ *  Does NOT write to the legacy "Job Status (Canonical Lifecycle)" field.
+ *
+ *  photoStats — when provided (e.g. after photo confirmation), writes the four
+ *  photo visibility fields: Photos Uploaded?, Photo Count, Last Photo Uploaded At,
+ *  Operator Photo Link. All are optional; omit to leave existing values unchanged. */
 export async function updateAirtableStatus(
   recordId: string,
   internalStatus: string,
@@ -430,6 +453,13 @@ export async function updateAirtableStatus(
   contractorEnRouteAt?: string,
   customerOtwTextSentAt?: string,
   customerOtwTextStatus?: string,
+  // Photo stats (Phase 1.5-C) — optional, written when a photo sync is triggered
+  photoStats?: {
+    photoCount: number;
+    photosUploaded: boolean;
+    lastPhotoUploadedAt?: string;
+    operatorPhotoLink?: string;
+  },
 ): Promise<void> {
   const now = new Date().toISOString();
   const fields: Record<string, unknown> = {
@@ -475,6 +505,18 @@ export async function updateAirtableStatus(
   }
   if (customerOtwTextStatus !== undefined) {
     fields['Customer OTW Text Status'] = mapCustomerOtwTextStatus(customerOtwTextStatus);
+  }
+
+  // Photo stats (Phase 1.5-C) — only written when photoStats is explicitly provided
+  if (photoStats !== undefined) {
+    fields['Photos Uploaded?'] = photoStats.photosUploaded;
+    fields['Photo Count'] = photoStats.photoCount;
+    if (photoStats.lastPhotoUploadedAt) {
+      fields['Last Photo Uploaded At'] = photoStats.lastPhotoUploadedAt;
+    }
+    if (photoStats.operatorPhotoLink) {
+      fields['Operator Photo Link'] = photoStats.operatorPhotoLink;
+    }
   }
 
   await updateAirtableRecord(recordId, fields);

@@ -5,7 +5,7 @@ import { calculatePricing, normalizeRushTier, rushTierLabel } from '../pricing/p
 import { upsertCustomer, createAddress } from '../customers/customer.repository';
 import { createJob } from '../jobs/job.repository';
 import { recordAuditEvent } from '../audit/audit.service';
-import { generateJobKey, generatePublicPayToken } from '../../common/utils';
+import { generateJobKey, generatePublicPayToken, generateOperatorPhotoToken } from '../../common/utils';
 import { enqueueAirtableSync } from '../airtable-sync/airtableSync.queue';
 import { createJobCheckoutSession } from '../payments/payment.service';
 import { sendPaymentLinkSms } from '../notifications/paymentLink.sms';
@@ -114,6 +114,7 @@ export async function processIntake(
   }
 
   const publicPayToken = generatePublicPayToken();
+  const operatorPhotoToken = generateOperatorPhotoToken();
 
   // 4. Run all DB writes in a single transaction
   const result = await withTransaction(async (client) => {
@@ -191,6 +192,7 @@ export async function processIntake(
         timezone: TIMEZONE,
         customJobDetails: intake.service.customJobDetails,
         publicPayToken,
+        operatorPhotoToken,
       },
       client,
     );

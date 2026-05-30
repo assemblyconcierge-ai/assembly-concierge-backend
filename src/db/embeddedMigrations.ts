@@ -556,4 +556,15 @@ ALTER TABLE jobs
           ADD COLUMN IF NOT EXISTS confirmed_at TIMESTAMPTZ;
           `,
   },
+  {
+    filename: '014_add_operator_photo_token_to_jobs.sql',
+    sql: `
+ALTER TABLE jobs
+  ADD COLUMN IF NOT EXISTS operator_photo_token TEXT;
+
+CREATE UNIQUE INDEX IF NOT EXISTS jobs_operator_photo_token_idx
+  ON jobs (operator_photo_token)
+  WHERE operator_photo_token IS NOT NULL;
+`,
+  },
 ];

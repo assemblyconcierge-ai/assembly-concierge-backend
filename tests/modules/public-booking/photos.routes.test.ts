@@ -2,12 +2,14 @@ import express, { NextFunction, Request, Response } from 'express';
 import request from 'supertest';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { photosRouter } from '../../../src/modules/public-booking/photos.routes';
-import { getJobByPublicPayToken } from '../../../src/modules/jobs/job.repository';
+import { getJobByPublicPayToken, getJobByOperatorPhotoToken } from '../../../src/modules/jobs/job.repository';
 import { query, queryOne } from '../../../src/db/pool';
-import { generatePresignedUploadUrl } from '../../../src/modules/storage/s3.service';
+import { generatePresignedUploadUrl, generatePresignedDownloadUrl } from '../../../src/modules/storage/s3.service';
+import { enqueueAirtableSync } from '../../../src/modules/airtable-sync/airtableSync.queue';
 
 vi.mock('../../../src/modules/jobs/job.repository', () => ({
   getJobByPublicPayToken: vi.fn(),
+  getJobByOperatorPhotoToken: vi.fn(),
 }));
 
 vi.mock('../../../src/db/pool', () => ({
@@ -17,6 +19,11 @@ vi.mock('../../../src/db/pool', () => ({
 
 vi.mock('../../../src/modules/storage/s3.service', () => ({
   generatePresignedUploadUrl: vi.fn(),
+  generatePresignedDownloadUrl: vi.fn(),
+}));
+
+vi.mock('../../../src/modules/airtable-sync/airtableSync.queue', () => ({
+  enqueueAirtableSync: vi.fn().mockResolvedValue(undefined),
 }));
 
 function createTestApp() {
@@ -260,5 +267,182 @@ describe('POST /public/photos/confirm', () => {
     expect(queryCalls.length).toBe(1);
     expect(queryCalls[0][0]).toMatch(/UPDATE uploaded_media/i);
     expect(queryCalls[0][0]).not.toMatch(/INSERT/i);
+  });
+
+  it('enqueues an Airtable sync after successful confirmation so photo stats reach existing records', async () => {
+    vi.mocked(getJobByPublicPayToken).mockResolvedValue(activeJob as never);
+    vi.mocked(queryOne).mockResolvedValue({
+      id: 'media-uuid-1',
+      confirmed_at: null,
+    });
+    const confirmedAt = new Date();
+    vi.mocked(query).mockResolvedValueOnce([{ confirmed_at: confirmedAt }]);
+
+    const app = createTestApp();
+    const res = await request(app)
+      .post('/public/photos/confirm')
+      .send(validConfirmPayload);
+
+    expect(res.status).toBe(200);
+    // Allow the fire-and-forget promise to settle
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(enqueueAirtableSync).toHaveBeenCalledOnce();
+    expect(enqueueAirtableSync).toHaveBeenCalledWith(
+      expect.objectContaining({ jobId: activeJob.id }),
+    );
+  });
+
+  it('does NOT enqueue Airtable sync when confirmation fails (already confirmed)', async () => {
+    vi.mocked(getJobByPublicPayToken).mockResolvedValue(activeJob as never);
+    vi.mocked(queryOne).mockResolvedValue({
+      id: 'media-uuid-1',
+      confirmed_at: new Date(), // already confirmed
+    });
+
+    const app = createTestApp();
+    const res = await request(app)
+      .post('/public/photos/confirm')
+      .send(validConfirmPayload);
+
+    expect(res.status).toBe(409);
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(enqueueAirtableSync).not.toHaveBeenCalled();
+  });
+});
+
+// ─── GET /public/photos/review/:operatorPhotoToken ───────────────────────────
+
+const VALID_OPERATOR_TOKEN = 'opt_' + 'a'.repeat(32);
+
+const jobWithToken = {
+  id: 'job-uuid-2',
+  job_key: 'AC-TEST-002',
+  status: 'awaiting_payment',
+  operator_photo_token: VALID_OPERATOR_TOKEN,
+};
+
+describe('GET /public/photos/review/:operatorPhotoToken', () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+  });
+
+  it('returns 200 HTML page with photo grid when confirmed photos exist', async () => {
+    vi.mocked(getJobByOperatorPhotoToken).mockResolvedValue(jobWithToken as never);
+    const confirmedAt = new Date('2025-01-15T12:00:00Z');
+    vi.mocked(query).mockResolvedValueOnce([
+      {
+        id: 'media-uuid-10',
+        storage_key: 'jobs/AC-TEST-002/photo1.jpg',
+        mime_type: 'image/jpeg',
+        original_filename: 'dresser.jpg',
+        uploaded_at: confirmedAt,
+        confirmed_at: confirmedAt,
+      },
+    ]);
+    vi.mocked(generatePresignedDownloadUrl).mockResolvedValue('https://r2.example.com/presigned-get-url');
+
+    const app = createTestApp();
+    const res = await request(app).get(`/public/photos/review/${VALID_OPERATOR_TOKEN}`);
+
+    expect(res.status).toBe(200);
+    expect(res.headers['content-type']).toMatch(/text\/html/);
+    expect(res.text).toContain('AC-TEST-002');
+    expect(res.text).toContain('1 confirmed photo');
+    expect(res.text).toContain('photo-card');
+    expect(res.text).not.toContain(VALID_OPERATOR_TOKEN); // token must not appear in HTML
+  });
+
+  it('returns 200 HTML with empty-state message when no confirmed photos exist', async () => {
+    vi.mocked(getJobByOperatorPhotoToken).mockResolvedValue(jobWithToken as never);
+    vi.mocked(query).mockResolvedValueOnce([]); // no confirmed photos
+
+    const app = createTestApp();
+    const res = await request(app).get(`/public/photos/review/${VALID_OPERATOR_TOKEN}`);
+
+    expect(res.status).toBe(200);
+    expect(res.headers['content-type']).toMatch(/text\/html/);
+    expect(res.text).toContain('No photos have been uploaded');
+    expect(res.text).toContain('AC-TEST-002');
+    expect(generatePresignedDownloadUrl).not.toHaveBeenCalled();
+  });
+
+  it('returns 404 for an unknown operator token', async () => {
+    vi.mocked(getJobByOperatorPhotoToken).mockResolvedValue(null);
+
+    const app = createTestApp();
+    const res = await request(app).get(`/public/photos/review/${VALID_OPERATOR_TOKEN}`);
+
+    expect(res.status).toBe(404);
+  });
+
+  it('returns 404 for a malformed token (wrong prefix)', async () => {
+    const app = createTestApp();
+    const res = await request(app).get('/public/photos/review/ppt_' + 'a'.repeat(32));
+
+    expect(res.status).toBe(404);
+    // Should not even call the DB for a malformed token
+    expect(getJobByOperatorPhotoToken).not.toHaveBeenCalled();
+  });
+
+  it('returns 404 for a malformed token (too short)', async () => {
+    const app = createTestApp();
+    const res = await request(app).get('/public/photos/review/opt_tooshort');
+
+    expect(res.status).toBe(404);
+    expect(getJobByOperatorPhotoToken).not.toHaveBeenCalled();
+  });
+
+  it('sets Cache-Control: no-store on the response', async () => {
+    vi.mocked(getJobByOperatorPhotoToken).mockResolvedValue(jobWithToken as never);
+    vi.mocked(query).mockResolvedValueOnce([]);
+
+    const app = createTestApp();
+    const res = await request(app).get(`/public/photos/review/${VALID_OPERATOR_TOKEN}`);
+
+    expect(res.headers['cache-control']).toContain('no-store');
+  });
+
+  it('does not expose the operator_photo_token in the HTML response', async () => {
+    vi.mocked(getJobByOperatorPhotoToken).mockResolvedValue(jobWithToken as never);
+    const confirmedAt = new Date();
+    vi.mocked(query).mockResolvedValueOnce([
+      {
+        id: 'media-uuid-11',
+        storage_key: 'jobs/AC-TEST-002/photo2.jpg',
+        mime_type: 'image/jpeg',
+        original_filename: 'photo2.jpg',
+        uploaded_at: confirmedAt,
+        confirmed_at: confirmedAt,
+      },
+    ]);
+    vi.mocked(generatePresignedDownloadUrl).mockResolvedValue('https://r2.example.com/another-signed-url');
+
+    const app = createTestApp();
+    const res = await request(app).get(`/public/photos/review/${VALID_OPERATOR_TOKEN}`);
+
+    expect(res.text).not.toContain(VALID_OPERATOR_TOKEN);
+  });
+
+  it('skips a photo gracefully when presigned URL generation fails', async () => {
+    vi.mocked(getJobByOperatorPhotoToken).mockResolvedValue(jobWithToken as never);
+    const confirmedAt = new Date();
+    vi.mocked(query).mockResolvedValueOnce([
+      {
+        id: 'media-uuid-12',
+        storage_key: 'jobs/AC-TEST-002/bad-photo.jpg',
+        mime_type: 'image/jpeg',
+        original_filename: 'bad-photo.jpg',
+        uploaded_at: confirmedAt,
+        confirmed_at: confirmedAt,
+      },
+    ]);
+    vi.mocked(generatePresignedDownloadUrl).mockRejectedValue(new Error('R2 unavailable'));
+
+    const app = createTestApp();
+    const res = await request(app).get(`/public/photos/review/${VALID_OPERATOR_TOKEN}`);
+
+    // Should still return 200 with empty grid (photo skipped, not a 500)
+    expect(res.status).toBe(200);
+    expect(res.text).toContain('No photos have been uploaded');
   });
 });

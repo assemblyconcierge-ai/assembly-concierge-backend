@@ -37,6 +37,7 @@ export interface JobRow {
   special_instructions: string | null;
   custom_job_details: string | null;
   public_pay_token: string | null;
+  operator_photo_token: string | null;
   airtable_record_id: string | null;
   completion_reported_at: Date | null;
   completed_at: Date | null;
@@ -81,6 +82,7 @@ export async function createJob(
     specialInstructions?: string;
     customJobDetails?: string;
     publicPayToken?: string;
+    operatorPhotoToken?: string;
   },
   client: PoolClient,
 ): Promise<JobRow> {
@@ -95,12 +97,12 @@ export async function createJob(
       stripe_fee_cents, job_margin_cents,
       status, appointment_date, appointment_window,
       scheduled_start_at, scheduled_end_at, timezone,
-      special_instructions, custom_job_details, public_pay_token
+      special_instructions, custom_job_details, public_pay_token, operator_photo_token
     ) VALUES (
       $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
       $13, $14, $15, $16, $17, $18,
       $19, $20, $21, $22, $23, $24, $25,
-      $26, $27, $28, $29, $30, $31, $32, $33
+      $26, $27, $28, $29, $30, $31, $32, $33, $34
     ) RETURNING *`,
     [
       uuidv4(),
@@ -136,6 +138,7 @@ export async function createJob(
       params.specialInstructions ?? null,
       params.customJobDetails ?? null,
       params.publicPayToken ?? null,
+      params.operatorPhotoToken ?? null,
     ],
   );
   return rows[0];
@@ -151,6 +154,10 @@ export async function getJobByKey(jobKey: string): Promise<JobRow | null> {
 
 export async function getJobByPublicPayToken(token: string): Promise<JobRow | null> {
   return queryOne<JobRow>('SELECT * FROM jobs WHERE public_pay_token = $1', [token]);
+}
+
+export async function getJobByOperatorPhotoToken(token: string): Promise<JobRow | null> {
+  return queryOne<JobRow>('SELECT * FROM jobs WHERE operator_photo_token = $1', [token]);
 }
 
 export async function updateJobStatus(
