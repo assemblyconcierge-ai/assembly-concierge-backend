@@ -5,6 +5,7 @@ import { photosRouter } from '../../../src/modules/public-booking/photos.routes'
 import { getJobByPublicPayToken, getJobByOperatorPhotoToken } from '../../../src/modules/jobs/job.repository';
 import { query, queryOne } from '../../../src/db/pool';
 import { generatePresignedUploadUrl, generatePresignedDownloadUrl } from '../../../src/modules/storage/s3.service';
+import { enqueueAirtableSync } from '../../../src/modules/airtable-sync/airtableSync.queue';
 
 vi.mock('../../../src/modules/jobs/job.repository', () => ({
   getJobByPublicPayToken: vi.fn(),
@@ -19,6 +20,10 @@ vi.mock('../../../src/db/pool', () => ({
 vi.mock('../../../src/modules/storage/s3.service', () => ({
   generatePresignedUploadUrl: vi.fn(),
   generatePresignedDownloadUrl: vi.fn(),
+}));
+
+vi.mock('../../../src/modules/airtable-sync/airtableSync.queue', () => ({
+  enqueueAirtableSync: vi.fn().mockResolvedValue(undefined),
 }));
 
 function createTestApp() {
@@ -262,6 +267,46 @@ describe('POST /public/photos/confirm', () => {
     expect(queryCalls.length).toBe(1);
     expect(queryCalls[0][0]).toMatch(/UPDATE uploaded_media/i);
     expect(queryCalls[0][0]).not.toMatch(/INSERT/i);
+  });
+
+  it('enqueues an Airtable sync after successful confirmation so photo stats reach existing records', async () => {
+    vi.mocked(getJobByPublicPayToken).mockResolvedValue(activeJob as never);
+    vi.mocked(queryOne).mockResolvedValue({
+      id: 'media-uuid-1',
+      confirmed_at: null,
+    });
+    const confirmedAt = new Date();
+    vi.mocked(query).mockResolvedValueOnce([{ confirmed_at: confirmedAt }]);
+
+    const app = createTestApp();
+    const res = await request(app)
+      .post('/public/photos/confirm')
+      .send(validConfirmPayload);
+
+    expect(res.status).toBe(200);
+    // Allow the fire-and-forget promise to settle
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(enqueueAirtableSync).toHaveBeenCalledOnce();
+    expect(enqueueAirtableSync).toHaveBeenCalledWith(
+      expect.objectContaining({ jobId: activeJob.id }),
+    );
+  });
+
+  it('does NOT enqueue Airtable sync when confirmation fails (already confirmed)', async () => {
+    vi.mocked(getJobByPublicPayToken).mockResolvedValue(activeJob as never);
+    vi.mocked(queryOne).mockResolvedValue({
+      id: 'media-uuid-1',
+      confirmed_at: new Date(), // already confirmed
+    });
+
+    const app = createTestApp();
+    const res = await request(app)
+      .post('/public/photos/confirm')
+      .send(validConfirmPayload);
+
+    expect(res.status).toBe(409);
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(enqueueAirtableSync).not.toHaveBeenCalled();
   });
 });
 

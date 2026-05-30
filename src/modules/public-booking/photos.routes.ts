@@ -7,6 +7,7 @@ import { getJobByPublicPayToken, getJobByOperatorPhotoToken } from '../jobs/job.
 import { generatePresignedUploadUrl, generatePresignedDownloadUrl } from '../storage/s3.service';
 import { logger } from '../../common/logger';
 import { config } from '../../common/config';
+import { enqueueAirtableSync } from '../airtable-sync/airtableSync.queue';
 
 export const photosRouter = Router();
 
@@ -368,6 +369,12 @@ photosRouter.post(
         storageKey,
         confirmedAt: updateResult[0]?.confirmed_at.toISOString(),
         correlationId,
+      });
+
+      // Enqueue Airtable sync so photo stats are reflected in Airtable for existing records.
+      // Fire-and-forget — never blocks the 200 response; failures are logged by the queue.
+      enqueueAirtableSync({ jobId: job.id, correlationId }).catch((syncErr) => {
+        logger.warn({ syncErr, jobId: job.id, correlationId }, 'Failed to enqueue Airtable sync after photo confirmation');
       });
     } catch (err) {
       logger.error({ err, correlationId }, 'Failed to confirm photo upload');

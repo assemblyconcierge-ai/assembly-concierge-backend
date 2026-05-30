@@ -415,6 +415,7 @@ async function processSyncJob(jobId: string, correlationId: string): Promise<voi
     if (row.airtable_record_id) {
       // Update existing record — status mapped through safe label layer
       // Also pass Stripe Payment Intent ID so it is written to Airtable after payment confirmation
+      // Photo stats are always passed so they stay current after photo confirmation syncs
       await updateAirtableStatus(
         row.airtable_record_id,
         record.status,
@@ -429,6 +430,13 @@ async function processSyncJob(jobId: string, correlationId: string): Promise<voi
         record.contractorEnRouteAt,
         record.customerOtwTextSentAt,
         record.customerOtwTextStatus,
+        // Photo stats (Phase 1.5-C) — always included so Airtable reflects latest confirmed count
+        {
+          photoCount: record.photoCount ?? 0,
+          photosUploaded: record.photosUploaded ?? false,
+          lastPhotoUploadedAt: record.lastPhotoUploadedAt,
+          operatorPhotoLink: record.operatorPhotoLink,
+        },
       );
       log.info({ airtableRecordId: row.airtable_record_id }, 'Airtable record updated');
     } else {
