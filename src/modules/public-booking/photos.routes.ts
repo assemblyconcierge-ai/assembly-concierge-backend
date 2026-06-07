@@ -163,15 +163,24 @@ photosRouter.get(
 
       // Scoped CSP for this HTML page: allow images from R2 (presigned URLs are
       // cross-origin). Global helmet() sets img-src 'self' which would block them.
-      let storageOrigin: string | null = null;
+      // R2 presigned URLs use the bucket-prefixed origin
+      // (https://{bucket}.{account}.r2.cloudflarestorage.com), not the bare endpoint.
+      const imgSrcOrigins = new Set<string>(["'self'"]);
       try {
         if (config.STORAGE_ENDPOINT) {
-          storageOrigin = new URL(config.STORAGE_ENDPOINT).origin;
+          const endpointUrl = new URL(config.STORAGE_ENDPOINT);
+          imgSrcOrigins.add(endpointUrl.origin);
+          if (
+            config.STORAGE_BUCKET &&
+            endpointUrl.hostname.endsWith('.r2.cloudflarestorage.com')
+          ) {
+            imgSrcOrigins.add(`${endpointUrl.protocol}//${config.STORAGE_BUCKET}.${endpointUrl.hostname}`);
+          }
         }
       } catch {
-        // Malformed endpoint — omit external origin rather than throwing
+        // Malformed endpoint — omit external origins rather than throwing
       }
-      const imgSrc = storageOrigin ? `'self' ${storageOrigin}` : `'self'`;
+      const imgSrc = [...imgSrcOrigins].join(' ');
 
       res.setHeader('Content-Type', 'text/html; charset=utf-8');
       res.setHeader(
