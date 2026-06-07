@@ -7,6 +7,7 @@ equipment assembly in Hampton, McDonough, and Stockbridge, GA. The platform cove
 the full customer journey: online booking, secure Stripe payment, photo intake, and
 operator job tracking — built and validated incrementally with TypeScript, Vitest,
 and production smoke tests at each milestone.
+The platform is currently in pre-launch testing.
 
 ## Problem
 
@@ -22,3 +23,31 @@ review, and give operators a consolidated view of intake, payment, and photo sta
 **Backend** — Node.js, Express, TypeScript, PostgreSQL on Render. Stripe Checkout for payments. Cloudflare R2 private bucket for photo storage with presigned upload URLs. Airtable for operator job tracking.
 
 **Booking flow** — 4-step stepper: service selection, contact and address, scheduling, and review/submit. Each step validates before advancing, with inline field-level error messages and scroll-to-focus behavior. The service selector covers flat-rate paths (Small, Medium, Large, Treadmill) and manual-review paths (Fitness Equipment, Custom). Phone normalization and fictional placeholder data prevent accidental real-number exposure during development.
+
+**Contractor dispatch** — Outbound SMS via Quo (OpenPhone-compatible). Contractors receive and respond to jobs through SMS commands (CONFIRM, DECLINE, OTW, DONE) with no app required.
+
+## Recent Work
+
+**Operator photo review — CSP fix** — The operator photo review page
+(`GET /public/photos/review/:operatorPhotoToken`) was generating valid R2 presigned
+URLs but thumbnails rendered blank. Root cause: global `helmet()` sets
+`img-src 'self'`, which blocks cross-origin R2 presigned URLs. Fix: the review
+route now sets a scoped Content-Security-Policy overriding `img-src` to allow the
+configured storage endpoint origin, while keeping `default-src 'none'` for
+everything else. Change is isolated to `photos.routes.ts` — global Helmet policy
+unchanged.
+
+**Frontend final-state polish** — Payment success and photo upload completion screens
+were functional but did not clearly signal "done." Added "You're all set." subtitle,
+"What happens next" detail block, and explicit "you can close this page" copy to
+both screens. Removed a duplicate pair of identical `/book` CTAs on the photo
+completion screen, replacing them with a single understated "Start a new booking"
+link.
+
+**Quote flow photo copy** — Updated the booking form's submit CTA for quote-type
+jobs to "Submit Quote Request & Add Photos" and added a contextual hint below the
+button explaining that photos help price custom jobs. Non-quote paths are unchanged.
+
+**Validation** — Backend: 212 automated tests across 16 Vitest test files
+(unit + integration), all passing. Frontend: Next.js production build and ESLint
+clean at each merge.
