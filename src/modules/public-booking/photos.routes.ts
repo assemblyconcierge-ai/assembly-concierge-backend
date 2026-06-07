@@ -161,10 +161,25 @@ photosRouter.get(
 </body>
 </html>`;
 
+      // Scoped CSP for this HTML page: allow images from R2 (presigned URLs are
+      // cross-origin). Global helmet() sets img-src 'self' which would block them.
+      let storageOrigin: string | null = null;
+      try {
+        if (config.STORAGE_ENDPOINT) {
+          storageOrigin = new URL(config.STORAGE_ENDPOINT).origin;
+        }
+      } catch {
+        // Malformed endpoint — omit external origin rather than throwing
+      }
+      const imgSrc = storageOrigin ? `'self' ${storageOrigin}` : `'self'`;
+
       res.setHeader('Content-Type', 'text/html; charset=utf-8');
+      res.setHeader(
+        'Content-Security-Policy',
+        `default-src 'none'; img-src ${imgSrc}; style-src 'unsafe-inline'; frame-ancestors 'none';`,
+      );
       // Prevent caching — presigned URLs are short-lived and must not be cached by proxies
       res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
-      res.setHeader('X-Frame-Options', 'DENY');
       res.status(200).send(html);
     } catch (err) {
       logger.error({ err, correlationId }, 'Failed to render operator photo review page');
