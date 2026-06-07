@@ -31,11 +31,16 @@ review, and give operators a consolidated view of intake, payment, and photo sta
 **Operator photo review — CSP fix** — The operator photo review page
 (`GET /public/photos/review/:operatorPhotoToken`) was generating valid R2 presigned
 URLs but thumbnails rendered blank. Root cause: global `helmet()` sets
-`img-src 'self'`, which blocks cross-origin R2 presigned URLs. Fix: the review
-route now sets a scoped Content-Security-Policy overriding `img-src` to allow the
-configured storage endpoint origin, while keeping `default-src 'none'` for
-everything else. Change is isolated to `photos.routes.ts` — global Helmet policy
-unchanged.
+`img-src 'self'`, which blocks cross-origin R2 presigned URLs. An initial fix
+scoped the override to the base R2 endpoint origin; a follow-up (commit `0ba353f`)
+extended the allowlist to include the bucket-prefixed subdomain origin
+(`<bucket>.<base-r2-endpoint>`), which is the form AWS SDK-generated presigned URLs
+actually use. Both origins are now permitted in the scoped `img-src` override on the
+review route, with `default-src 'none'` for everything else. Global Helmet policy is
+unchanged. Validated: build and 212 Vitest tests pass; live CSP verified on
+production; operator preview visually confirmed working. Future: a contractor-facing
+photo link should reuse this same CSP pattern with a separate contractor-scoped
+token — not the operator token.
 
 **Frontend final-state polish** — Payment success and photo upload completion screens
 were functional but did not clearly signal "done." Added "You're all set." subtitle,
