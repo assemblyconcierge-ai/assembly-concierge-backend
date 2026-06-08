@@ -13,6 +13,7 @@ import { enqueueAirtableSync } from '../airtable-sync/airtableSync.queue';
 import { sendSms } from './quo.adapter';
 import { logger } from '../../common/logger';
 import { normalizePhone } from '../../common/utils';
+import { config } from '../../common/config';
 
 export type SmsCommand = 'CONFIRM' | 'DECLINE' | 'OTW' | 'DONE' | 'FINISH';
 
@@ -86,6 +87,8 @@ interface ActiveJobRow {
   assignment_id: string;
   assignment_status: string;
   dispatch_id: string | null;
+  /** Contractor packet token — MUST NOT be logged or included in audit payloads */
+  contractor_packet_token: string | null;
   customer_phone: string;
   customer_otw_text_sent_at: Date | null;
   customer_confirm_text_sent_at: Date | null;
@@ -151,6 +154,7 @@ const ACTIVE_JOB_BASE_SQL = `
     ca.id                        AS assignment_id,
     ca.status                    AS assignment_status,
     ca.dispatch_id,
+    ca.contractor_packet_token,
     j.id                         AS job_id,
     j.job_key,
     j.status                     AS job_status,
@@ -175,36 +179,30 @@ interface WarnLogger {
   warn(obj: Record<string, unknown>, msg: string): void;
 }
 
-function buildPostConfirmSms(activeJob: ActiveJobRow, log: WarnLogger): string {
-  const { job_key: jobKey } = activeJob;
-  let addressStr: string;
+function buildPostConfirmSms(activeJob: ActiveJobRow, _log: WarnLogger): string {
+  const { job_key: jobKey, contractor_packet_token: token } = activeJob;
 
-  if (activeJob.address_line1 && activeJob.address_city) {
-    const lines: string[] = [activeJob.address_line1];
-    if (activeJob.address_line2) lines.push(activeJob.address_line2);
-    const cityState = [activeJob.address_city, activeJob.address_state].filter(Boolean).join(', ');
-    const cityStateZip = activeJob.address_postal_code
-      ? `${cityState} ${activeJob.address_postal_code}`
-      : cityState;
-    if (cityStateZip) lines.push(cityStateZip);
-    addressStr = lines.join('\n');
-  } else {
-    log.warn(
-      { jobId: activeJob.job_id, jobKey },
-      '[SMS] Incomplete address for post-CONFIRM SMS - falling back to city/state/zip',
-    );
-    addressStr = [activeJob.address_city, activeJob.address_state, activeJob.address_postal_code]
-      .filter(Boolean)
-      .join(', ');
+  if (token) {
+    // Packet link flow: send the secure job packet URL.
+    // The token value is NOT logged — it is only embedded in the SMS body.
+    const baseUrl = config.APP_BASE_URL.replace(/\/+$/, '');
+    const packetUrl = `${baseUrl}/public/contractor/jobs/${token}`;
+    return [
+      `Confirmed for ${jobKey}.`,
+      '',
+      'Your full job packet (address, photos, details):',
+      packetUrl,
+      '',
+      `Reply OTW ${jobKey} when headed there.`,
+      `Reply DONE ${jobKey} when complete.`,
+    ].join('\n');
   }
 
+  // Fallback: token not available (legacy assignment or generation failure)
   return [
     `Confirmed for ${jobKey}.`,
     '',
-    'Address:',
-    addressStr,
-    '',
-    'Full job details, notes, and photos will be provided separately.',
+    'Job details will be provided separately.',
     '',
     `Reply OTW ${jobKey} when headed there.`,
     `Reply DONE ${jobKey} when complete.`,

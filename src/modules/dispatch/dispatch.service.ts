@@ -15,6 +15,7 @@ import { sendSms } from '../sms/quo.adapter';
 import { logger } from '../../common/logger';
 import { parseSchedule } from '../../common/utils/scheduleUtils';
 import { checkScheduleConflict } from './dispatchConflict';
+import { generateContractorPacketToken } from '../../common/utils';
 
 interface ContractorRow {
   id: string;
@@ -101,6 +102,9 @@ export async function dispatchJobToContractor(
   const dispatchId = uuidv4();
   const assignmentId = uuidv4();
   const now = new Date().toISOString();
+  // Generate contractor packet token — inert until assignment status = accepted.
+  // MUST NOT be logged or included in audit payloads.
+  const contractorPacketToken = generateContractorPacketToken();
 
   // ── DB transaction ────────────────────────────────────────────────────────
   await withTransaction(async (client) => {
@@ -212,12 +216,12 @@ export async function dispatchJobToContractor(
       [dispatchId, job.id, now, contractor.id],
     );
 
-    // 3. Create contractor_assignments row
+    // 3. Create contractor_assignments row (token is inert until status = accepted)
     await client.query(
       `INSERT INTO contractor_assignments
-         (id, job_id, contractor_id, dispatch_id, payout_amount_cents, status, assigned_at)
-       VALUES ($1, $2, $3, $4, $5, 'pending', $6)`,
-      [assignmentId, job.id, contractor.id, dispatchId, job.contractor_total_payout_cents, now],
+         (id, job_id, contractor_id, dispatch_id, payout_amount_cents, status, assigned_at, contractor_packet_token)
+       VALUES ($1, $2, $3, $4, $5, 'pending', $6, $7)`,
+      [assignmentId, job.id, contractor.id, dispatchId, job.contractor_total_payout_cents, now, contractorPacketToken],
     );
 
     // 4. Audit event

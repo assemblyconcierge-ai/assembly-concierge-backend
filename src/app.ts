@@ -11,6 +11,7 @@ import { intakeRouter } from './modules/intake/intake.routes';
 import { jobsRouter } from './modules/jobs/jobs.routes';
 import { publicBookingRouter } from './modules/public-booking/publicBooking.routes';
 import { photosRouter } from './modules/public-booking/photos.routes';
+import { contractorPacketRouter } from './modules/public-booking/contractorPacket.routes';
 import { adminRouter } from './modules/admin/admin.routes';
 import { schemaResetRouter } from './modules/admin/schemaReset.routes';
 import { testJobsRouter } from './modules/admin/testJobs.routes';
@@ -177,6 +178,7 @@ export function createApp(): express.Application {
   // Public booking API
   app.use('/public', schemaGuard, publicBookingRouter);
   app.use('/public/photos', schemaGuard, photosRouter);
+  app.use('/public/contractor', schemaGuard, contractorPacketRouter);
 
   app.use('/jobs', jobsRouter);
 

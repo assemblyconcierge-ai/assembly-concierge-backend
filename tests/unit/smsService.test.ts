@@ -340,14 +340,11 @@ describe('processSmsWebhook job-key routing', () => {
     expect(enqueueAirtableSync).not.toHaveBeenCalled();
   });
 
-  it('successful CONFIRM sends post-acceptance SMS with full address to contractor', async () => {
+  it('successful CONFIRM sends packet URL SMS when contractor_packet_token is set', async () => {
+    const packetToken = 'cpk_' + 'a'.repeat(32);
     const { clientQuery } = setupDb(activeJob({
       job_key: 'AC-2026-EPME',
-      address_line1: '456 Oak Ave',
-      address_line2: null,
-      address_city: 'Marietta',
-      address_state: 'GA',
-      address_postal_code: '30060',
+      contractor_packet_token: packetToken,
     }));
 
     await processSmsWebhook('+1 (404) 555-0100', 'confirm', 'corr-1');
@@ -357,7 +354,7 @@ describe('processSmsWebhook job-key routing', () => {
       expect.stringContaining('UPDATE jobs SET status = $2'),
       ['job-1', 'assigned'],
     );
-    // Post-CONFIRM SMS sent to contractor phone (not customer)
+    // Post-CONFIRM SMS contains packet URL
     expect(mockSendSms).toHaveBeenCalledWith(
       contractor.phone_e164,
       expect.stringContaining('Confirmed for AC-2026-EPME'),
@@ -365,7 +362,7 @@ describe('processSmsWebhook job-key routing', () => {
     );
     expect(mockSendSms).toHaveBeenCalledWith(
       contractor.phone_e164,
-      expect.stringContaining('456 Oak Ave'),
+      expect.stringContaining(`/public/contractor/jobs/${packetToken}`),
       'corr-1',
     );
     expect(mockSendSms).toHaveBeenCalledWith(
@@ -376,6 +373,38 @@ describe('processSmsWebhook job-key routing', () => {
     expect(mockSendSms).toHaveBeenCalledWith(
       contractor.phone_e164,
       expect.stringContaining('Reply DONE AC-2026-EPME when complete'),
+      'corr-1',
+    );
+    // Address must NOT be in the SMS body — it is on the packet page
+    expect(mockSendSms).not.toHaveBeenCalledWith(
+      contractor.phone_e164,
+      expect.stringContaining('123 Main St'),
+      'corr-1',
+    );
+  });
+
+  it('successful CONFIRM sends fallback SMS when contractor_packet_token is null', async () => {
+    setupDb(activeJob({
+      job_key: 'AC-2026-EPME',
+      contractor_packet_token: null,
+    }));
+
+    await processSmsWebhook('+1 (404) 555-0100', 'confirm', 'corr-1');
+
+    expect(mockSendSms).toHaveBeenCalledWith(
+      contractor.phone_e164,
+      expect.stringContaining('Confirmed for AC-2026-EPME'),
+      'corr-1',
+    );
+    expect(mockSendSms).toHaveBeenCalledWith(
+      contractor.phone_e164,
+      expect.stringContaining('Job details will be provided separately'),
+      'corr-1',
+    );
+    // No packet URL in fallback
+    expect(mockSendSms).not.toHaveBeenCalledWith(
+      contractor.phone_e164,
+      expect.stringContaining('/public/contractor/jobs/'),
       'corr-1',
     );
   });
@@ -419,18 +448,25 @@ describe('processSmsWebhook job-key routing', () => {
     expect(mockSendSms).not.toHaveBeenCalled();
   });
 
-  it('successful CONFIRM falls back to city/state/zip when address line1 is missing', async () => {
+  it('successful CONFIRM sends fallback SMS when contractor_packet_token is absent (address line1 missing)', async () => {
+    // When contractor_packet_token is not set, the fallback path runs regardless of address completeness.
+    // The address is on the packet page, not in the SMS.
     setupDb(activeJob({
       job_key: 'AC-2026-EPME',
+      contractor_packet_token: null,
       address_line1: null,
       address_city: 'Decatur',
       address_state: 'GA',
       address_postal_code: '30030',
     }));
-
     await processSmsWebhook('+1 (404) 555-0100', 'confirm', 'corr-1');
-
     expect(mockSendSms).toHaveBeenCalledWith(
+      contractor.phone_e164,
+      expect.stringContaining('Job details will be provided separately'),
+      'corr-1',
+    );
+    // Address is NOT in the SMS body
+    expect(mockSendSms).not.toHaveBeenCalledWith(
       contractor.phone_e164,
       expect.stringContaining('Decatur'),
       'corr-1',

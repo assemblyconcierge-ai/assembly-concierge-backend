@@ -1,4 +1,5 @@
 import { v4 as uuidv4 } from 'uuid';
+import { randomBytes } from 'crypto';
 
 /** Generate a human-friendly job key like AC-2024-A1B2 */
 export function generateJobKey(): string {
@@ -19,6 +20,16 @@ export function generatePublicPayToken(): string {
  */
 export function generateOperatorPhotoToken(): string {
   return `opt_${uuidv4().replace(/-/g, '')}`;
+}
+
+/**
+ * Generate a cryptographically random contractor packet token.
+ * Scoped read-only token stored on contractor_assignments.
+ * Token is inert until assignment status = accepted.
+ * MUST NOT be logged, included in audit payloads, or returned in general API responses.
+ */
+export function generateContractorPacketToken(): string {
+  return `cpk_${randomBytes(16).toString('hex')}`;
 }
 
 /** Normalize phone to E.164 format (US numbers only for now) */

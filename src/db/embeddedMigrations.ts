@@ -567,4 +567,15 @@ CREATE UNIQUE INDEX IF NOT EXISTS jobs_operator_photo_token_idx
   WHERE operator_photo_token IS NOT NULL;
 `,
   },
+  {
+    filename: '015_add_contractor_packet_token_to_assignments.sql',
+    sql: `
+ALTER TABLE contractor_assignments
+  ADD COLUMN IF NOT EXISTS contractor_packet_token TEXT;
+
+CREATE UNIQUE INDEX IF NOT EXISTS contractor_assignments_contractor_packet_token_idx
+  ON contractor_assignments (contractor_packet_token)
+  WHERE contractor_packet_token IS NOT NULL;
+`,
+  },
 ];
