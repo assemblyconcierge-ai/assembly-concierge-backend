@@ -18,8 +18,34 @@ import { requireAdmin } from '../../common/middleware/auth';
 import { logger } from '../../common/logger';
 import { dispatchJobToContractor, cancelContractorAssignment, cancelJob } from '../dispatch/dispatch.service';
 import { checkContractorAvailability } from '../dispatch/dispatchConflict';
+import { sendSms } from '../sms/quo.adapter';
 
 export const jobsRouter = Router();
+
+async function sendRemainderPaymentLinkSms({
+  jobKey,
+  customerPhone,
+  checkoutUrl,
+  correlationId,
+}: {
+  jobKey: string;
+  customerPhone: string;
+  checkoutUrl: string;
+  correlationId: string;
+}): Promise<void> {
+  try {
+    const result = await sendSms(
+      customerPhone,
+      `Assembly Concierge: Your remaining balance for ${jobKey} is ready.\n\nPay here:\n${checkoutUrl}`,
+      correlationId,
+    );
+    if (!result.messageId) {
+      logger.warn({ jobKey, correlationId }, '[remainder-sms] sendSms returned no messageId');
+    }
+  } catch (err) {
+    logger.warn({ err, jobKey, correlationId }, '[remainder-sms] SMS delivery failed');
+  }
+}
 
 // GET /jobs/pay/:token — public job summary for customer pay page (no auth required)
 // Returns only safe fields: no financial internals, no payout data
@@ -240,11 +266,22 @@ jobsRouter.post(
   requireAdmin,
   async (req: Request, res: Response, next: NextFunction) => {
     try {
+      const job = await getJobById(req.params.jobId);
+      if (!job) {
+        res.status(404).json({ error: 'NOT_FOUND', message: 'Job not found' });
+        return;
+      }
       const result = await createJobCheckoutSession(
         req.params.jobId,
         'remainder',
         req.correlationId,
       );
+      await sendRemainderPaymentLinkSms({
+        jobKey: job.job_key,
+        customerPhone: result.customerPhone,
+        checkoutUrl: result.checkoutUrl,
+        correlationId: req.correlationId,
+      });
       // Enqueue Airtable sync so Stripe Checkout Session ID is written to Airtable
       setImmediate(() =>
         enqueueAirtableSync({ jobId: req.params.jobId, correlationId: req.correlationId })
@@ -446,15 +483,21 @@ jobsRouter.post(
         const correlationId = req.correlationId;
         setImmediate(async () => {
           try {
-            const { checkoutUrl, sessionId } = await createJobCheckoutSession(
+            const { checkoutUrl, sessionId, customerPhone } = await createJobCheckoutSession(
               job.id,
               'remainder',
               correlationId,
             );
             logger.info(
-              { jobId: job.id, sessionId, checkoutUrl },
+              { jobId: job.id, sessionId },
               '[approve-completion] Remainder checkout session auto-created',
             );
+            await sendRemainderPaymentLinkSms({
+              jobKey: job.job_key,
+              customerPhone,
+              checkoutUrl,
+              correlationId,
+            });
           } catch (err) {
             logger.error(
               { err, jobId: job.id, correlationId },
