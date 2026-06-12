@@ -29,7 +29,8 @@
 19. [Phase 16 — Public Booking: Scheduler-First Intake, Manual Review, and SMS Payment Link Fallback (May 2026)](#phase-16)
 20. [Phase 17 — Frontend Scheduler: Public Booking UI Deployed (May 2026)](#phase-17)
 21. [Phase 18 — Customer Photo Upload and Frontend Booking Polish (May 2026)](#phase-18)
-22. [Current Architecture](#current-architecture)
+22. [Phase 19 — Contractor Screening Pipeline (June 2026)](#phase-19)
+23. [Current Architecture](#current-architecture)
 23. [Job State Machine](#job-state-machine)
 24. [SMS Command Protocol](#sms-command-protocol)
 25. [API Reference](#api-reference)
@@ -1169,6 +1170,58 @@ Stripe payment was not completed (intentional — no test charge made).
 
 ---
 
+<a name="phase-19"></a>
+## Phase 19 — Contractor Screening Pipeline (June 2026)
+
+Built a token-based contractor acquisition and screening pipeline using Airtable automation, Make, Gmail, and Netlify. Screening is intentionally separate from backend contractor creation — screening collects applicant readiness data, while approved contractor records (PostgreSQL row, SMS dispatch eligibility) remain a controlled later onboarding step.
+
+### Applicant screening flow
+
+When an applicant is selected for screening, Make generates a unique screening token and stores it alongside the applicant record in Airtable. A Make scenario constructs a private screening URL embedding the token and prefilled applicant data (name, email, phone), then delivers it via Gmail. The screening page is deployed at `join.assemblyconcierge.com/screening.html` (Netlify).
+
+The screening page captures:
+- Screening responses (service type readiness, tools, reliability questions)
+- Flat-payout acceptance confirmation
+- Phone-screen queue readiness flag
+
+On submission, a Make scenario receives the screening form payload and updates the Airtable applicant record with screening status, screening notes, flat-payout acceptance, and phone-screen queue status.
+
+### Airtable applicant lifecycle
+
+Screening outcomes advance applicants through the following Airtable stages:
+
+| Stage | Description |
+|-------|-------------|
+| Applied | Initial applicant record created |
+| Screening Sent | Unique screening link emailed to applicant |
+| Screening Submitted | Applicant completed the screening form |
+| Under Review | Operator reviewing screening responses |
+| Phone Screen Queue | Flagged for phone interview |
+| Onboarding | Accepted — onboarding in progress |
+| Ready for Backend | Cleared for backend contractor record creation |
+| Rejected | Did not pass screening |
+
+### Separation of concerns
+
+**Screening pipeline (complete):** Applicant intake → token generation → email delivery → screening submission → Airtable status workflow.
+
+**Deferred (intentional):** Backend contractor creation (PostgreSQL `contractors` record, `is_active` flag, SMS dispatch eligibility) is not triggered automatically by screening completion. Approved contractors move to `Ready for Backend` in Airtable, where a controlled onboarding step initiates backend record creation.
+
+### Contractor photo upload
+
+Photo upload was intentionally excluded from screening v1. Contractor photos remain a later onboarding/backend/R2 feature, consistent with the existing customer photo upload infrastructure (Phase 18).
+
+### Branding polish
+
+- **Contractor Netlify site** (`join.assemblyconcierge.com`) — favicon and app-icon assets added to the contractor-facing Netlify site.
+- **Customer Vercel frontend** — favicon/site icon metadata updated in commit `40de859`. `metadata.icons` expanded to cover 16×16, 32×32, apple-touch (180×180), and shortcut entries using the Assembly Concierge yellow icon. `public/site.webmanifest` created with Assembly Concierge name, dark theme, and PWA icon references.
+
+### Validation
+
+End-to-end smoke test completed: applicant submission → token generation → screening email delivered via Gmail → screening link opened with prefilled applicant data → screening form submitted → Airtable updated with screening status, notes, flat-payout acceptance, and phone-screen queue flag → lifecycle stages advanced through Ready for Backend.
+
+---
+
 ## Current Architecture
 
 ```
@@ -1550,8 +1603,9 @@ Hosted on **Render** (Oregon region).
 - **Real-time contractor coordination via SMS** — built an inbound SMS webhook handler that fuzzy-matches natural-language contractor replies (`confirm`, `on my way`, `finish`), routes ambiguous replies by job key, enforces command/state guards, and drives atomic job state transitions, customer OTW notifications, and Airtable sync.
 - **Full-stack Airtable + Make.com automation** — designed multi-route Make.com dispatch scenarios covering first dispatch, decline/re-dispatch, cancel/re-dispatch, and contractor availability checks, with Airtable as an operator mirror and PostgreSQL as the single source of truth.
 - **Fault-tolerant payment pipeline** — integrated Stripe Checkout with idempotent webhook processing, deposit/remainder split billing, full-payment edge-case handling, and automatic remainder invoice generation after operator-approved job completion.
+- **Token-based contractor screening pipeline** — built an automated contractor acquisition and screening workflow using Airtable, Make, Gmail, and Netlify: unique per-applicant screening tokens, private prefilled screening links, structured submission capture updating screening status, notes, payout acceptance, and queue flags in Airtable. Validated applicant lifecycle from screening email through Ready for Backend via smoke test. Intentionally separated from backend contractor creation to preserve a controlled onboarding boundary.
 
 ---
 
-*This document is updated continuously as the system evolves. Last updated: May 2026.*
+*This document is updated continuously as the system evolves. Last updated: June 2026.*
 *Built by Kenneth Thomas-Utsey with Claude (Anthropic) and Manus AI.*

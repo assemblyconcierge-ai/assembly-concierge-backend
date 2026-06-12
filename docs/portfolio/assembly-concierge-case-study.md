@@ -53,6 +53,10 @@ link.
 jobs to "Submit Quote Request & Add Photos" and added a contextual hint below the
 button explaining that photos help price custom jobs. Non-quote paths are unchanged.
 
+**Contractor screening pipeline — end-to-end** — Built a token-based contractor acquisition and screening pipeline using Airtable automation, Make, Gmail, and Netlify. Unique screening tokens are generated per applicant and stored in Airtable. A Make scenario constructs a private prefilled screening link and delivers it via Gmail. The screening page (`join.assemblyconcierge.com/screening.html`) captures screening responses, flat-payout acceptance, and phone-screen readiness, then updates Airtable with screening status, notes, and queue flags on submission. Applicant lifecycle stages — screening sent, submitted, under review, phone-screen queue, onboarding, ready for backend — were validated end-to-end via smoke test. Contractor backend creation (PostgreSQL record, dispatch eligibility) is intentionally deferred from screening v1: screening collects readiness data only, and approved contractors advance to a Ready for Backend stage for controlled onboarding. Contractor photo upload is also excluded from screening v1 and remains a later onboarding/backend/R2 feature.
+
+**Branding polish** — Favicon and app-icon assets added across both web surfaces: the contractor Netlify site (`join.assemblyconcierge.com`) and the customer Vercel frontend (commit `40de859`). The Vercel frontend metadata now covers 16×16, 32×32, apple-touch (180×180), and shortcut icons alongside a `site.webmanifest` with Assembly Concierge branding.
+
 **Validation** — Backend: 212 automated tests across 16 Vitest test files
 (unit + integration), all passing. Frontend: Next.js production build and ESLint
 clean at each merge.
