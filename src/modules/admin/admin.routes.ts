@@ -4,6 +4,8 @@ import { requireAdmin } from '../../common/middleware/auth';
 import { getAllPricingRules, upsertPricingRule } from '../pricing/pricing.service';
 import { getAllServiceAreas, upsertServiceArea } from '../service-areas/serviceArea.service';
 import { query } from '../../db/pool';
+import { strictNormalizePhone } from '../../common/utils';
+import { recordAuditEvent } from '../audit/audit.service';
 
 export const adminRouter = Router();
 
@@ -83,22 +85,64 @@ adminRouter.get('/contractors', requireAdmin, async (_req: Request, res: Respons
 
 adminRouter.post('/contractors', requireAdmin, async (req: Request, res: Response, next: NextFunction) => {
   try {
+    // Accept phoneE164, phone, or phoneNumber for Make/Airtable compatibility
     const schema = z.object({
-      fullName: z.string().min(1),
-      phoneE164: z.string().min(10),
-      email: z.string().email().optional(),
-      city: z.string().optional(),
-      notes: z.string().optional(),
+      fullName:    z.string().min(1),
+      phoneE164:   z.string().optional(),
+      phone:       z.string().optional(),
+      phoneNumber: z.string().optional(),
+      email:       z.string().email().optional(),
+      city:        z.string().optional(),
+      notes:       z.string().optional(),
     });
     const body = schema.parse(req.body);
+
+    // Resolve raw phone from whichever field was provided
+    const rawPhone = body.phoneE164 ?? body.phone ?? body.phoneNumber;
+    if (!rawPhone) {
+      res.status(400).json({ error: 'MISSING_PHONE', message: 'Phone number is required (phoneE164, phone, or phoneNumber)' });
+      return;
+    }
+
+    // Normalize to E.164 — throws TypeError on malformed input
+    let phoneE164: string;
+    try {
+      phoneE164 = strictNormalizePhone(rawPhone);
+    } catch (normErr: any) {
+      res.status(400).json({ error: 'INVALID_PHONE', message: normErr.message });
+      return;
+    }
+
+    // 409 if phone already belongs to an existing contractor
+    const conflict = await query(
+      'SELECT id FROM contractors WHERE phone_e164 = $1',
+      [phoneE164],
+    );
+    if (conflict[0]) {
+      res.status(409).json({ error: 'PHONE_IN_USE', message: 'Phone number is already in use by another contractor' });
+      return;
+    }
+
     const { v4: uuidv4 } = await import('uuid');
+    const id = uuidv4();
     const rows = await query(
       `INSERT INTO contractors (id, full_name, phone_e164, email, city, notes, is_active)
        VALUES ($1, $2, $3, $4, $5, $6, TRUE)
        RETURNING *`,
-      [uuidv4(), body.fullName, body.phoneE164, body.email ?? null, body.city ?? null, body.notes ?? null],
+      [id, body.fullName, phoneE164, body.email ?? null, body.city ?? null, body.notes ?? null],
     );
-    res.status(201).json({ contractor: rows[0] });
+    const contractor = rows[0];
+
+    // Audit event — fire-and-forget, non-blocking
+    recordAuditEvent({
+      aggregateType: 'contractor',
+      aggregateId:   id,
+      eventType:     'contractor.created',
+      actorType:     'admin',
+      payload:       { fullName: body.fullName, phoneE164, city: body.city ?? null },
+    }).catch(() => { /* audit failure must not break contractor creation */ });
+
+    res.status(201).json({ contractor });
   } catch (err) {
     next(err);
   }

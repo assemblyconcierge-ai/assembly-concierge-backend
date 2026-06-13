@@ -40,6 +40,35 @@ export function normalizePhone(raw: string): string {
   return `+${digits}`;
 }
 
+/**
+ * Strict variant of normalizePhone for validated contexts (e.g. admin contractor creation).
+ * Accepts: 10-digit, 11-digit starting with 1, or already-E.164 (+1xxxxxxxxxx).
+ * Throws a TypeError with a descriptive message for short/malformed/non-US input.
+ * Do NOT use this for Jotform intake, SMS webhooks, or public booking — those callers
+ * rely on the lenient normalizePhone behavior.
+ */
+export function strictNormalizePhone(raw: string): string {
+  const digits = raw.replace(/\D/g, '');
+  if (digits.length === 10) return `+1${digits}`;
+  if (digits.length === 11 && digits.startsWith('1')) return `+${digits}`;
+  if (digits.length < 10) {
+    throw new TypeError(
+      `Invalid phone number: too short (${digits.length} digit${
+        digits.length === 1 ? '' : 's'
+      } after stripping non-digits — expected 10 or 11)`,
+    );
+  }
+  if (digits.length > 11) {
+    throw new TypeError(
+      `Invalid phone number: too long (${digits.length} digits after stripping non-digits — expected 10 or 11)`,
+    );
+  }
+  // 11 digits not starting with 1
+  throw new TypeError(
+    `Invalid phone number: 11-digit number must start with country code 1`,
+  );
+}
+
 /** Normalize city name for comparison */
 export function normalizeCity(city: string): string {
   return city.trim().toLowerCase().replace(/\s+/g, ' ');

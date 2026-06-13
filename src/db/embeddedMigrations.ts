@@ -578,4 +578,20 @@ CREATE UNIQUE INDEX IF NOT EXISTS contractor_assignments_contractor_packet_token
   WHERE contractor_packet_token IS NOT NULL;
 `,
   },
+  {
+    filename: '016_unique_contractor_phone.sql',
+    sql: `
+-- Assembly Concierge Backend -- Unique Contractor Phone
+-- Migration 016: Add unique index on contractors(phone_e164)
+--
+-- SMS contractor command routing depends on phone_e164 uniqueness.
+-- Duplicate active contractor phone numbers can silently break dispatch routing.
+-- IF NOT EXISTS makes this idempotent on re-run.
+--
+-- Risk note: if duplicate phone_e164 rows already exist in production, this
+-- CREATE UNIQUE INDEX will fail. Run the following to check before applying:
+--   SELECT phone_e164, COUNT(*) FROM contractors GROUP BY phone_e164 HAVING COUNT(*) > 1;
+CREATE UNIQUE INDEX IF NOT EXISTS contractors_phone_e164_idx ON contractors(phone_e164);
+`,
+  },
 ];
