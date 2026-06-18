@@ -57,6 +57,39 @@ button explaining that photos help price custom jobs. Non-quote paths are unchan
 
 **Branding polish** — Favicon and app-icon assets added across both web surfaces: the contractor Netlify site (`join.assemblyconcierge.com`) and the customer Vercel frontend (commit `40de859`). The Vercel frontend metadata now covers 16×16, 32×32, apple-touch (180×180), and shortcut icons alongside a `site.webmanifest` with Assembly Concierge branding.
 
-**Validation** — Backend: 212 automated tests across 16 Vitest test files
+**Contractor screening — full-flow smoke test** — Validated the end-to-end contractor
+application and screening pipeline against production data. Contractor application
+records flow from Airtable through Make; a screening email scenario constructs a
+tokenized screening link and delivers it via Gmail. A prefill scenario validates the
+screening token and returns applicant data to the Netlify screening page
+(`join.assemblyconcierge.com/screening.html`). A submission scenario writes screening
+completion fields and review status back to Airtable on form submit. During smoke
+testing, an initial repeated-token failure was traced to dirty, reused test data from
+a previously completed screening record, not a backend regression. A fresh screening
+record completed successfully and advanced through all lifecycle stages as expected.
+
+**Contractor creation hardening — phone normalization and inactive-by-default** —
+Hardened `POST /contractors` in two sequential commits. Commit `da56e53` (Manus)
+introduced a `strictNormalizePhone` utility that accepts raw US phone strings in any
+common format and rejects malformed input; the route now accepts `phoneE164`, `phone`,
+or `phoneNumber` for Make/Airtable compatibility, returns `400 INVALID_PHONE` for
+malformed numbers, and returns `409 PHONE_IN_USE` on duplicate detection. A
+`CREATE UNIQUE INDEX` on `contractors(phone_e164)` (migration 016, embedded) enforces
+uniqueness at the DB level. A fire-and-forget `contractor.created` audit event is
+recorded on each successful creation. Commit `4ed35fc` applied the inactive-by-default
+policy: `POST /contractors` now inserts `is_active = FALSE`; `GET /contractors` remains
+active-only by default; `GET /contractors?includeInactive=true` returns both active and
+inactive contractors. Migration `017_contractor_default_inactive` changes the
+`contractors.is_active` column default from `TRUE` to `FALSE` at the DB level and is
+embedded in the runtime migration array so it applies automatically on Render startup.
+Render logs confirmed migration 017 applied on deploy. Production smoke tests confirmed
+new contractors were created with `is_active = false` in Postgres; older contractors
+remained active. The Airtable Contractors table mirrored the inactive state with
+"Contractor Active" unchecked. Intended lifecycle: application submitted → screening
+sent → screening completed → contractor created inactive → onboarding docs sent →
+onboarding completed → owner/admin approval → contractor activated. Next: design
+onboarding fields and the activation workflow.
+
+**Validation** — Backend: 270 automated tests across 18 Vitest test files
 (unit + integration), all passing. Frontend: Next.js production build and ESLint
 clean at each merge.
