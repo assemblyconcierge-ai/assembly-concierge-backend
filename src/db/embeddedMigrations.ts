@@ -594,4 +594,12 @@ CREATE UNIQUE INDEX IF NOT EXISTS contractor_assignments_contractor_packet_token
 CREATE UNIQUE INDEX IF NOT EXISTS contractors_phone_e164_idx ON contractors(phone_e164);
 `,
   },
+  {
+    filename: '017_contractor_default_inactive.sql',
+    sql: `
+-- Migration 017: change contractors.is_active DB default from TRUE to FALSE.
+-- Existing rows are unaffected. Forward-only; no data change.
+ALTER TABLE contractors ALTER COLUMN is_active SET DEFAULT FALSE;
+`,
+  },
 ];

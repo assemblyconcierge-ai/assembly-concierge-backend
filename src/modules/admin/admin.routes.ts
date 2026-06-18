@@ -72,10 +72,13 @@ adminRouter.put('/config/service-areas', requireAdmin, async (req: Request, res:
 // CONTRACTORS
 // ─────────────────────────────────────────────
 
-adminRouter.get('/contractors', requireAdmin, async (_req: Request, res: Response, next: NextFunction) => {
+adminRouter.get('/contractors', requireAdmin, async (req: Request, res: Response, next: NextFunction) => {
   try {
+    const includeInactive = req.query.includeInactive === 'true';
     const contractors = await query(
-      'SELECT * FROM contractors WHERE is_active = TRUE ORDER BY full_name',
+      includeInactive
+        ? 'SELECT * FROM contractors ORDER BY full_name'
+        : 'SELECT * FROM contractors WHERE is_active = TRUE ORDER BY full_name',
     );
     res.json({ contractors });
   } catch (err) {
@@ -127,7 +130,7 @@ adminRouter.post('/contractors', requireAdmin, async (req: Request, res: Respons
     const id = uuidv4();
     const rows = await query(
       `INSERT INTO contractors (id, full_name, phone_e164, email, city, notes, is_active)
-       VALUES ($1, $2, $3, $4, $5, $6, TRUE)
+       VALUES ($1, $2, $3, $4, $5, $6, FALSE)
        RETURNING *`,
       [id, body.fullName, phoneE164, body.email ?? null, body.city ?? null, body.notes ?? null],
     );
