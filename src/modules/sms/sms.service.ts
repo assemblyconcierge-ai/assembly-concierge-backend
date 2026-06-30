@@ -477,6 +477,17 @@ export async function processSmsWebhook(
     } catch (err) {
       log.warn({ err }, '[SMS] Post-DECLINE contractor SMS failed');
     }
+  } else if (command === 'DONE' || command === 'FINISH') {
+    // Post-DONE/FINISH: completion acknowledgement
+    try {
+      await sendSms(
+        contractor.phone_e164,
+        `Thanks \u2014 completion reported for ${activeJob.job_key}. Assembly Concierge will review the job. If photos or additional details are needed, we'll follow up before closeout approval.`,
+        correlationId,
+      );
+    } catch (err) {
+      log.warn({ err }, '[SMS] Post-DONE contractor SMS failed');
+    }
   }
 
   if (command === 'CONFIRM' && !activeJob.customer_confirm_text_sent_at) {

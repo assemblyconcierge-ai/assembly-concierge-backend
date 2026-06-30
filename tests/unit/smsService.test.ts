@@ -591,4 +591,50 @@ describe('processSmsWebhook job-key routing', () => {
     expect(mockSendSms).not.toHaveBeenCalledWith('+14045550200', expect.any(String), expect.any(String));
     expect(enqueueAirtableSync).not.toHaveBeenCalled();
   });
+
+  it('DONE sends post-completion acknowledgement SMS to contractor', async () => {
+    setupDb(activeJob({
+      job_key: 'AC-2026-EPME',
+      assignment_status: 'accepted',
+      job_status: 'assigned',
+    }));
+
+    await processSmsWebhook('+1 (404) 555-0100', 'done AC-2026-EPME', 'corr-1');
+
+    // Post-DONE SMS sent to contractor
+    expect(mockSendSms).toHaveBeenCalledWith(
+      contractor.phone_e164,
+      expect.stringContaining('completion reported for AC-2026-EPME'),
+      'corr-1',
+    );
+    const sentMsg: string = mockSendSms.mock.calls[mockSendSms.mock.calls.length - 1][1];
+    expect(sentMsg).toContain('Assembly Concierge will review the job');
+    // Must not mention upload links, payout, or URLs
+    expect(sentMsg).not.toContain('upload');
+    expect(sentMsg).not.toContain('payout');
+    expect(sentMsg).not.toContain('http');
+  });
+
+  it('FINISH sends post-completion acknowledgement SMS to contractor', async () => {
+    setupDb(activeJob({
+      job_key: 'AC-2026-EPME',
+      assignment_status: 'accepted',
+      job_status: 'assigned',
+    }));
+
+    await processSmsWebhook('+1 (404) 555-0100', 'finish AC-2026-EPME', 'corr-1');
+
+    // Post-FINISH SMS sent to contractor
+    expect(mockSendSms).toHaveBeenCalledWith(
+      contractor.phone_e164,
+      expect.stringContaining('completion reported for AC-2026-EPME'),
+      'corr-1',
+    );
+    const sentMsg: string = mockSendSms.mock.calls[mockSendSms.mock.calls.length - 1][1];
+    expect(sentMsg).toContain('Assembly Concierge will review the job');
+    // Must not mention upload links, payout, or URLs
+    expect(sentMsg).not.toContain('upload');
+    expect(sentMsg).not.toContain('payout');
+    expect(sentMsg).not.toContain('http');
+  });
 });
