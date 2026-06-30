@@ -6,6 +6,7 @@ import { getAllServiceAreas, upsertServiceArea } from '../service-areas/serviceA
 import { query } from '../../db/pool';
 import { strictNormalizePhone } from '../../common/utils';
 import { recordAuditEvent } from '../audit/audit.service';
+import { logger } from '../../common/logger';
 
 export const adminRouter = Router();
 
@@ -209,6 +210,130 @@ adminRouter.patch('/contractors/:id', requireAdmin, async (req: Request, res: Re
       values,
     );
     res.json({ contractor: rows[0] });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ─────────────────────────────────────────────
+// POST /contractors/:id/activate
+// Dedicated activation endpoint — validates contractor readiness payload
+// from Make.com/Airtable before setting is_active = TRUE.
+// All 10 readiness fields must be present and true.
+// Optional: backendContractorId must match :id if provided.
+// ─────────────────────────────────────────────
+
+/** All boolean readiness fields that must be true before activation. */
+const ACTIVATION_REQUIRED_FIELDS = [
+  'activationRequested',
+  'onboardingComplete',
+  'activationReady',
+  'agreementReceived',
+  'w9Received',
+  'paymentSetupComplete',
+  'smsConsentConfirmed',
+  'toolsTransportationConfirmed',
+  'handbookAcknowledged',
+  'photoIdReceived',
+] as const;
+
+type ActivationField = typeof ACTIVATION_REQUIRED_FIELDS[number];
+
+adminRouter.post('/contractors/:id/activate', requireAdmin, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const contractorId = req.params.id;
+
+    // ── 1. Validate readiness payload ──────────────────────────────────────
+    const bodySchema = z.object({
+      activationRequested:           z.boolean().optional(),
+      onboardingComplete:            z.boolean().optional(),
+      activationReady:               z.boolean().optional(),
+      agreementReceived:             z.boolean().optional(),
+      w9Received:                    z.boolean().optional(),
+      paymentSetupComplete:          z.boolean().optional(),
+      smsConsentConfirmed:           z.boolean().optional(),
+      toolsTransportationConfirmed:  z.boolean().optional(),
+      handbookAcknowledged:          z.boolean().optional(),
+      photoIdReceived:               z.boolean().optional(),
+      // Optional — if provided must match :id
+      backendContractorId:           z.string().optional(),
+    });
+
+    const body = bodySchema.parse(req.body);
+
+    // Collect missing / false required fields
+    const missingRequirements: string[] = [];
+
+    for (const field of ACTIVATION_REQUIRED_FIELDS) {
+      if (body[field as ActivationField] !== true) {
+        missingRequirements.push(field);
+      }
+    }
+
+    // backendContractorId mismatch check (only when provided)
+    if (body.backendContractorId !== undefined && body.backendContractorId !== contractorId) {
+      missingRequirements.push('backendContractorIdMismatch');
+    }
+
+    if (missingRequirements.length > 0) {
+      res.status(422).json({
+        ok: false,
+        activationStatus: 'Blocked - Missing Info',
+        missingRequirements,
+      });
+      return;
+    }
+
+    // ── 2. Look up contractor ───────────────────────────────────────────────
+    const existing = await query(
+      'SELECT id, is_active FROM contractors WHERE id = $1',
+      [contractorId],
+    );
+    if (!existing[0]) {
+      res.status(404).json({
+        ok: false,
+        activationStatus: 'Not Found',
+        missingRequirements: ['contractor'],
+      });
+      return;
+    }
+
+    // ── 3. Already active — idempotent 200 (Make-friendly) ─────────────────
+    if (existing[0].is_active === true) {
+      res.status(200).json({
+        ok: true,
+        activationStatus: 'Already Active',
+        contractorId,
+        isActive: true,
+        missingRequirements: [],
+      });
+      return;
+    }
+
+    // ── 4. Activate ─────────────────────────────────────────────────────────
+    await query(
+      `UPDATE contractors SET is_active = TRUE, updated_at = NOW() WHERE id = $1`,
+      [contractorId],
+    );
+
+    // Audit event — fire-and-forget, non-blocking
+    recordAuditEvent({
+      aggregateType: 'contractor',
+      aggregateId:   contractorId,
+      eventType:     'contractor.activated',
+      actorType:     'admin',
+      correlationId: req.correlationId,
+    }).catch((err: unknown) => {
+      logger.warn({ err, contractorId }, '[activate] Audit event failed (non-fatal)');
+    });
+
+    res.status(200).json({
+      ok: true,
+      activationStatus: 'Activated',
+      contractorId,
+      isActive: true,
+      missingRequirements: [],
+    });
   } catch (err) {
     next(err);
   }

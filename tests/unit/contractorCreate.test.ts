@@ -1,23 +1,31 @@
 /**
- * Unit tests for POST /contractors hardening:
+ * Unit tests for contractor admin endpoints:
+ *   POST /contractors:
  *   - phone normalization (normalizePhone utility)
  *   - flexible phone field names (phoneE164 / phone / phoneNumber)
  *   - duplicate phone 409
  *   - missing phone 400
  *   - invalid/short phone 400
- *   - happy path 201 with normalized phone_e164
+ *   - happy path 201 with normalized phone_e164, is_active=false
  *   - audit event fired (fire-and-forget)
  *
- * Strategy: test normalizePhone directly (pure function), then test the route
- * handler via supertest against a minimal Express app that mounts adminRouter
+ *   POST /contractors/:id/activate:
+ *   - 200 + is_active=true on success
+ *   - 404 for unknown contractor
+ *   - 409 ALREADY_ACTIVE when contractor is already active
+ *   - audit event contractor.activated fired (fire-and-forget)
+ *
+ * Strategy: test normalizePhone directly (pure function), then test route
+ * handlers via supertest against a minimal Express app that mounts adminRouter
  * with the DB pool mocked.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 // ── Hoist mock variables ──────────────────────────────────────────────────────
-const { mockQuery, mockRecordAuditEvent } = vi.hoisted(() => ({
+const { mockQuery, mockRecordAuditEvent, mockLoggerWarn } = vi.hoisted(() => ({
   mockQuery: vi.fn(),
   mockRecordAuditEvent: vi.fn().mockResolvedValue(undefined),
+  mockLoggerWarn: vi.fn(),
 }));
 
 vi.mock('../../src/db/pool', () => ({
@@ -43,6 +51,15 @@ vi.mock('../../src/modules/pricing/pricing.service', () => ({
 vi.mock('../../src/modules/service-areas/serviceArea.service', () => ({
   getAllServiceAreas: vi.fn(),
   upsertServiceArea: vi.fn(),
+}));
+
+vi.mock('../../src/common/logger', () => ({
+  logger: {
+    child: vi.fn().mockReturnValue({ info: vi.fn(), warn: mockLoggerWarn, error: vi.fn() }),
+    warn: mockLoggerWarn,
+    info: vi.fn(),
+    error: vi.fn(),
+  },
 }));
 
 import express from 'express';
@@ -158,7 +175,7 @@ describe('POST /admin/contractors', () => {
   it('returns 201 and stores normalized phone_e164 for a 10-digit raw phone via phoneE164 field', async () => {
     // First query: duplicate check → no conflict
     mockQuery.mockResolvedValueOnce([]);
-    // Second query: INSERT RETURNING *
+    // Second query: INSERT RETURNING * — is_active is FALSE (inactive by default)
     mockQuery.mockResolvedValueOnce([{
       id: 'contractor-uuid-1',
       full_name: 'Test Contractor',
@@ -166,7 +183,7 @@ describe('POST /admin/contractors', () => {
       email: null,
       city: 'Hampton',
       notes: null,
-      is_active: true,
+      is_active: false,
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
     }]);
@@ -177,6 +194,8 @@ describe('POST /admin/contractors', () => {
 
     expect(res.status).toBe(201);
     expect(res.body.contractor.phone_e164).toBe('+14044256394');
+    // Contractor is created inactive by default
+    expect(res.body.contractor.is_active).toBe(false);
     // Confirm duplicate check was called with normalized value
     expect(mockQuery).toHaveBeenCalledWith(
       'SELECT id FROM contractors WHERE phone_e164 = $1',
@@ -193,7 +212,7 @@ describe('POST /admin/contractors', () => {
       email: null,
       city: null,
       notes: null,
-      is_active: true,
+      is_active: false,
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
     }]);
@@ -204,6 +223,7 @@ describe('POST /admin/contractors', () => {
 
     expect(res.status).toBe(201);
     expect(res.body.contractor.phone_e164).toBe('+14044256394');
+    expect(res.body.contractor.is_active).toBe(false);
   });
 
   it('returns 201 when phone is provided via the "phoneNumber" field', async () => {
@@ -215,7 +235,7 @@ describe('POST /admin/contractors', () => {
       email: null,
       city: null,
       notes: null,
-      is_active: true,
+      is_active: false,
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
     }]);
@@ -226,6 +246,7 @@ describe('POST /admin/contractors', () => {
 
     expect(res.status).toBe(201);
     expect(res.body.contractor.phone_e164).toBe('+14044256394');
+    expect(res.body.contractor.is_active).toBe(false);
   });
 
   it('returns 400 when fullName is missing', async () => {
@@ -276,7 +297,7 @@ describe('POST /admin/contractors', () => {
       email: null,
       city: null,
       notes: null,
-      is_active: true,
+      is_active: false,
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
     }]);
@@ -296,5 +317,221 @@ describe('POST /admin/contractors', () => {
         payload: expect.objectContaining({ phoneE164: '+14044256394' }),
       }),
     );
+  });
+});
+
+// ── POST /admin/contractors/:id/activate route tests ──────────────────────────
+describe('POST /admin/contractors/:id/activate', () => {
+  const app = buildApp();
+  const CONTRACTOR_ID = 'contractor-uuid-activate';
+
+  /** All 10 required readiness fields set to true. */
+  const FULL_READINESS_PAYLOAD = {
+    activationRequested:          true,
+    onboardingComplete:           true,
+    activationReady:              true,
+    agreementReceived:            true,
+    w9Received:                   true,
+    paymentSetupComplete:         true,
+    smsConsentConfirmed:          true,
+    toolsTransportationConfirmed: true,
+    handbookAcknowledged:         true,
+    photoIdReceived:              true,
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockRecordAuditEvent.mockResolvedValue(undefined);
+  });
+
+  // ── Happy path ─────────────────────────────────────────────────────────────────
+
+  it('returns 200 Activated with structured envelope when all readiness fields are true', async () => {
+    // SELECT → contractor exists, inactive
+    mockQuery.mockResolvedValueOnce([{ id: CONTRACTOR_ID, is_active: false }]);
+    // UPDATE (no RETURNING needed — response is built from input)
+    mockQuery.mockResolvedValueOnce([]);
+
+    const res = await request(app)
+      .post(`/admin/contractors/${CONTRACTOR_ID}/activate`)
+      .send(FULL_READINESS_PAYLOAD);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({
+      ok: true,
+      activationStatus: 'Activated',
+      contractorId: CONTRACTOR_ID,
+      isActive: true,
+      missingRequirements: [],
+    });
+  });
+
+  it('accepts backendContractorId when it matches :id', async () => {
+    mockQuery.mockResolvedValueOnce([{ id: CONTRACTOR_ID, is_active: false }]);
+    mockQuery.mockResolvedValueOnce([]);
+
+    const res = await request(app)
+      .post(`/admin/contractors/${CONTRACTOR_ID}/activate`)
+      .send({ ...FULL_READINESS_PAYLOAD, backendContractorId: CONTRACTOR_ID });
+
+    expect(res.status).toBe(200);
+    expect(res.body.activationStatus).toBe('Activated');
+  });
+
+  it('does not block when backendContractorId is absent', async () => {
+    mockQuery.mockResolvedValueOnce([{ id: CONTRACTOR_ID, is_active: false }]);
+    mockQuery.mockResolvedValueOnce([]);
+
+    const res = await request(app)
+      .post(`/admin/contractors/${CONTRACTOR_ID}/activate`)
+      .send(FULL_READINESS_PAYLOAD); // no backendContractorId key
+
+    expect(res.status).toBe(200);
+    expect(res.body.activationStatus).toBe('Activated');
+  });
+
+  // ── Readiness validation ───────────────────────────────────────────────────────
+
+  it('returns 422 Blocked when one required field is missing (absent = not true)', async () => {
+    const { w9Received: _omit, ...payloadMissingW9 } = FULL_READINESS_PAYLOAD;
+
+    const res = await request(app)
+      .post(`/admin/contractors/${CONTRACTOR_ID}/activate`)
+      .send(payloadMissingW9);
+
+    expect(res.status).toBe(422);
+    expect(res.body.ok).toBe(false);
+    expect(res.body.activationStatus).toBe('Blocked - Missing Info');
+    expect(res.body.missingRequirements).toContain('w9Received');
+    // DB must not have been queried at all
+    expect(mockQuery).not.toHaveBeenCalled();
+  });
+
+  it('returns 422 Blocked when one required field is explicitly false', async () => {
+    const res = await request(app)
+      .post(`/admin/contractors/${CONTRACTOR_ID}/activate`)
+      .send({ ...FULL_READINESS_PAYLOAD, handbookAcknowledged: false });
+
+    expect(res.status).toBe(422);
+    expect(res.body.missingRequirements).toContain('handbookAcknowledged');
+    expect(mockQuery).not.toHaveBeenCalled();
+  });
+
+  it('returns 422 with all missing fields when multiple are absent or false', async () => {
+    const partialPayload = {
+      activationRequested: true,
+      onboardingComplete:  true,
+      // remaining 8 fields absent
+    };
+
+    const res = await request(app)
+      .post(`/admin/contractors/${CONTRACTOR_ID}/activate`)
+      .send(partialPayload);
+
+    expect(res.status).toBe(422);
+    expect(res.body.missingRequirements).toHaveLength(8);
+    expect(res.body.missingRequirements).toContain('activationReady');
+    expect(res.body.missingRequirements).toContain('agreementReceived');
+    expect(res.body.missingRequirements).toContain('w9Received');
+    expect(res.body.missingRequirements).toContain('paymentSetupComplete');
+    expect(res.body.missingRequirements).toContain('smsConsentConfirmed');
+    expect(res.body.missingRequirements).toContain('toolsTransportationConfirmed');
+    expect(res.body.missingRequirements).toContain('handbookAcknowledged');
+    expect(res.body.missingRequirements).toContain('photoIdReceived');
+    expect(mockQuery).not.toHaveBeenCalled();
+  });
+
+  it('returns 422 with backendContractorIdMismatch when backendContractorId does not match :id', async () => {
+    const res = await request(app)
+      .post(`/admin/contractors/${CONTRACTOR_ID}/activate`)
+      .send({ ...FULL_READINESS_PAYLOAD, backendContractorId: 'wrong-id-999' });
+
+    expect(res.status).toBe(422);
+    expect(res.body.missingRequirements).toContain('backendContractorIdMismatch');
+    expect(mockQuery).not.toHaveBeenCalled();
+  });
+
+  // ── Already active ──────────────────────────────────────────────────────────────
+
+  it('returns 200 Already Active (Make-friendly idempotent) when contractor is already active', async () => {
+    // SELECT → contractor exists, already active
+    mockQuery.mockResolvedValueOnce([{ id: CONTRACTOR_ID, is_active: true }]);
+
+    const res = await request(app)
+      .post(`/admin/contractors/${CONTRACTOR_ID}/activate`)
+      .send(FULL_READINESS_PAYLOAD);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({
+      ok: true,
+      activationStatus: 'Already Active',
+      contractorId: CONTRACTOR_ID,
+      isActive: true,
+      missingRequirements: [],
+    });
+    // UPDATE must not have been called
+    expect(mockQuery).toHaveBeenCalledTimes(1);
+  });
+
+  // ── Not found ───────────────────────────────────────────────────────────────────
+
+  it('returns 404 Not Found with structured envelope when contractor does not exist', async () => {
+    // SELECT → empty
+    mockQuery.mockResolvedValueOnce([]);
+
+    const res = await request(app)
+      .post(`/admin/contractors/nonexistent-id/activate`)
+      .send(FULL_READINESS_PAYLOAD);
+
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({
+      ok: false,
+      activationStatus: 'Not Found',
+      missingRequirements: ['contractor'],
+    });
+    // UPDATE must not have been called
+    expect(mockQuery).toHaveBeenCalledTimes(1);
+  });
+
+  // ── Audit event ──────────────────────────────────────────────────────────────────
+
+  it('fires contractor.activated audit event after successful activation', async () => {
+    mockQuery.mockResolvedValueOnce([{ id: CONTRACTOR_ID, is_active: false }]);
+    mockQuery.mockResolvedValueOnce([]);
+
+    await request(app)
+      .post(`/admin/contractors/${CONTRACTOR_ID}/activate`)
+      .send(FULL_READINESS_PAYLOAD);
+
+    // Give the fire-and-forget a tick to resolve
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(mockRecordAuditEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        aggregateType: 'contractor',
+        aggregateId: CONTRACTOR_ID,
+        eventType: 'contractor.activated',
+        actorType: 'admin',
+      }),
+    );
+  });
+
+  // ── SQL correctness ──────────────────────────────────────────────────────────────
+
+  it('issues UPDATE with only is_active=TRUE and updated_at — no other fields mutated', async () => {
+    mockQuery.mockResolvedValueOnce([{ id: CONTRACTOR_ID, is_active: false }]);
+    mockQuery.mockResolvedValueOnce([]);
+
+    await request(app)
+      .post(`/admin/contractors/${CONTRACTOR_ID}/activate`)
+      .send(FULL_READINESS_PAYLOAD);
+
+    const updateCall = mockQuery.mock.calls[1];
+    expect(updateCall[0]).toMatch(/UPDATE contractors SET is_active = TRUE, updated_at = NOW\(\)/);
+    expect(updateCall[0]).toMatch(/WHERE id = \$1/);
+    // Only one parameter: the contractor id
+    expect(updateCall[1]).toEqual([CONTRACTOR_ID]);
+    // No RETURNING — response is built from known values, not DB row
+    expect(updateCall[0]).not.toMatch(/RETURNING/);
   });
 });
