@@ -193,6 +193,12 @@ export async function processIntake(
         customJobDetails: intake.service.customJobDetails,
         publicPayToken,
         operatorPhotoToken,
+        // Job-level contact snapshots (Migration 019)
+        // Captured from the upserted customer record immediately after upsert,
+        // before any future upsert could overwrite customers.phone_e164.
+        customerNameSnapshot: customer.full_name,
+        customerEmailSnapshot: customer.email,
+        customerPhoneSnapshot: customer.phone_e164,
       },
       client,
     );

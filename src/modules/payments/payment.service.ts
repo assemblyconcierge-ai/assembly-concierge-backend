@@ -106,13 +106,35 @@ export async function createJobCheckoutSession(
     throw new Error(`Invalid amount for ${paymentType} payment on job ${jobId}`);
   }
 
-  // Get customer info
-  const customerRows = await query<{ full_name: string; email: string; phone_e164: string }>(
-    'SELECT full_name, email, phone_e164 FROM customers WHERE id = $1',
-    [job.customer_id],
-  );
-  const customer = customerRows[0];
-  if (!customer) throw new Error(`Customer not found for job ${jobId}`);
+  // Resolve customer contact info using snapshot-first strategy (Migration 019).
+  // Snapshot values are captured at booking time and are immune to later upserts on
+  // the shared customers row. Fall back to the live customers table only for older
+  // jobs created before Migration 019 where snapshots are null.
+  let customerName: string;
+  let customerEmail: string;
+  let customerPhone: string;
+
+  const snapshotComplete =
+    job.customer_name_snapshot != null &&
+    job.customer_email_snapshot != null &&
+    job.customer_phone_snapshot != null;
+
+  if (snapshotComplete) {
+    customerName = job.customer_name_snapshot!;
+    customerEmail = job.customer_email_snapshot!;
+    customerPhone = job.customer_phone_snapshot!;
+  } else {
+    // Fallback: live customers row (old jobs without snapshots)
+    const customerRows = await query<{ full_name: string; email: string; phone_e164: string }>(
+      'SELECT full_name, email, phone_e164 FROM customers WHERE id = $1',
+      [job.customer_id],
+    );
+    const customer = customerRows[0];
+    if (!customer) throw new Error(`Customer not found for job ${jobId}`);
+    customerName = customer.full_name;
+    customerEmail = customer.email;
+    customerPhone = customer.phone_e164;
+  }
 
   const baseUrl = config.FRONTEND_BASE_URL ?? config.APP_BASE_URL;
   const session = await createCheckoutSession({
@@ -121,8 +143,8 @@ export async function createJobCheckoutSession(
     paymentType,
     amountCents,
     currency: 'usd',
-    customerEmail: customer.email,
-    customerName: customer.full_name,
+    customerEmail,
+    customerName,
     serviceDescription: `Assembly Concierge — ${job.job_key} (${paymentType})`,
     successUrl: `${baseUrl}/payment/success?job=${job.job_key}&session_id={CHECKOUT_SESSION_ID}&token=${job.public_pay_token ?? ''}&paymentType=${paymentType}`,
     cancelUrl: `${baseUrl}/payment/cancel?job=${job.job_key}`,
@@ -226,6 +248,6 @@ export async function createJobCheckoutSession(
     checkoutUrl: session.url!,
     paymentId: payment.id,
     sessionId: session.id,
-    customerPhone: customer.phone_e164,
+    customerPhone,
   };
 }

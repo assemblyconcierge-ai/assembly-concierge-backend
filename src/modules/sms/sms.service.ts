@@ -161,7 +161,7 @@ const ACTIVE_JOB_BASE_SQL = `
     j.airtable_record_id,
     j.customer_otw_text_sent_at,
     j.customer_confirm_text_sent_at,
-    cust.phone_e164              AS customer_phone,
+    COALESCE(j.customer_phone_snapshot, cust.phone_e164) AS customer_phone,
     a.line1                      AS address_line1,
     a.line2                      AS address_line2,
     a.city                       AS address_city,
@@ -169,7 +169,7 @@ const ACTIVE_JOB_BASE_SQL = `
     a.postal_code                AS address_postal_code
   FROM contractor_assignments ca
   JOIN jobs j ON j.id = ca.job_id
-  JOIN customers cust ON cust.id = j.customer_id
+  LEFT JOIN customers cust ON cust.id = j.customer_id
   LEFT JOIN addresses a ON a.id = j.address_id
  WHERE ca.contractor_id = $1
    AND ca.status IN ('pending', 'accepted')

@@ -44,6 +44,11 @@ export interface JobRow {
   contractor_en_route_at: Date | null;
   customer_otw_text_sent_at: Date | null;
   customer_otw_text_status: string | null;
+  // Job-level contact snapshots (Migration 019)
+  // Captured at booking time; used in preference to live customers row for notifications.
+  customer_name_snapshot: string | null;
+  customer_email_snapshot: string | null;
+  customer_phone_snapshot: string | null;
   created_at: Date;
   updated_at: Date;
 }
@@ -83,6 +88,10 @@ export async function createJob(
     customJobDetails?: string;
     publicPayToken?: string;
     operatorPhotoToken?: string;
+    // Job-level contact snapshots (Migration 019)
+    customerNameSnapshot?: string;
+    customerEmailSnapshot?: string;
+    customerPhoneSnapshot?: string;
   },
   client: PoolClient,
 ): Promise<JobRow> {
@@ -97,12 +106,14 @@ export async function createJob(
       stripe_fee_cents, job_margin_cents,
       status, appointment_date, appointment_window,
       scheduled_start_at, scheduled_end_at, timezone,
-      special_instructions, custom_job_details, public_pay_token, operator_photo_token
+      special_instructions, custom_job_details, public_pay_token, operator_photo_token,
+      customer_name_snapshot, customer_email_snapshot, customer_phone_snapshot
     ) VALUES (
       $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
       $13, $14, $15, $16, $17, $18,
       $19, $20, $21, $22, $23, $24, $25,
-      $26, $27, $28, $29, $30, $31, $32, $33, $34
+      $26, $27, $28, $29, $30, $31, $32, $33, $34,
+      $35, $36, $37
     ) RETURNING *`,
     [
       uuidv4(),
@@ -139,6 +150,9 @@ export async function createJob(
       params.customJobDetails ?? null,
       params.publicPayToken ?? null,
       params.operatorPhotoToken ?? null,
+      params.customerNameSnapshot ?? null,
+      params.customerEmailSnapshot ?? null,
+      params.customerPhoneSnapshot ?? null,
     ],
   );
   return rows[0];
