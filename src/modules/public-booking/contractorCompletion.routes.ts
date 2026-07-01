@@ -323,13 +323,32 @@ contractorCompletionRouter.get(
         progressBar.style.width = progressStart + '%';
 
         // Step 2: PUT to R2
-        var putRes = await fetch(presignData.uploadUrl, {
-          method: 'PUT',
-          headers: { 'Content-Type': file.type || 'image/jpeg' },
-          body: file
-        });
+        // NOTE: If R2 bucket CORS is not configured to allow PUT from this origin,
+        // the browser will block the preflight and fetch() will throw a TypeError
+        // (network error), not return a non-ok response. That case is caught below.
+        var putRes;
+        try {
+          putRes = await fetch(presignData.uploadUrl, {
+            method: 'PUT',
+            headers: { 'Content-Type': file.type || 'image/jpeg' },
+            body: file
+          });
+        } catch (networkErr) {
+          // fetch() throws on network failure or CORS preflight block.
+          // This is the most likely symptom of a missing R2 CORS rule.
+          throw new Error(
+            'Upload blocked (network error). ' +
+            'This is usually caused by a missing CORS rule on the R2 bucket. ' +
+            'Error: ' + (networkErr && networkErr.message ? networkErr.message : String(networkErr))
+          );
+        }
         if (!putRes.ok) {
-          throw new Error('Storage upload failed (' + putRes.status + '). Please try again.');
+          var putErrText = '';
+          try { putErrText = await putRes.text(); } catch (_) {}
+          throw new Error(
+            'Storage upload failed (HTTP ' + putRes.status + '). ' +
+            (putErrText ? putErrText.slice(0, 300) : 'No response body.')
+          );
         }
         progressBar.style.width = (progressStart + (progressEnd - progressStart) * 0.7) + '%';
 
