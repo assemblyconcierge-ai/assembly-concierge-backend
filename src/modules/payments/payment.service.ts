@@ -124,7 +124,7 @@ export async function createJobCheckoutSession(
     customerEmail: customer.email,
     customerName: customer.full_name,
     serviceDescription: `Assembly Concierge — ${job.job_key} (${paymentType})`,
-    successUrl: `${baseUrl}/payment/success?job=${job.job_key}&session_id={CHECKOUT_SESSION_ID}&token=${job.public_pay_token ?? ''}`,
+    successUrl: `${baseUrl}/payment/success?job=${job.job_key}&session_id={CHECKOUT_SESSION_ID}&token=${job.public_pay_token ?? ''}&paymentType=${paymentType}`,
     cancelUrl: `${baseUrl}/payment/cancel?job=${job.job_key}`,
     metadata: { correlationId },
   });
