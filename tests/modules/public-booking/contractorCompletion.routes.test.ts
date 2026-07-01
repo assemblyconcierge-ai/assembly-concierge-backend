@@ -129,11 +129,13 @@ describe('GET /public/contractor/completion/:completionToken', () => {
     expect(res.text).toContain('AC-2026-EPME');
   });
 
-  it('HTML contains file input and upload button', async () => {
+  it('HTML contains photo slots, hidden file inputs, and upload button', async () => {
     vi.mocked(queryOne).mockResolvedValueOnce(ACCESS_ROW as any);
     const app = buildApp();
     const res = await request(app).get(`/public/contractor/completion/${VALID_TOKEN}`);
-    expect(res.text).toContain('file-input');
+    // New multi-slot UI: slot-0..2, input-0..2, upload-btn
+    expect(res.text).toContain('slot-0');
+    expect(res.text).toContain('input-0');
     expect(res.text).toContain('upload-btn');
   });
 });

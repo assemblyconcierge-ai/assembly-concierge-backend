@@ -2,7 +2,8 @@
  * Contractor Completion Photo Routes
  *
  * GET  /public/contractor/completion/:completionToken
- *   Mobile-friendly HTML landing page with file picker. Calls presign + confirm via JS.
+ *   Mobile-friendly HTML landing page. Supports 1–3 photo uploads with previews.
+ *   Calls presign + confirm per photo via JS.
  *
  * POST /public/contractor/completion/:completionToken/presign
  *   Returns a presigned PUT URL for uploading a completion photo to R2.
@@ -10,6 +11,7 @@
  *
  * POST /public/contractor/completion/:completionToken/confirm
  *   Marks the uploaded_media row confirmed (sets confirmed_at = NOW()).
+ *   Each call is scoped to a single storageKey; multiple calls per token are supported.
  *
  * Security:
  * - Token format validated before any DB query.
@@ -92,7 +94,7 @@ async function resolveCompletionToken(
 }
 
 // ── GET /public/contractor/completion/:completionToken ────────────────────────
-// Mobile-friendly HTML landing page with file picker.
+// Mobile-friendly HTML landing page with 1–3 photo upload + preview.
 // The completion token is NOT rendered anywhere in the HTML output.
 contractorCompletionRouter.get(
   '/:completionToken',
@@ -119,7 +121,7 @@ contractorCompletionRouter.get(
       const jobKeyEscaped = escapeHtml(access.job_key);
 
       // Build CSP img-src origins
-      const imgSrcOrigins = new Set<string>(["'self'"]);
+      const imgSrcOrigins = new Set<string>(["'self'", 'blob:']);
       try {
         if (config.STORAGE_ENDPOINT) {
           const endpointUrl = new URL(config.STORAGE_ENDPOINT);
@@ -154,19 +156,37 @@ contractorCompletionRouter.get(
     .badge { background: #1a1a2e; color: #fff; padding: 0.2rem 0.6rem;
              border-radius: 4px; font-size: 0.85rem; font-family: monospace; }
     .label { font-size: 0.8rem; color: #666; text-transform: uppercase;
-             letter-spacing: 0.05em; margin-bottom: 0.15rem; }
-    #file-input { display: block; width: 100%; margin: 0.75rem 0; font-size: 1rem; }
+             letter-spacing: 0.05em; margin-bottom: 0.5rem; }
+    /* Photo slots */
+    .slots { display: flex; gap: 0.75rem; flex-wrap: wrap; margin-bottom: 1rem; }
+    .slot { position: relative; width: 96px; height: 96px; border-radius: 8px;
+            border: 2px dashed #ccc; overflow: hidden; cursor: pointer;
+            background: #fafafa; display: flex; align-items: center;
+            justify-content: center; flex-shrink: 0; }
+    .slot img { width: 100%; height: 100%; object-fit: cover; display: block; }
+    .slot .add-icon { font-size: 2rem; color: #bbb; pointer-events: none; }
+    .slot .remove-btn { position: absolute; top: 2px; right: 2px; background: rgba(0,0,0,0.55);
+                        color: #fff; border: none; border-radius: 50%; width: 22px; height: 22px;
+                        font-size: 0.85rem; line-height: 1; cursor: pointer; display: none;
+                        align-items: center; justify-content: center; padding: 0; }
+    .slot.has-file .remove-btn { display: flex; }
+    .slot.has-file { border-style: solid; border-color: #188038; }
+    /* Hidden file input */
+    .hidden-input { display: none; }
+    /* Upload button */
     #upload-btn { display: block; width: 100%; padding: 0.85rem; background: #188038;
                   color: #fff; border: none; border-radius: 8px; font-size: 1rem;
                   font-weight: 600; cursor: pointer; }
     #upload-btn:disabled { background: #aaa; cursor: not-allowed; }
-    #status { margin-top: 1rem; font-size: 0.95rem; min-height: 1.5rem; }
+    /* Progress */
+    .progress-bar-wrap { background: #e0e0e0; border-radius: 4px; height: 8px;
+                         margin-top: 0.75rem; display: none; }
+    .progress-bar { background: #1a73e8; height: 8px; border-radius: 4px;
+                    width: 0%; transition: width 0.3s; }
+    /* Status */
+    #status { margin-top: 0.75rem; font-size: 0.95rem; min-height: 1.5rem; }
     .status-ok { color: #188038; font-weight: 600; }
     .status-err { color: #c62828; font-weight: 600; }
-    .progress-bar-wrap { background: #e0e0e0; border-radius: 4px; height: 8px;
-                         margin-top: 0.5rem; display: none; }
-    .progress-bar { background: #1a73e8; height: 8px; border-radius: 4px;
-                    width: 0%; transition: width 0.2s; }
     footer { text-align: center; font-size: 0.75rem; color: #aaa; margin-top: 1.5rem; }
   </style>
 </head>
@@ -175,15 +195,33 @@ contractorCompletionRouter.get(
     <div class="label">Assembly Concierge &mdash; Completion Photos</div>
     <h1>Job <span class="badge">${jobKeyEscaped}</span></h1>
     <p style="font-size:0.9rem;color:#555;margin:0.5rem 0 0;">
-      Please upload photos showing the completed assembly work.
-      You can upload multiple photos one at a time.
+      Please upload 1&ndash;3 photos showing the completed assembly work.
+      Tap a slot to select a photo. Tap &times; to remove.
     </p>
   </div>
 
   <div class="card">
-    <div class="label">Select a photo</div>
-    <input id="file-input" type="file" accept="image/jpeg,image/png,image/webp,.heic,.heif" />
-    <button id="upload-btn" type="button">Upload Photo</button>
+    <div class="label">Select photos (1&ndash;3)</div>
+    <div class="slots" id="slots">
+      <div class="slot" id="slot-0" data-index="0">
+        <span class="add-icon">+</span>
+        <button class="remove-btn" type="button" aria-label="Remove photo">&times;</button>
+      </div>
+      <div class="slot" id="slot-1" data-index="1">
+        <span class="add-icon">+</span>
+        <button class="remove-btn" type="button" aria-label="Remove photo">&times;</button>
+      </div>
+      <div class="slot" id="slot-2" data-index="2">
+        <span class="add-icon">+</span>
+        <button class="remove-btn" type="button" aria-label="Remove photo">&times;</button>
+      </div>
+    </div>
+    <!-- Hidden file inputs, one per slot -->
+    <input class="hidden-input" id="input-0" type="file" accept="image/jpeg,image/png,image/webp,.heic,.heif" />
+    <input class="hidden-input" id="input-1" type="file" accept="image/jpeg,image/png,image/webp,.heic,.heif" />
+    <input class="hidden-input" id="input-2" type="file" accept="image/jpeg,image/png,image/webp,.heic,.heif" />
+
+    <button id="upload-btn" type="button" disabled>Upload Photos</button>
     <div class="progress-bar-wrap" id="progress-wrap">
       <div class="progress-bar" id="progress-bar"></div>
     </div>
@@ -194,10 +232,17 @@ contractorCompletionRouter.get(
 
   <script>
     (function () {
-      var TOKEN = location.pathname.split('/').pop();
-      var BASE = location.pathname.replace(/\\/[^\\/]*$/, '');
+      // BASE is the full current pathname (includes the token).
+      // presign => BASE + '/presign'
+      // confirm => BASE + '/confirm'
+      // This is correct because the router mounts at /public/contractor/completion
+      // and the routes are /:completionToken/presign and /:completionToken/confirm.
+      var BASE = location.pathname.replace(/\\/+$/, '');
+
+      var MAX_SLOTS = 3;
+      var files = [null, null, null]; // File | null per slot
+
       var btn = document.getElementById('upload-btn');
-      var fileInput = document.getElementById('file-input');
       var statusEl = document.getElementById('status');
       var progressWrap = document.getElementById('progress-wrap');
       var progressBar = document.getElementById('progress-bar');
@@ -207,68 +252,130 @@ contractorCompletionRouter.get(
         statusEl.className = isErr ? 'status-err' : 'status-ok';
       }
 
+      function updateBtn() {
+        var hasAny = files.some(function(f) { return f !== null; });
+        btn.disabled = !hasAny;
+      }
+
+      function setSlotPreview(idx, file) {
+        var slot = document.getElementById('slot-' + idx);
+        // Remove existing img if any
+        var existingImg = slot.querySelector('img');
+        if (existingImg) slot.removeChild(existingImg);
+        if (file) {
+          var img = document.createElement('img');
+          img.src = URL.createObjectURL(file);
+          img.alt = 'Photo ' + (idx + 1);
+          slot.insertBefore(img, slot.firstChild);
+          slot.classList.add('has-file');
+        } else {
+          slot.classList.remove('has-file');
+        }
+      }
+
+      // Wire up each slot: click slot => open file picker
+      for (var i = 0; i < MAX_SLOTS; i++) {
+        (function(idx) {
+          var slot = document.getElementById('slot-' + idx);
+          var input = document.getElementById('input-' + idx);
+          var removeBtn = slot.querySelector('.remove-btn');
+
+          slot.addEventListener('click', function(e) {
+            if (e.target === removeBtn || removeBtn.contains(e.target)) return;
+            input.click();
+          });
+
+          input.addEventListener('change', function() {
+            var f = input.files && input.files[0];
+            files[idx] = f || null;
+            setSlotPreview(idx, files[idx]);
+            updateBtn();
+            // Reset input so re-selecting same file fires change again
+            input.value = '';
+          });
+
+          removeBtn.addEventListener('click', function(e) {
+            e.stopPropagation();
+            files[idx] = null;
+            setSlotPreview(idx, null);
+            updateBtn();
+          });
+        })(i);
+      }
+
+      // Upload a single file: presign -> PUT -> confirm
+      async function uploadOne(file, progressStart, progressEnd) {
+        // Step 1: presign
+        var presignRes = await fetch(BASE + '/presign', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            filename: file.name,
+            mimeType: file.type || 'image/jpeg',
+            fileSizeBytes: file.size
+          })
+        });
+        if (!presignRes.ok) {
+          var errBody = await presignRes.json().catch(function() { return {}; });
+          throw new Error(errBody.message || ('Presign failed: ' + presignRes.status));
+        }
+        var presignData = await presignRes.json();
+        progressBar.style.width = progressStart + '%';
+
+        // Step 2: PUT to R2
+        var putRes = await fetch(presignData.uploadUrl, {
+          method: 'PUT',
+          headers: { 'Content-Type': file.type || 'image/jpeg' },
+          body: file
+        });
+        if (!putRes.ok) {
+          throw new Error('Storage upload failed (' + putRes.status + '). Please try again.');
+        }
+        progressBar.style.width = (progressStart + (progressEnd - progressStart) * 0.7) + '%';
+
+        // Step 3: confirm
+        var confirmRes = await fetch(BASE + '/confirm', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ storageKey: presignData.storageKey })
+        });
+        if (!confirmRes.ok) {
+          var cErrBody = await confirmRes.json().catch(function() { return {}; });
+          throw new Error(cErrBody.message || ('Confirm failed: ' + confirmRes.status));
+        }
+        progressBar.style.width = progressEnd + '%';
+      }
+
       btn.addEventListener('click', async function () {
-        var file = fileInput.files && fileInput.files[0];
-        if (!file) { setStatus('Please select a photo first.', true); return; }
+        var selectedFiles = files.filter(function(f) { return f !== null; });
+        if (selectedFiles.length === 0) {
+          setStatus('Please select at least one photo.', true);
+          return;
+        }
 
         btn.disabled = true;
         progressWrap.style.display = 'block';
         progressBar.style.width = '0%';
-        setStatus('Preparing upload\u2026', false);
+        setStatus('Uploading ' + selectedFiles.length + ' photo' + (selectedFiles.length > 1 ? 's' : '') + '\u2026', false);
 
         try {
-          // Step 1: presign
-          var presignRes = await fetch(BASE + '/presign', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              filename: file.name,
-              mimeType: file.type || 'image/jpeg',
-              fileSizeBytes: file.size
-            })
-          });
-          if (!presignRes.ok) {
-            var errBody = await presignRes.json().catch(function(){ return {}; });
-            setStatus('Upload failed: ' + (errBody.message || presignRes.status), true);
-            btn.disabled = false;
-            return;
-          }
-          var presignData = await presignRes.json();
-          progressBar.style.width = '30%';
-          setStatus('Uploading photo\u2026', false);
-
-          // Step 2: PUT to R2
-          var putRes = await fetch(presignData.uploadUrl, {
-            method: 'PUT',
-            headers: { 'Content-Type': file.type || 'image/jpeg' },
-            body: file
-          });
-          if (!putRes.ok) {
-            setStatus('Upload to storage failed (' + putRes.status + '). Please try again.', true);
-            btn.disabled = false;
-            return;
-          }
-          progressBar.style.width = '75%';
-          setStatus('Confirming upload\u2026', false);
-
-          // Step 3: confirm
-          var confirmRes = await fetch(BASE + '/confirm', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ storageKey: presignData.storageKey })
-          });
-          if (!confirmRes.ok) {
-            var cErrBody = await confirmRes.json().catch(function(){ return {}; });
-            setStatus('Confirmation failed: ' + (cErrBody.message || confirmRes.status), true);
-            btn.disabled = false;
-            return;
+          var step = Math.floor(100 / selectedFiles.length);
+          for (var i = 0; i < selectedFiles.length; i++) {
+            var start = i * step;
+            var end = (i === selectedFiles.length - 1) ? 100 : (i + 1) * step;
+            setStatus('Uploading photo ' + (i + 1) + ' of ' + selectedFiles.length + '\u2026', false);
+            await uploadOne(selectedFiles[i], start, end);
           }
           progressBar.style.width = '100%';
-          setStatus('Photo uploaded successfully! You can upload another photo.', false);
-          fileInput.value = '';
+          setStatus('Completion photos uploaded. Assembly Concierge will review the job.', false);
+          // Clear all slots after success
+          for (var j = 0; j < MAX_SLOTS; j++) {
+            files[j] = null;
+            setSlotPreview(j, null);
+          }
+          btn.disabled = true;
         } catch (err) {
-          setStatus('Unexpected error. Please check your connection and try again.', true);
-        } finally {
+          setStatus(err.message || 'Unexpected error. Please check your connection and try again.', true);
           btn.disabled = false;
         }
       });
@@ -413,6 +520,8 @@ contractorCompletionRouter.post(
 );
 
 // ── POST /public/contractor/completion/:completionToken/confirm ───────────────
+// Each call confirms a single storageKey. Multiple calls per token are supported —
+// each creates a separate uploaded_media row with photo_type = 'completion'.
 contractorCompletionRouter.post(
   '/:completionToken/confirm',
   completionRateLimiter,
