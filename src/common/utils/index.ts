@@ -32,6 +32,16 @@ export function generateContractorPacketToken(): string {
   return `cpk_${randomBytes(16).toString('hex')}`;
 }
 
+/**
+ * Generate a cryptographically random contractor completion token.
+ * Scoped write token stored on contractor_assignments; used to authenticate
+ * the contractor completion photo upload landing page.
+ * MUST NOT be logged, included in audit payloads, or returned in general API responses.
+ */
+export function generateContractorCompletionToken(): string {
+  return `cct_${randomBytes(16).toString('hex')}`;
+}
+
 /** Normalize phone to E.164 format (US numbers only for now) */
 export function normalizePhone(raw: string): string {
   const digits = raw.replace(/\D/g, '');

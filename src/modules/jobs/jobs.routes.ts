@@ -459,6 +459,34 @@ jobsRouter.post(
         return;
       }
 
+      // Completion photo guard: require at least one confirmed completion photo,
+      // or a non-empty adminOverrideReason to bypass.
+      const adminOverrideReason: string | undefined =
+        typeof req.body?.adminOverrideReason === 'string' &&
+        req.body.adminOverrideReason.trim().length > 0
+          ? req.body.adminOverrideReason.trim()
+          : undefined;
+
+      const photoCountResult = await query<{ count: string }>(
+        `SELECT COUNT(*) AS count
+           FROM uploaded_media
+          WHERE job_id = $1
+            AND confirmed_at IS NOT NULL
+            AND photo_type = 'completion'`,
+        [job.id],
+      );
+      const completionPhotoCount = parseInt(photoCountResult[0]?.count ?? '0', 10);
+
+      if (completionPhotoCount === 0 && !adminOverrideReason) {
+        res.status(422).json({
+          error: 'COMPLETION_PHOTOS_REQUIRED',
+          message:
+            'At least one confirmed completion photo is required. Provide adminOverrideReason to bypass.',
+          missingRequirements: ['completionPhotos'],
+        });
+        return;
+      }
+
       const payments = await getPaymentsByJobId(job.id);
       const fullyPaid = payments.some(
         (p) => p.payment_type === 'full' && p.status === 'paid_in_full',
@@ -474,7 +502,11 @@ jobsRouter.post(
           aggregateId: job.id,
           eventType: 'job.completion_approved',
           actorType: 'admin',
-          payload: { remainderCents, path: 'awaiting_remainder_payment' },
+          payload: {
+            remainderCents,
+            path: 'awaiting_remainder_payment',
+            ...(adminOverrideReason ? { adminOverrideReason } : {}),
+          },
           correlationId: req.correlationId,
         });
         await enqueueAirtableSync({ jobId: job.id, correlationId: req.correlationId });
@@ -545,7 +577,11 @@ jobsRouter.post(
           aggregateId: job.id,
           eventType: 'job.completion_approved',
           actorType: 'admin',
-          payload: { remainderCents: 0, path: 'closed_paid' },
+          payload: {
+            remainderCents: 0,
+            path: 'closed_paid',
+            ...(adminOverrideReason ? { adminOverrideReason } : {}),
+          },
           correlationId: req.correlationId,
         });
         await enqueueAirtableSync({ jobId: job.id, correlationId: req.correlationId });

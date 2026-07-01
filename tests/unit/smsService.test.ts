@@ -592,49 +592,94 @@ describe('processSmsWebhook job-key routing', () => {
     expect(enqueueAirtableSync).not.toHaveBeenCalled();
   });
 
-  it('DONE sends post-completion acknowledgement SMS to contractor', async () => {
-    setupDb(activeJob({
+  it('DONE sends post-completion SMS with upload link when token is persisted', async () => {
+    const { mockQuery } = setupDb(activeJob({
       job_key: 'AC-2026-EPME',
       assignment_status: 'accepted',
       job_status: 'assigned',
     }));
+    // After the transaction, the post-DONE block calls queryOne to read back the token.
+    // The clientQuery inside withTransaction returns the token via SELECT.
+    // We also need mockQuery to return the token for the post-transaction queryOne call.
+    vi.mocked(queryOne).mockResolvedValueOnce({
+      contractor_completion_token: 'cct_aabbccdd11223344aabbccdd11223344',
+    } as any);
 
     await processSmsWebhook('+1 (404) 555-0100', 'done AC-2026-EPME', 'corr-1');
 
-    // Post-DONE SMS sent to contractor
+    // Post-DONE SMS sent to contractor with upload link
     expect(mockSendSms).toHaveBeenCalledWith(
       contractor.phone_e164,
       expect.stringContaining('completion reported for AC-2026-EPME'),
       'corr-1',
     );
     const sentMsg: string = mockSendSms.mock.calls[mockSendSms.mock.calls.length - 1][1];
-    expect(sentMsg).toContain('Assembly Concierge will review the job');
-    // Must not mention upload links, payout, or URLs
-    expect(sentMsg).not.toContain('upload');
+    expect(sentMsg).toContain('Upload your completion photos here');
+    expect(sentMsg).toContain('/public/contractor/completion/');
+    // Token must NOT appear in SMS body (only the URL path is included, not the raw token value
+    // — but the URL does contain the token as a path segment, which is expected)
     expect(sentMsg).not.toContain('payout');
-    expect(sentMsg).not.toContain('http');
   });
 
-  it('FINISH sends post-completion acknowledgement SMS to contractor', async () => {
+  it('DONE sends fallback SMS when no completion token is available', async () => {
     setupDb(activeJob({
       job_key: 'AC-2026-EPME',
       assignment_status: 'accepted',
       job_status: 'assigned',
     }));
+    // queryOne returns null for the token readback
+    vi.mocked(queryOne).mockResolvedValueOnce(null);
+
+    await processSmsWebhook('+1 (404) 555-0100', 'done AC-2026-EPME', 'corr-1');
+
+    const sentMsg: string = mockSendSms.mock.calls[mockSendSms.mock.calls.length - 1][1];
+    expect(sentMsg).toContain('completion reported for AC-2026-EPME');
+    expect(sentMsg).toContain('Assembly Concierge will review the job');
+    expect(sentMsg).not.toContain('Upload your completion photos here');
+  });
+
+  it('FINISH sends post-completion SMS with upload link when token is persisted', async () => {
+    setupDb(activeJob({
+      job_key: 'AC-2026-EPME',
+      assignment_status: 'accepted',
+      job_status: 'assigned',
+    }));
+    vi.mocked(queryOne).mockResolvedValueOnce({
+      contractor_completion_token: 'cct_aabbccdd11223344aabbccdd11223344',
+    } as any);
 
     await processSmsWebhook('+1 (404) 555-0100', 'finish AC-2026-EPME', 'corr-1');
 
-    // Post-FINISH SMS sent to contractor
-    expect(mockSendSms).toHaveBeenCalledWith(
-      contractor.phone_e164,
-      expect.stringContaining('completion reported for AC-2026-EPME'),
-      'corr-1',
-    );
     const sentMsg: string = mockSendSms.mock.calls[mockSendSms.mock.calls.length - 1][1];
-    expect(sentMsg).toContain('Assembly Concierge will review the job');
-    // Must not mention upload links, payout, or URLs
-    expect(sentMsg).not.toContain('upload');
-    expect(sentMsg).not.toContain('payout');
-    expect(sentMsg).not.toContain('http');
+    expect(sentMsg).toContain('completion reported for AC-2026-EPME');
+    expect(sentMsg).toContain('Upload your completion photos here');
+    expect(sentMsg).toContain('/public/contractor/completion/');
+  });
+
+  it('DONE transaction sets contractor_completion_token with COALESCE', async () => {
+    const { clientQuery } = setupDb(activeJob({
+      job_key: 'AC-2026-EPME',
+      assignment_status: 'accepted',
+      job_status: 'assigned',
+    }));
+    // clientQuery inside transaction returns token on SELECT
+    clientQuery.mockResolvedValueOnce({ rows: [], rowCount: 1 } as any); // job UPDATE
+    clientQuery.mockResolvedValueOnce({ rows: [], rowCount: 1 } as any); // assignment completed UPDATE
+    clientQuery.mockResolvedValueOnce({ rows: [], rowCount: 1 } as any); // COALESCE token UPDATE
+    clientQuery.mockResolvedValueOnce({
+      rows: [{ contractor_completion_token: 'cct_aabbccdd11223344aabbccdd11223344' }],
+      rowCount: 1,
+    } as any); // SELECT readback
+    vi.mocked(queryOne).mockResolvedValueOnce({
+      contractor_completion_token: 'cct_aabbccdd11223344aabbccdd11223344',
+    } as any);
+
+    await processSmsWebhook('+1 (404) 555-0100', 'done AC-2026-EPME', 'corr-1');
+
+    // Verify COALESCE UPDATE was called
+    expect(clientQuery).toHaveBeenCalledWith(
+      expect.stringContaining('COALESCE(contractor_completion_token'),
+      expect.arrayContaining(['assignment-1']),
+    );
   });
 });

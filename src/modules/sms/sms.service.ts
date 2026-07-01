@@ -12,7 +12,7 @@ import { recordAuditEvent } from '../audit/audit.service';
 import { enqueueAirtableSync } from '../airtable-sync/airtableSync.queue';
 import { sendSms } from './quo.adapter';
 import { logger } from '../../common/logger';
-import { normalizePhone } from '../../common/utils';
+import { normalizePhone, generateContractorCompletionToken } from '../../common/utils';
 import { config } from '../../common/config';
 
 export type SmsCommand = 'CONFIRM' | 'DECLINE' | 'OTW' | 'DONE' | 'FINISH';
@@ -418,6 +418,22 @@ export async function processSmsWebhook(
           WHERE id = $1`,
         [activeJob.assignment_id],
       );
+      // Generate completion token with COALESCE so duplicate DONE/FINISH does not rotate it.
+      // The token value is NOT logged — it is only embedded in the SMS body.
+      const completionToken = generateContractorCompletionToken();
+      await client.query(
+        `UPDATE contractor_assignments
+            SET contractor_completion_token = COALESCE(contractor_completion_token, $2)
+          WHERE id = $1`,
+        [activeJob.assignment_id, completionToken],
+      );
+      // Read back the persisted token (may differ from local if COALESCE kept an existing one)
+      const tokenRow = await client.query<{ contractor_completion_token: string | null }>(
+        `SELECT contractor_completion_token FROM contractor_assignments WHERE id = $1`,
+        [activeJob.assignment_id],
+      );
+      (activeJob as ActiveJobRow & { contractor_completion_token: string | null }).contractor_completion_token =
+        tokenRow.rows[0]?.contractor_completion_token ?? null;
     } else if (command === 'OTW') {
       await client.query(
         `UPDATE jobs
@@ -478,13 +494,27 @@ export async function processSmsWebhook(
       log.warn({ err }, '[SMS] Post-DECLINE contractor SMS failed');
     }
   } else if (command === 'DONE' || command === 'FINISH') {
-    // Post-DONE/FINISH: completion acknowledgement
+    // Post-DONE/FINISH: completion acknowledgement with photo upload link
     try {
-      await sendSms(
-        contractor.phone_e164,
-        `Thanks \u2014 completion reported for ${activeJob.job_key}. Assembly Concierge will review the job. If photos or additional details are needed, we'll follow up before closeout approval.`,
-        correlationId,
+      const cctRow = await queryOne<{ contractor_completion_token: string | null }>(
+        `SELECT contractor_completion_token FROM contractor_assignments WHERE id = $1`,
+        [activeJob.assignment_id],
       );
+      const cct = cctRow?.contractor_completion_token ?? null;
+      let smsBody: string;
+      if (cct) {
+        const baseUrl = config.APP_BASE_URL.replace(/\/+$/, '');
+        const uploadUrl = `${baseUrl}/public/contractor/completion/${cct}`;
+        smsBody = [
+          `Thanks \u2014 completion reported for ${activeJob.job_key}.`,
+          '',
+          'Upload your completion photos here:',
+          uploadUrl,
+        ].join('\n');
+      } else {
+        smsBody = `Thanks \u2014 completion reported for ${activeJob.job_key}. Assembly Concierge will review the job.`;
+      }
+      await sendSms(contractor.phone_e164, smsBody, correlationId);
     } catch (err) {
       log.warn({ err }, '[SMS] Post-DONE contractor SMS failed');
     }

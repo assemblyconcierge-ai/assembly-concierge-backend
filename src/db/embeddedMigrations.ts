@@ -602,4 +602,20 @@ CREATE UNIQUE INDEX IF NOT EXISTS contractors_phone_e164_idx ON contractors(phon
 ALTER TABLE contractors ALTER COLUMN is_active SET DEFAULT FALSE;
 `,
   },
+  {
+    filename: '018_add_completion_photo_type_and_token.sql',
+    sql: `
+-- Migration 018: add photo_type to uploaded_media and contractor_completion_token to contractor_assignments.
+ALTER TABLE uploaded_media
+  ADD COLUMN IF NOT EXISTS photo_type TEXT NOT NULL DEFAULT 'intake'
+  CHECK (photo_type IN ('intake', 'completion'));
+
+ALTER TABLE contractor_assignments
+  ADD COLUMN IF NOT EXISTS contractor_completion_token TEXT;
+
+CREATE UNIQUE INDEX IF NOT EXISTS contractor_assignments_completion_token_idx
+  ON contractor_assignments(contractor_completion_token)
+  WHERE contractor_completion_token IS NOT NULL;
+`,
+  },
 ];

@@ -12,6 +12,7 @@ import { jobsRouter } from './modules/jobs/jobs.routes';
 import { publicBookingRouter } from './modules/public-booking/publicBooking.routes';
 import { photosRouter } from './modules/public-booking/photos.routes';
 import { contractorPacketRouter } from './modules/public-booking/contractorPacket.routes';
+import { contractorCompletionRouter } from './modules/public-booking/contractorCompletion.routes';
 import { adminRouter } from './modules/admin/admin.routes';
 import { schemaResetRouter } from './modules/admin/schemaReset.routes';
 import { testJobsRouter } from './modules/admin/testJobs.routes';
@@ -179,6 +180,7 @@ export function createApp(): express.Application {
   app.use('/public', schemaGuard, publicBookingRouter);
   app.use('/public/photos', schemaGuard, photosRouter);
   app.use('/public/contractor', schemaGuard, contractorPacketRouter);
+  app.use('/public/contractor/completion', schemaGuard, contractorCompletionRouter);
 
   app.use('/jobs', jobsRouter);
 
