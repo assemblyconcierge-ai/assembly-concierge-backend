@@ -1,4 +1,4 @@
-﻿# Assembly Concierge — Platform Case Study
+# Assembly Concierge — Platform Case Study
 
 ## Overview
 
@@ -90,6 +90,46 @@ sent → screening completed → contractor created inactive → onboarding docs
 onboarding completed → owner/admin approval → contractor activated. Next: design
 onboarding fields and the activation workflow.
 
-**Validation** — Backend: 270 automated tests across 18 Vitest test files
-(unit + integration), all passing. Frontend: Next.js production build and ESLint
-clean at each merge.
+**Contractor activation hardening** — Added `POST /contractors/:id/activate`, a
+dedicated backend activation endpoint that validates onboarding and readiness
+requirements before setting a contractor active. `PATCH /contractors/:id` remains
+the raw admin maintenance path for field updates only — it does not run activation
+logic. Contractors remain inactive until the activation endpoint succeeds. Dispatch
+(`POST /jobs/:jobId/dispatch`) remains blocked for any contractor with
+`is_active = false`, ensuring no unvetted contractor can receive a job dispatch.
+
+**DONE/FINISH SMS acknowledgement** — Contractor `DONE` and `FINISH` commands now
+trigger a safe acknowledgement reply confirming receipt of the completion signal.
+The message contains no payout promise and no implication of automatic job closeout.
+Operator review via `approve-completion` is still required before the job advances.
+
+**Completion photo upload and approval guard** — Added migration 018 introducing
+`uploaded_media.photo_type` (`intake` / `completion`) to separate customer intake
+photos from contractor completion evidence at the database level. Added
+`contractor_assignments.contractor_completion_token`, a single-use upload credential
+generated at `DONE`/`FINISH` time. Added a contractor-facing completion upload page
+(`GET /public/contractor/completion/:completionToken`) and supporting presign and
+confirm routes (`POST /public/contractor/completion/:completionToken/presign`,
+`POST /public/contractor/completion/:completionToken/confirm`). When a contractor
+texts `DONE` or `FINISH`, the backend generates the token and texts the upload link;
+the contractor uploads photos through the browser with no app required.
+`POST /jobs/:jobId/approve-completion` now requires at least one confirmed completion
+photo before advancing the job; requests without photos receive error code
+`COMPLETION_PHOTOS_REQUIRED`. Operators can supply an `adminOverrideReason` to
+advance without photos for exceptional cases such as practice jobs or legacy records.
+Patch 2B production verification confirmed: (1) `approve-completion` without photos
+returned `COMPLETION_PHOTOS_REQUIRED`; (2) `approve-completion` with
+`adminOverrideReason` succeeded; (3) practice job AC-2026-97ND advanced to
+`awaiting_remainder_payment`.
+
+**Security note / future hardening** — Admin credential rotation is pending after
+Patch 2B testing. The current `requireAdmin` middleware compares the incoming
+`Authorization: Bearer` or `X-Admin-Token` value directly against
+`ADMIN_JWT_SECRET` — a raw shared secret, not real JWT verification despite the
+variable name. Future hardening opportunities: replace the shared secret with signed
+JWTs or scoped per-scenario API keys; add `x-admin-token` to the pino logger redact
+list (`req.headers.authorization` is currently redacted but `x-admin-token` is not).
+
+**Validation** — TypeScript: `tsc --noEmit` clean. Backend: 320 automated tests
+across 20 Vitest test files (unit + integration), all passing. Frontend: Next.js
+production build and ESLint clean at each merge.
