@@ -30,6 +30,7 @@ import { query, queryOne } from '../../db/pool';
 import { generatePresignedUploadUrl } from '../storage/s3.service';
 import { logger } from '../../common/logger';
 import { config } from '../../common/config';
+import { enqueueAirtableSync } from '../airtable-sync/airtableSync.queue';
 
 export const contractorCompletionRouter = Router();
 
@@ -618,6 +619,15 @@ contractorCompletionRouter.post(
         storageKey,
         confirmedAt: updateResult[0]?.confirmed_at.toISOString(),
         correlationId,
+      });
+
+      // Enqueue Airtable sync so completion photo stats are reflected in Airtable.
+      // Fire-and-forget — never blocks the 200 response; failures are logged by the queue.
+      enqueueAirtableSync({ jobId: access.job_id, correlationId }).catch((syncErr) => {
+        logger.warn(
+          { syncErr, jobId: access.job_id, correlationId },
+          '[ContractorCompletion] Failed to enqueue Airtable sync after completion photo confirmation',
+        );
       });
     } catch (err) {
       logger.error(

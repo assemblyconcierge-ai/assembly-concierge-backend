@@ -251,6 +251,14 @@ export interface AirtableJobRecord {
   lastPhotoUploadedAt?: string;         // ISO 8601 — MAX(confirmed_at) across confirmed photos
   photosUploaded?: boolean;             // true if photoCount > 0
   operatorPhotoLink?: string;           // static review page URL (not a presigned URL)
+  // Completion photo stats (Phase 2B)
+  completionPhotoStats?: {
+    completionPhotoCount: number;
+    completionPhotosUploaded: boolean;
+    completionEvidenceLink?: string;    // backend admin review page URL
+    completionPhotos?: Array<{ url: string; filename: string }>; // presigned download URLs for Airtable attachments
+    completionReviewStatus?: string;    // e.g. 'Completion Photos Received'
+  };
 }
 
 /** Push a job record to Airtable. Returns the Airtable record ID. */
@@ -364,6 +372,24 @@ export async function syncJobToAirtable(record: AirtableJobRecord): Promise<stri
     fields['Operator Photo Link'] = record.operatorPhotoLink;
   }
 
+  // Completion photo stats (Phase 2B)
+  if (record.completionPhotoStats !== undefined) {
+    fields['Completion Photos Uploaded?'] = record.completionPhotoStats.completionPhotosUploaded;
+    fields['Completion Photo Count'] = record.completionPhotoStats.completionPhotoCount;
+    if (record.completionPhotoStats.completionEvidenceLink) {
+      fields['Completion Evidence Link'] = record.completionPhotoStats.completionEvidenceLink;
+    }
+    if (record.completionPhotoStats.completionPhotos && record.completionPhotoStats.completionPhotos.length > 0) {
+      fields['Completion Photos'] = record.completionPhotoStats.completionPhotos.map((p) => ({
+        url: p.url,
+        filename: p.filename,
+      }));
+    }
+    if (record.completionPhotoStats.completionReviewStatus) {
+      fields['Completion Review Status'] = record.completionPhotoStats.completionReviewStatus;
+    }
+  }
+
   if (record.completionReportedAt) {
     fields['Completion Reported At'] = record.completionReportedAt;
   }
@@ -437,8 +463,13 @@ export async function updateAirtableRecord(
  *  Does NOT write to the legacy "Job Status (Canonical Lifecycle)" field.
  *
  *  photoStats — when provided (e.g. after photo confirmation), writes the four
- *  photo visibility fields: Photos Uploaded?, Photo Count, Last Photo Uploaded At,
- *  Operator Photo Link. All are optional; omit to leave existing values unchanged. */
+ *  intake photo visibility fields: Photos Uploaded?, Photo Count, Last Photo Uploaded At,
+ *  Operator Photo Link. All are optional; omit to leave existing values unchanged.
+ *
+ *  completionPhotoStats — when provided (e.g. after contractor completion photo confirmation),
+ *  writes the five completion photo visibility fields: Completion Photos Uploaded?,
+ *  Completion Photo Count, Completion Evidence Link, Completion Photos (attachments),
+ *  Completion Review Status. All are optional; omit to leave existing values unchanged. */
 export async function updateAirtableStatus(
   recordId: string,
   internalStatus: string,
@@ -459,6 +490,14 @@ export async function updateAirtableStatus(
     photosUploaded: boolean;
     lastPhotoUploadedAt?: string;
     operatorPhotoLink?: string;
+  },
+  // Completion photo stats (Phase 2B) — optional, written when completion photos are confirmed
+  completionPhotoStats?: {
+    completionPhotoCount: number;
+    completionPhotosUploaded: boolean;
+    completionEvidenceLink?: string;
+    completionPhotos?: Array<{ url: string; filename: string }>;
+    completionReviewStatus?: string;
   },
 ): Promise<void> {
   const now = new Date().toISOString();
@@ -516,6 +555,26 @@ export async function updateAirtableStatus(
     }
     if (photoStats.operatorPhotoLink) {
       fields['Operator Photo Link'] = photoStats.operatorPhotoLink;
+    }
+  }
+
+  // Completion photo stats (Phase 2B) — only written when completionPhotoStats is explicitly provided
+  if (completionPhotoStats !== undefined) {
+    fields['Completion Photos Uploaded?'] = completionPhotoStats.completionPhotosUploaded;
+    fields['Completion Photo Count'] = completionPhotoStats.completionPhotoCount;
+    if (completionPhotoStats.completionEvidenceLink) {
+      fields['Completion Evidence Link'] = completionPhotoStats.completionEvidenceLink;
+    }
+    if (completionPhotoStats.completionPhotos && completionPhotoStats.completionPhotos.length > 0) {
+      // Airtable attachment field expects array of { url, filename } objects.
+      // URLs are short-lived presigned R2 download URLs (1 hour) so Airtable can fetch/copy them.
+      fields['Completion Photos'] = completionPhotoStats.completionPhotos.map((p) => ({
+        url: p.url,
+        filename: p.filename,
+      }));
+    }
+    if (completionPhotoStats.completionReviewStatus) {
+      fields['Completion Review Status'] = completionPhotoStats.completionReviewStatus;
     }
   }
 

@@ -14,6 +14,7 @@ import { logger } from '../../common/logger';
 import { config } from '../../common/config';
 import { query, queryOne } from '../../db/pool';
 import { syncJobToAirtable, updateAirtableStatus, logIntegrationFailure } from './airtable.adapter';
+import { generatePresignedDownloadUrl } from '../storage/s3.service';
 
 let Queue: any = null;
 let Worker: any = null;
@@ -306,7 +307,7 @@ async function processSyncJob(jobId: string, correlationId: string): Promise<voi
        LEFT JOIN LATERAL (
          SELECT COUNT(*) AS photo_count, MAX(confirmed_at) AS last_photo_uploaded_at
          FROM uploaded_media
-         WHERE job_id = j.id AND confirmed_at IS NOT NULL
+         WHERE job_id = j.id AND confirmed_at IS NOT NULL AND photo_type = 'intake'
        ) ph ON TRUE
        WHERE j.id = $1`,
       [jobId],
@@ -315,6 +316,67 @@ async function processSyncJob(jobId: string, correlationId: string): Promise<voi
     if (!row) {
       log.warn('Job not found for Airtable sync');
       return;
+    }
+
+    // ── Completion photo stats (Phase 2B) ────────────────────────────────────
+    // Fetch confirmed completion photo rows for this job.
+    // Generate short-lived (1 hour) presigned download URLs so Airtable can fetch/copy them.
+    // Failures are non-fatal: log and continue with empty completion stats.
+    let completionPhotoStats: {
+      completionPhotoCount: number;
+      completionPhotosUploaded: boolean;
+      completionEvidenceLink?: string;
+      completionPhotos?: Array<{ url: string; filename: string }>;
+      completionReviewStatus?: string;
+    } | undefined;
+
+    try {
+      const completionRows = await query<{
+        storage_key: string;
+        original_filename: string | null;
+        mime_type: string;
+      }>(
+        `SELECT storage_key, original_filename, mime_type
+           FROM uploaded_media
+          WHERE job_id = $1
+            AND photo_type = 'completion'
+            AND confirmed_at IS NOT NULL
+          ORDER BY confirmed_at ASC`,
+        [jobId],
+      );
+
+      const completionPhotoCount = completionRows.length;
+      const completionPhotosUploaded = completionPhotoCount > 0;
+
+      // Generate presigned download URLs (1 hour) for Airtable attachment fetching.
+      // If any individual URL generation fails, skip that photo rather than failing the whole sync.
+      const completionPhotos: Array<{ url: string; filename: string }> = [];
+      for (const cr of completionRows) {
+        try {
+          const presignedUrl = await generatePresignedDownloadUrl(cr.storage_key, 3600);
+          const ext = cr.storage_key.split('.').pop() ?? 'jpg';
+          const filename = cr.original_filename ?? `completion-photo.${ext}`;
+          completionPhotos.push({ url: presignedUrl, filename });
+        } catch (urlErr) {
+          log.warn({ urlErr, storageKey: cr.storage_key }, '[AirtableSync] Failed to generate presigned URL for completion photo — skipping');
+        }
+      }
+
+      // Completion Evidence Link: backend admin review page (generates fresh signed URLs on demand).
+      // This is a stable URL stored in Airtable — not an expiring presigned URL.
+      const completionEvidenceLink = completionPhotosUploaded && config.APP_BASE_URL
+        ? `${config.APP_BASE_URL}/admin/jobs/${jobId}/completion-photos`
+        : undefined;
+
+      completionPhotoStats = {
+        completionPhotoCount,
+        completionPhotosUploaded,
+        completionEvidenceLink,
+        completionPhotos: completionPhotos.length > 0 ? completionPhotos : undefined,
+        completionReviewStatus: completionPhotosUploaded ? 'Completion Photos Received' : undefined,
+      };
+    } catch (completionErr) {
+      log.warn({ completionErr }, '[AirtableSync] Failed to fetch completion photo stats — continuing without completion photo fields');
     }
 
     // Extract photo URLs from raw Jotform payload (upload fields)
@@ -410,6 +472,8 @@ async function processSyncJob(jobId: string, correlationId: string): Promise<voi
       operatorPhotoLink: row.operator_photo_token
         ? `${config.APP_BASE_URL}/public/photos/review/${row.operator_photo_token}`
         : undefined,
+      // Completion photo stats (Phase 2B)
+      completionPhotoStats,
     };
 
     if (row.airtable_record_id) {
@@ -437,6 +501,8 @@ async function processSyncJob(jobId: string, correlationId: string): Promise<voi
           lastPhotoUploadedAt: record.lastPhotoUploadedAt,
           operatorPhotoLink: record.operatorPhotoLink,
         },
+        // Completion photo stats (Phase 2B) — always included so Airtable reflects latest completion photos
+        completionPhotoStats,
       );
       log.info({ airtableRecordId: row.airtable_record_id }, 'Airtable record updated');
     } else {
