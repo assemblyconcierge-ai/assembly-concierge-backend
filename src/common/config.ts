@@ -22,9 +22,20 @@ const envSchema = z.object({
   // Child table for payment transaction rows linked to the jobs parent table
   AIRTABLE_TABLE_PAYMENTS: z.string().default('Payments'),
 
-  // Email
-  EMAIL_PROVIDER_API_KEY: z.string().optional(),
-  EMAIL_FROM: z.string().default('noreply@assemblyconcierge.com'),
+  // Email — Resend
+  // RESEND_API_KEY: set in Render env vars
+  // CUSTOMER_EMAIL_FROM: e.g. "Assembly Concierge <support@notifications.assemblyconcierge.com>"
+  // CUSTOMER_EMAIL_REPLY_TO: e.g. "support@assemblyconcierge.com"
+  RESEND_API_KEY: z.string().optional(),
+  CUSTOMER_EMAIL_FROM: z.string().default('Assembly Concierge <support@notifications.assemblyconcierge.com>'),
+  CUSTOMER_EMAIL_REPLY_TO: z.string().default('support@assemblyconcierge.com'),
+  // EMAIL_SEND_MODE controls whether emails are actually sent via Resend.
+  // 'log_only' (default): generate payload, log event, do NOT call Resend.
+  // 'send': call Resend, record provider_message_id and sent_at.
+  EMAIL_SEND_MODE: z.enum(['log_only', 'send']).default('log_only'),
+
+  // Jotform
+  JOTFORM_ONBOARDING_FORM_ID: z.string().default('261801729818060'),
 
   // SMS
   SMS_PROVIDER_API_KEY: z.string().optional(),
