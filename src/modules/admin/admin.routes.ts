@@ -3,10 +3,12 @@ import { z } from 'zod';
 import { requireAdmin } from '../../common/middleware/auth';
 import { getAllPricingRules, upsertPricingRule } from '../pricing/pricing.service';
 import { getAllServiceAreas, upsertServiceArea } from '../service-areas/serviceArea.service';
-import { query } from '../../db/pool';
+import { query, queryOne } from '../../db/pool';
 import { strictNormalizePhone } from '../../common/utils';
 import { recordAuditEvent } from '../audit/audit.service';
 import { logger } from '../../common/logger';
+import { sendContractorOnboardingEmail } from '../email/email.service';
+import { config } from '../../common/config';
 
 export const adminRouter = Router();
 
@@ -338,6 +340,116 @@ adminRouter.post('/contractors/:id/activate', requireAdmin, async (req: Request,
     next(err);
   }
 });
+
+// ─────────────────────────────────────────────
+// CONTRACTOR ONBOARDING EMAIL
+// ─────────────────────────────────────────────
+
+// POST /contractors/:id/send-onboarding-email
+// Sends (or logs in log_only mode) the contractor onboarding email with a
+// prefilled Jotform URL. Never activates or marks the contractor dispatch-eligible.
+//
+// Body:
+//   airtableRecordId  string  (required on first call; optional if already stored)
+//   preferredName     string  (optional — used for q5_q5_textbox3 Jotform field)
+//   forceResend       boolean (optional, default false)
+adminRouter.post(
+  '/contractors/:id/send-onboarding-email',
+  requireAdmin,
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const schema = z.object({
+        airtableRecordId: z.string().min(1).optional(),
+        preferredName:    z.string().max(100).optional(),
+        forceResend:      z.boolean().optional().default(false),
+      });
+      const body = schema.parse(req.body);
+
+      // ── 1. Look up contractor ─────────────────────────────────────────────
+      const contractor = await queryOne<{
+        id: string;
+        full_name: string;
+        email: string | null;
+        phone_e164: string;
+        airtable_record_id: string | null;
+      }>(
+        'SELECT id, full_name, email, phone_e164, airtable_record_id FROM contractors WHERE id = $1',
+        [req.params.id],
+      );
+      if (!contractor) {
+        res.status(404).json({ error: 'NOT_FOUND', message: 'Contractor not found' });
+        return;
+      }
+
+      // ── 2. Require email ──────────────────────────────────────────────────
+      if (!contractor.email) {
+        res.status(422).json({
+          error: 'MISSING_EMAIL',
+          message: 'Contractor has no email address on file',
+        });
+        return;
+      }
+
+      // ── 3. Resolve / validate airtableRecordId ────────────────────────────
+      const incomingAirtableId = body.airtableRecordId ?? null;
+      let resolvedAirtableId = contractor.airtable_record_id;
+
+      if (incomingAirtableId) {
+        if (resolvedAirtableId && resolvedAirtableId !== incomingAirtableId) {
+          res.status(409).json({
+            error: 'AIRTABLE_RECORD_ID_MISMATCH',
+            message:
+              'The provided airtableRecordId does not match the stored value for this contractor',
+          });
+          return;
+        }
+        if (!resolvedAirtableId) {
+          // Persist for future calls
+          await query(
+            'UPDATE contractors SET airtable_record_id = $2, updated_at = NOW() WHERE id = $1',
+            [contractor.id, incomingAirtableId],
+          );
+          resolvedAirtableId = incomingAirtableId;
+        }
+      }
+
+      // ── 4. Send / log email ───────────────────────────────────────────────
+      const result = await sendContractorOnboardingEmail({
+          contractorId:     contractor.id,
+          contractorName:   contractor.full_name,
+          contractorEmail:  contractor.email,
+          phoneE164:        contractor.phone_e164,
+          airtableRecordId: resolvedAirtableId ?? undefined,
+          preferredName:    body.preferredName,
+          forceResend:      body.forceResend,
+        });
+
+      if (result.alreadySent) {
+        res.status(200).json({
+          status:             'already_sent',
+          alreadySent:        true,
+          eventId:            result.eventId,
+          providerMessageId:  result.providerMessageId ?? null,
+          mode:               config.EMAIL_SEND_MODE,
+          onboardingFormUrl:  result.jotformUrl ?? null,
+          message:            'Onboarding email already sent — use forceResend=true to resend',
+        });
+        return;
+      }
+
+      res.status(200).json({
+        status:             config.EMAIL_SEND_MODE === 'send' ? 'sent' : 'logged',
+        alreadySent:        false,
+        eventId:            result.eventId,
+        providerMessageId:  result.providerMessageId ?? null,
+        mode:               config.EMAIL_SEND_MODE,
+        onboardingFormUrl:  result.jotformUrl ?? null,
+      });
+    } catch (err) {
+      next(err);
+    }
+  },
+);
 
 // ─────────────────────────────────────────────
 // PAYMENTS

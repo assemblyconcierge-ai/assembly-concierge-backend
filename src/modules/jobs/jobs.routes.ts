@@ -19,6 +19,7 @@ import { logger } from '../../common/logger';
 import { dispatchJobToContractor, cancelContractorAssignment, cancelJob } from '../dispatch/dispatch.service';
 import { checkContractorAvailability } from '../dispatch/dispatchConflict';
 import { sendSms } from '../sms/quo.adapter';
+import { sendCustomerCompletionEmail } from '../email/email.service';
 
 export const jobsRouter = Router();
 
@@ -585,6 +586,33 @@ jobsRouter.post(
           correlationId: req.correlationId,
         });
         await enqueueAirtableSync({ jobId: job.id, correlationId: req.correlationId });
+
+        // Fire-and-forget customer completion email (non-blocking, idempotent)
+        const _completionEmailCorrelationId = req.correlationId;
+        const _completionEmailJob = job;
+        setImmediate(async () => {
+          try {
+            const stRow = await queryOne<{ display_name: string; code: string }>(
+              'SELECT display_name, code FROM service_types WHERE id = $1',
+              [_completionEmailJob.service_type_id],
+            );
+            const serviceTypeLabel =
+              stRow?.display_name ?? stRow?.code ?? 'Assembly Service';
+            await sendCustomerCompletionEmail({
+              jobId: _completionEmailJob.id,
+              jobKey: _completionEmailJob.job_key,
+              customerName: _completionEmailJob.customer_name_snapshot ?? '',
+              customerEmail: _completionEmailJob.customer_email_snapshot ?? '',
+              serviceType: serviceTypeLabel,
+              city: _completionEmailJob.city_detected ?? '',
+            });
+          } catch (err) {
+            logger.warn(
+              { err, jobId: _completionEmailJob.id, correlationId: _completionEmailCorrelationId },
+              '[approve-completion] Customer completion email failed',
+            );
+          }
+        });
 
         res.json({
           message: 'Completion approved — job closed (paid in full)',

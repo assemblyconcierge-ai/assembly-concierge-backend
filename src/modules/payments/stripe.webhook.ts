@@ -15,6 +15,7 @@ import {
   findAirtablePaymentRowBySessionId,
   updateAirtablePaymentRow,
 } from '../airtable-sync/airtable.payments.adapter';
+import { sendCustomerCompletionEmail } from '../email/email.service';
 
 type Log = pino.Logger;
 
@@ -258,6 +259,32 @@ async function handleCheckoutCompleted(
       );
     }
   });
+
+  // Fire-and-forget customer completion email for remainder/closed_paid path (non-blocking, idempotent)
+  if (payment.payment_type === 'remainder') {
+    setImmediate(async () => {
+      try {
+        const stRow = await queryOne<{ display_name: string; code: string }>(
+          'SELECT display_name, code FROM service_types WHERE id = $1',
+          [job.service_type_id],
+        );
+        const serviceTypeLabel = stRow?.display_name ?? stRow?.code ?? 'Assembly Service';
+        await sendCustomerCompletionEmail({
+          jobId: job.id,
+          jobKey: job.job_key,
+          customerName: job.customer_name_snapshot ?? '',
+          customerEmail: job.customer_email_snapshot ?? '',
+          serviceType: serviceTypeLabel,
+          city: job.city_detected ?? '',
+        });
+      } catch (err) {
+        log.warn(
+          { err, jobId: job.id, correlationId },
+          '[stripe-webhook] Customer completion email failed after remainder payment',
+        );
+      }
+    });
+  }
 
   log.info({ jobId: job.id, paymentId: payment.id, amountPaid }, 'Checkout completed');
 }
