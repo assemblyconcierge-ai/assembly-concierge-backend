@@ -114,13 +114,13 @@ describe('buildJotformPrefillUrl', () => {
       phoneE164: '+14045551234',
       email: 'marcus@example.com',
     });
-    expect(url).toContain('q34_contractorRecord=recABC123');
-    expect(url).toContain('q35_backendContractor=ctr-001');
-    expect(url).toContain('q43_typeA=Marcus%20Johnson');
-    expect(url).toContain('q5_q5_textbox3=Marcus');
-    expect(url).toContain('q6_q6_phone4%5Bfull%5D=%2B14045551234');
-    expect(url).toContain('q7_q7_phone5%5Bfull%5D=%2B14045551234');
-    expect(url).toContain('q8_q8_email6=marcus%40example.com');
+    expect(url).toContain('contractorRecord=recABC123');
+    expect(url).toContain('backendContractor=ctr-001');
+    expect(url).toContain('typeA=Marcus%20Johnson');
+    expect(url).toContain('q5_textbox3=Marcus');
+    expect(url).toContain('q6_phone4%5Bfull%5D=%2B14045551234');
+    expect(url).toContain('q7_phone5%5Bfull%5D=%2B14045551234');
+    expect(url).toContain('q8_email6=marcus%40example.com');
   });
 
   it('omits null/undefined fields', () => {
@@ -130,16 +130,16 @@ describe('buildJotformPrefillUrl', () => {
       phoneE164: null,
       email: null,
     });
-    expect(url).not.toContain('q34_contractorRecord');
-    expect(url).not.toContain('q43_typeA');
-    expect(url).not.toContain('q6_q6_phone4');
-    expect(url).not.toContain('q8_q8_email6');
-    expect(url).toContain('q35_backendContractor=ctr-001');
+    expect(url).not.toContain('contractorRecord');
+    expect(url).not.toContain('typeA');
+    expect(url).not.toContain('q6_phone4');
+    expect(url).not.toContain('q8_email6');
+    expect(url).toContain('backendContractor=ctr-001');
   });
 
   it('omits preferredName when not provided', () => {
     const url = buildJotformPrefillUrl({ backendContractorId: 'ctr-001', legalFullName: 'Marcus' });
-    expect(url).not.toContain('q5_q5_textbox3');
+    expect(url).not.toContain('q5_textbox3');
   });
 
   it('includes preferredName when provided', () => {
@@ -147,13 +147,13 @@ describe('buildJotformPrefillUrl', () => {
       backendContractorId: 'ctr-001',
       preferredName: 'Marc',
     });
-    expect(url).toContain('q5_q5_textbox3=Marc');
+    expect(url).toContain('q5_textbox3=Marc');
   });
 
   it('returns base URL with no query string when only backendContractorId is provided', () => {
     const url = buildJotformPrefillUrl({ backendContractorId: 'ctr-001' });
     expect(url).toContain('261801729818060');
-    expect(url).toContain('q35_backendContractor=ctr-001');
+    expect(url).toContain('backendContractor=ctr-001');
   });
 
   it('uses JOTFORM_ONBOARDING_FORM_ID from config', () => {
@@ -166,7 +166,7 @@ describe('buildJotformPrefillUrl', () => {
       backendContractorId: 'ctr-001',
       legalFullName: "O'Brien & Sons",
     });
-    expect(url).toContain('q43_typeA=');
+    expect(url).toContain('typeA=');
     // & must be percent-encoded so it does not break the query string
     expect(url).toContain('%26');
     expect(url).not.toContain('& Sons');
@@ -254,13 +254,13 @@ describe('renderContractorOnboardingEmail', () => {
   it('contains the contractor name', () => {
     const html = renderContractorOnboardingEmail({
       contractorName: 'Marcus Johnson',
-      onboardingFormUrl: 'https://form.jotform.com/261801729818060?q35_backendContractor=ctr-001',
+      onboardingFormUrl: 'https://form.jotform.com/261801729818060?backendContractor=ctr-001',
     });
     expect(html).toContain('Marcus Johnson');
   });
 
   it('contains the onboarding form URL', () => {
-    const url = 'https://form.jotform.com/261801729818060?q35_backendContractor=ctr-001';
+    const url = 'https://form.jotform.com/261801729818060?backendContractor=ctr-001';
     const html = renderContractorOnboardingEmail({ contractorName: 'Marcus', onboardingFormUrl: url });
     expect(html).toContain(url);
   });
@@ -482,7 +482,7 @@ describe('sendContractorOnboardingEmail', () => {
     });
 
     expect(result.jotformUrl).toContain('261801729818060');
-    expect(result.jotformUrl).toContain('q35_backendContractor=ctr-001');
+    expect(result.jotformUrl).toContain('backendContractor=ctr-001');
   });
 
   it('does NOT call Resend in log_only mode', async () => {

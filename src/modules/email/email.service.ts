@@ -42,17 +42,17 @@ export type EmailEventType = (typeof EMAIL_EVENT_TYPES)[keyof typeof EMAIL_EVENT
 // ── Jotform URL builder ───────────────────────────────────────────────────────
 
 export interface JotformPrefillParams {
-  /** Airtable record ID — q34_contractorRecord */
+  /** Airtable record ID — contractorRecord */
   airtableRecordId?: string | null;
-  /** Backend contractor UUID — q35_backendContractor */
+  /** Backend contractor UUID — backendContractor */
   backendContractorId: string;
-  /** Legal full name — q43_typeA */
+  /** Legal full name — typeA */
   legalFullName?: string | null;
-  /** Preferred name — q5_q5_textbox3 (only included if provided) */
+  /** Preferred name — q5_textbox3 (only included if provided) */
   preferredName?: string | null;
-  /** Phone E.164 — q6_q6_phone4[full] and q7_q7_phone5[full] */
+  /** Phone E.164 — q6_phone4[full] and q7_phone5[full] */
   phoneE164?: string | null;
-  /** Email — q8_q8_email6 */
+  /** Email — q8_email6 */
   email?: string | null;
 }
 
@@ -76,22 +76,22 @@ export function buildJotformPrefillUrl(params: JotformPrefillParams): string {
     }
   };
 
-  add('q34_contractorRecord', params.airtableRecordId);
-  add('q35_backendContractor', params.backendContractorId);
-  add('q43_typeA', params.legalFullName);
+  add('contractorRecord', params.airtableRecordId);
+  add('backendContractor', params.backendContractorId);
+  add('typeA', params.legalFullName);
   if (params.preferredName != null && params.preferredName.trim() !== '') {
-    add('q5_q5_textbox3', params.preferredName);
+    add('q5_textbox3', params.preferredName);
   }
   // Phone fields use [full] sub-parameter — must be encoded as %5Bfull%5D
   if (params.phoneE164 != null && params.phoneE164.trim() !== '') {
     parts.push(
-      `${encodeURIComponent('q6_q6_phone4[full]')}=${encodeURIComponent(params.phoneE164.trim())}`,
+      `${encodeURIComponent('q6_phone4[full]')}=${encodeURIComponent(params.phoneE164.trim())}`,
     );
     parts.push(
-      `${encodeURIComponent('q7_q7_phone5[full]')}=${encodeURIComponent(params.phoneE164.trim())}`,
+      `${encodeURIComponent('q7_phone5[full]')}=${encodeURIComponent(params.phoneE164.trim())}`,
     );
   }
-  add('q8_q8_email6', params.email);
+  add('q8_email6', params.email);
 
   return parts.length > 0 ? `${base}?${parts.join('&')}` : base;
 }
