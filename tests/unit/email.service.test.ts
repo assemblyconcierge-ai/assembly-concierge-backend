@@ -47,6 +47,7 @@ vi.mock('../../src/common/logger', () => ({
 
 import {
   buildJotformPrefillUrl,
+  normalizePhoneForJotform,
   renderCustomerCompletionEmail,
   renderContractorOnboardingEmail,
   sendCustomerCompletionEmail,
@@ -101,6 +102,37 @@ const CONTRACTOR_PENDING_EVENT = {
 };
 
 // ══════════════════════════════════════════════════════════════════════════════
+// 0. normalizePhoneForJotform
+// ══════════════════════════════════════════════════════════════════════════════
+
+describe('normalizePhoneForJotform', () => {
+  it('strips +1 from E.164 US number to produce 10 digits', () => {
+    expect(normalizePhoneForJotform('+14147745236')).toBe('4147745236');
+  });
+
+  it('strips +1 from E.164 with different area code', () => {
+    expect(normalizePhoneForJotform('+14045551234')).toBe('4045551234');
+  });
+
+  it('passes through a raw 10-digit number unchanged', () => {
+    expect(normalizePhoneForJotform('4147745236')).toBe('4147745236');
+  });
+
+  it('strips formatting characters from a 10-digit number', () => {
+    expect(normalizePhoneForJotform('(414) 774-5236')).toBe('4147745236');
+  });
+
+  it('strips formatting characters from an E.164 number', () => {
+    expect(normalizePhoneForJotform('+1 (414) 774-5236')).toBe('4147745236');
+  });
+
+  it('returns original value for non-US international numbers (not 10 or 11 digits)', () => {
+    // e.g. UK +44 number — 12 digits after stripping non-digits, no leading 1
+    expect(normalizePhoneForJotform('+447911123456')).toBe('+447911123456');
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
 // 1. buildJotformPrefillUrl
 // ══════════════════════════════════════════════════════════════════════════════
 
@@ -118,8 +150,9 @@ describe('buildJotformPrefillUrl', () => {
     expect(url).toContain('backendContractor=ctr-001');
     expect(url).toContain('typeA=Marcus%20Johnson');
     expect(url).toContain('q5_textbox3=Marcus');
-    expect(url).toContain('q6_phone4%5Bfull%5D=%2B14045551234');
-    expect(url).toContain('q7_phone5%5Bfull%5D=%2B14045551234');
+    // E.164 +14045551234 → normalized to 10-digit 4045551234 for Jotform
+    expect(url).toContain('q6_phone4%5Bfull%5D=4045551234');
+    expect(url).toContain('q7_phone5%5Bfull%5D=4045551234');
     expect(url).toContain('q8_email6=marcus%40example.com');
   });
 
@@ -159,6 +192,24 @@ describe('buildJotformPrefillUrl', () => {
   it('uses JOTFORM_ONBOARDING_FORM_ID from config', () => {
     const url = buildJotformPrefillUrl({ backendContractorId: 'ctr-001' });
     expect(url).toContain('261801729818060');
+  });
+
+  it('normalizes E.164 +1 US phone to 10-digit national format', () => {
+    const url = buildJotformPrefillUrl({
+      backendContractorId: 'ctr-001',
+      phoneE164: '+14147745236',
+    });
+    expect(url).toContain('q6_phone4%5Bfull%5D=4147745236');
+    expect(url).toContain('q7_phone5%5Bfull%5D=4147745236');
+    expect(url).not.toContain('%2B1');
+  });
+
+  it('passes through a raw 10-digit phone unchanged', () => {
+    const url = buildJotformPrefillUrl({
+      backendContractorId: 'ctr-001',
+      phoneE164: '4147745236',
+    });
+    expect(url).toContain('q6_phone4%5Bfull%5D=4147745236');
   });
 
   it('URL-encodes special characters in name (& is encoded, apostrophe is RFC 3986 safe)', () => {

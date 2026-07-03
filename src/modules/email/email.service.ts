@@ -50,16 +50,40 @@ export interface JotformPrefillParams {
   legalFullName?: string | null;
   /** Preferred name — q5_textbox3 (only included if provided) */
   preferredName?: string | null;
-  /** Phone E.164 — q6_phone4[full] and q7_phone5[full] */
+  /** Phone E.164 — q6_phone4[full] and q7_phone5[full].
+   * Stored as E.164 (+14147745236) but Jotform prefill receives 10-digit national
+   * format (4147745236) to avoid Jotform misinterpreting the leading +1.
+   */
   phoneE164?: string | null;
   /** Email — q8_email6 */
   email?: string | null;
 }
 
 /**
+ * Convert a phone value to a 10-digit US national number for Jotform prefill.
+ *
+ * Jotform strips the '+' sign and treats the first 10 digits as the number,
+ * so E.164 '+14147745236' would display as '(141) 477-4523' (wrong).
+ * We strip the leading country code '1' from US numbers to get '4147745236'.
+ *
+ * Rules:
+ * 1. Strip all non-digit characters.
+ * 2. If result is already 10 digits, use as-is.
+ * 3. If result is 11 digits and starts with '1', drop the leading '1'.
+ * 4. Otherwise return the original value unchanged (non-US or unexpected format).
+ */
+export function normalizePhoneForJotform(phone: string): string {
+  const digits = phone.replace(/\D/g, '');
+  if (digits.length === 10) return digits;
+  if (digits.length === 11 && digits.startsWith('1')) return digits.slice(1);
+  return phone;
+}
+
+/**
  * Build a contractor-specific Jotform prefill URL.
  * Only includes params that have non-null, non-empty values.
  * Phone fields use the [full] sub-parameter, URL-encoded as %5Bfull%5D.
+ * Phone values are normalized to 10-digit US national format for Jotform.
  *
  * NOTE: Do not log the returned URL at INFO level — it contains contractor
  * identifiers (Airtable record ID, backend UUID) in the query string.
@@ -82,13 +106,15 @@ export function buildJotformPrefillUrl(params: JotformPrefillParams): string {
   if (params.preferredName != null && params.preferredName.trim() !== '') {
     add('q5_textbox3', params.preferredName);
   }
-  // Phone fields use [full] sub-parameter — must be encoded as %5Bfull%5D
+  // Phone fields use [full] sub-parameter — must be encoded as %5Bfull%5D.
+  // Normalize to 10-digit US national format so Jotform prefills correctly.
   if (params.phoneE164 != null && params.phoneE164.trim() !== '') {
+    const phoneForJotform = normalizePhoneForJotform(params.phoneE164.trim());
     parts.push(
-      `${encodeURIComponent('q6_phone4[full]')}=${encodeURIComponent(params.phoneE164.trim())}`,
+      `${encodeURIComponent('q6_phone4[full]')}=${encodeURIComponent(phoneForJotform)}`,
     );
     parts.push(
-      `${encodeURIComponent('q7_phone5[full]')}=${encodeURIComponent(params.phoneE164.trim())}`,
+      `${encodeURIComponent('q7_phone5[full]')}=${encodeURIComponent(phoneForJotform)}`,
     );
   }
   add('q8_email6', params.email);
