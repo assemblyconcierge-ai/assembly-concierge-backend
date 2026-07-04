@@ -161,7 +161,7 @@ export function renderCustomerCompletionEmail(params: {
             </table>
           </td>
         </tr>
-        <tr><td style="background-color:#FFD700;height:4px;font-size:0;line-height:0;">&nbsp;</td></tr>
+        <tr><td style="background-color:#FFD700;height:4px;font-size:0;line-height:0;"></td></tr>
         <tr>
           <td style="padding:36px 32px 28px 32px;">
             <p style="margin:0 0 20px 0;font-size:16px;color:#1a1a1a;line-height:1.5;">Hi ${esc(customerName)},</p>
@@ -253,7 +253,7 @@ export function renderContractorOnboardingEmail(params: {
             </table>
           </td>
         </tr>
-        <tr><td style="background-color:#FFD700;height:4px;font-size:0;line-height:0;">&nbsp;</td></tr>
+        <tr><td style="background-color:#FFD700;height:4px;font-size:0;line-height:0;"></td></tr>
         <tr>
           <td style="padding:36px 32px 28px 32px;">
             <p style="margin:0 0 20px 0;font-size:16px;color:#1a1a1a;line-height:1.5;">Hi ${esc(contractorName)},</p>
