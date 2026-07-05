@@ -676,4 +676,64 @@ ALTER TABLE contractors
   ADD COLUMN IF NOT EXISTS airtable_record_id TEXT;
 `,
   },
+  {
+    filename: '021_contractor_onboarding_documents.sql',
+    sql: `
+-- Migration 021: contractor_onboarding_documents
+--
+-- Stores metadata for inbound Jotform contractor onboarding submissions.
+-- Actual files live in Google Drive; this table stores IDs, URLs, checklist
+-- booleans, and processing status only. No binary blobs.
+CREATE TABLE IF NOT EXISTS contractor_onboarding_documents (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  contractor_id UUID NOT NULL REFERENCES contractors(id),
+  airtable_record_id TEXT NOT NULL,
+  jotform_submission_id TEXT NOT NULL UNIQUE,
+
+  -- Audit/debug support without storing sensitive blobs.
+  -- submission_payload_hash: SHA-256 hex of the raw payload for dedup/audit.
+  -- sanitized_payload: Jotform fields with base64 signature stripped.
+  submission_payload_hash TEXT,
+  sanitized_payload JSONB,
+
+  -- Google Drive folder for this contractor's onboarding documents
+  drive_folder_id TEXT,
+  drive_folder_url TEXT,
+
+  -- Uploaded file metadata (IDs and web-view URLs from Google Drive)
+  w9_file_id TEXT,
+  w9_file_url TEXT,
+  photo_id_file_id TEXT,
+  photo_id_file_url TEXT,
+  insurance_file_id TEXT,
+  insurance_file_url TEXT,
+  other_document_file_id TEXT,
+  other_document_file_url TEXT,
+
+  -- Checklist booleans mirrored to Airtable
+  signed_agreement_received BOOLEAN NOT NULL DEFAULT FALSE,
+  w9_received BOOLEAN NOT NULL DEFAULT FALSE,
+  photo_id_received BOOLEAN NOT NULL DEFAULT FALSE,
+  payment_setup_complete BOOLEAN NOT NULL DEFAULT FALSE,
+  sms_consent_confirmed BOOLEAN NOT NULL DEFAULT FALSE,
+  tools_transportation_confirmed BOOLEAN NOT NULL DEFAULT FALSE,
+  contractor_handbook_acknowledged BOOLEAN NOT NULL DEFAULT FALSE,
+
+  -- Computed status: 'Submitted - Docs Complete' or 'Submitted - Missing Items'
+  document_status TEXT NOT NULL DEFAULT 'Submitted - Missing Items',
+  processing_error TEXT,
+
+  processed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Composite unique index: one record per contractor per submission
+CREATE UNIQUE INDEX IF NOT EXISTS contractor_onboarding_docs_contractor_submission_idx
+  ON contractor_onboarding_documents(contractor_id, jotform_submission_id);
+
+CREATE INDEX IF NOT EXISTS contractor_onboarding_docs_contractor_idx
+  ON contractor_onboarding_documents(contractor_id);
+`,
+  },
 ];

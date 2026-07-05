@@ -14,6 +14,7 @@ import { photosRouter } from './modules/public-booking/photos.routes';
 import { contractorPacketRouter } from './modules/public-booking/contractorPacket.routes';
 import { contractorCompletionRouter } from './modules/public-booking/contractorCompletion.routes';
 import { adminRouter } from './modules/admin/admin.routes';
+import { onboardingRouter } from './modules/onboarding/onboarding.routes';
 import { schemaResetRouter } from './modules/admin/schemaReset.routes';
 import { testJobsRouter } from './modules/admin/testJobs.routes';
 import { config } from './common/config';
@@ -171,6 +172,10 @@ export function createApp(): express.Application {
   // Also emits a debug log with content-type, content-length, user-agent, and body keys.
   // Runs after express.json/urlencoded so already-parsed bodies pass straight through.
   app.use('/webhooks/jotform', jotformBodyParser);
+
+  // ─── Contractor onboarding webhook (Jotform direct) ──────────────────
+  // Secured by query token; does not require schema guard (has its own DB access).
+  app.use('/', onboardingRouter);
 
   // ─── Intake webhooks (schema guard applied) ───────────────────────────────
   app.use('/', schemaGuard, intakeRouter);

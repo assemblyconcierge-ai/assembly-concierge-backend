@@ -75,6 +75,18 @@ const envSchema = z.object({
   // Webhook security
   JOTFORM_WEBHOOK_SECRET: z.string().optional(),
   MAKE_WEBHOOK_SECRET: z.string().optional(),
+  // Contractor onboarding webhook — query token for Jotform direct webhook
+  JOTFORM_CONTRACTOR_ONBOARDING_WEBHOOK_TOKEN: z.string().optional(),
+
+  // Google Drive — Service Account credentials (base64-encoded JSON key)
+  GOOGLE_SERVICE_ACCOUNT_JSON_BASE64: z.string().optional(),
+  GOOGLE_DRIVE_PARENT_FOLDER_ID: z.string().default('13UQ9eDCn9k2I19-BvijhFsfX2RcAqOBv'),
+
+  // Jotform API key — for downloading protected files if needed
+  JOTFORM_API_KEY: z.string().optional(),
+
+  // Airtable — Contractors table (separate from Jobs table)
+  AIRTABLE_TABLE_CONTRACTORS: z.string().default('tblQzDt6XtSSaFAlX'),
 
   // Validation / test routes — must be explicitly enabled; never expose in production without intent
   ENABLE_TEST_ROUTES: z.string().optional(),
