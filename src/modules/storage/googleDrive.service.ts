@@ -6,6 +6,9 @@
  * GOOGLE_SERVICE_ACCOUNT_JSON_BASE64 environment variable (base64-encoded
  * service account JSON key).
  *
+ * All Drive API calls include supportsAllDrives: true and, where applicable,
+ * includeItemsFromAllDrives: true so that Shared Drive folders are accessible.
+ *
  * Files are never stored in Postgres — only Drive file IDs and web-view URLs
  * are returned to callers for metadata persistence.
  */
@@ -60,6 +63,7 @@ function getDriveClient() {
 
 /**
  * Find an existing folder by name inside a parent folder.
+ * supportsAllDrives + includeItemsFromAllDrives required for Shared Drive.
  * Returns the folder ID if found, null otherwise.
  */
 export async function findFolderByName(
@@ -73,6 +77,8 @@ export async function findFolderByName(
     q,
     fields: 'files(id, name)',
     spaces: 'drive',
+    supportsAllDrives: true,
+    includeItemsFromAllDrives: true,
   });
   const files = res.data.files ?? [];
   if (files.length > 0 && files[0].id) {
@@ -87,6 +93,7 @@ export async function findFolderByName(
 
 /**
  * Create a new folder inside a parent folder.
+ * supportsAllDrives required for Shared Drive targets.
  * Returns the new folder's ID and web-view link.
  */
 export async function createFolder(
@@ -101,6 +108,7 @@ export async function createFolder(
       parents: [parentFolderId],
     },
     fields: 'id, webViewLink',
+    supportsAllDrives: true,
   });
   const id = res.data.id;
   const webViewLink = res.data.webViewLink;
@@ -144,7 +152,7 @@ export async function resolveContractorFolder(opts: {
   const parentFolderId = opts.parentFolderId ?? config.GOOGLE_DRIVE_PARENT_FOLDER_ID;
   const folderName = sanitizeFolderName(`${opts.legalName} - ${opts.airtableRecordId}`);
 
-  // 1. Postgres has a folder ID — verify it is usable
+  // 1. Postgres has a folder ID — reuse it directly
   if (opts.existingFolderId) {
     logger.info(
       { folderId: opts.existingFolderId },
@@ -183,6 +191,7 @@ export async function resolveContractorFolder(opts: {
 
 /**
  * Download a file from a URL and upload it to a Google Drive folder.
+ * supportsAllDrives required for Shared Drive targets.
  * Returns the Drive file ID and web-view link.
  *
  * If jotformApiKey is provided, it is appended to the download URL as a
@@ -215,7 +224,7 @@ export async function downloadAndUploadFile(opts: {
   const arrayBuffer = await response.arrayBuffer();
   const buffer = Buffer.from(arrayBuffer);
 
-  // Upload to Drive
+  // Upload to Drive — supportsAllDrives required for Shared Drive targets
   const safeFileName = sanitizeFileName(opts.fileName);
   const uploadRes = await drive.files.create({
     requestBody: {
@@ -227,6 +236,7 @@ export async function downloadAndUploadFile(opts: {
       body: Readable.from(buffer),
     },
     fields: 'id, webViewLink',
+    supportsAllDrives: true,
   });
 
   const id = uploadRes.data.id;
