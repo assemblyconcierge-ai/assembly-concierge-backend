@@ -19,6 +19,7 @@
  * job closure, payment flow, or onboarding workflow.
  */
 
+import { randomUUID } from 'crypto';
 import { config } from '../../common/config';
 import { logger } from '../../common/logger';
 import { sendViaResend, ResendError } from './resend.adapter';
@@ -451,11 +452,19 @@ export async function sendContractorOnboardingEmail(
     onboardingFormUrl: jotformUrl,
   });
 
+  // When forceResend=true, the event row is reset in-place (same UUID).
+  // Passing that same UUID to Resend as Idempotency-Key would cause Resend to
+  // replay the original email body within its 24-hour deduplication window,
+  // delivering the stale contractor name. Generate a fresh UUID instead so
+  // Resend treats this as a new send with the current HTML body.
+  const resendIdempotencyKey = params.forceResend ? randomUUID() : event.id;
+
   const result = await _dispatchEmail({
     event,
     to: params.contractorEmail,
     subject: 'Assembly Concierge — Complete Your Contractor Onboarding',
     html,
+    resendIdempotencyKey,
     // Log contractorId but NOT the jotformUrl
     logContext: { eventType, contractorId: params.contractorId, forceResend: params.forceResend ?? false },
   });
@@ -470,9 +479,13 @@ async function _dispatchEmail(params: {
   to: string;
   subject: string;
   html: string;
+  /** Override for the Resend Idempotency-Key. Defaults to event.id.
+   *  Pass a fresh randomUUID() when forceResend=true to prevent Resend
+   *  from replaying the original email body within its 24h dedup window. */
+  resendIdempotencyKey?: string;
   logContext: Record<string, unknown>;
 }): Promise<EmailSendResult> {
-  const { event, to, subject, html, logContext } = params;
+  const { event, to, subject, html, resendIdempotencyKey, logContext } = params;
   const mode = config.EMAIL_SEND_MODE;
 
   if (mode === 'log_only') {
@@ -499,7 +512,7 @@ async function _dispatchEmail(params: {
       to,
       subject,
       html,
-      idempotencyKey: event.id,
+      idempotencyKey: resendIdempotencyKey ?? event.id,
     });
 
     await markEmailEventSent(event.id, result.id);

@@ -607,6 +607,72 @@ describe('sendContractorOnboardingEmail', () => {
     (config as Record<string, unknown>).RESEND_API_KEY = '';
   });
 
+  it('forceResend uses a fresh Resend idempotency key, not the original event.id', async () => {
+    // This guards against Resend replaying the original email body within its
+    // 24-hour deduplication window when the same event UUID is reused.
+    (config as Record<string, unknown>).EMAIL_SEND_MODE = 'send';
+    (config as Record<string, unknown>).RESEND_API_KEY = 'test-key';
+
+    const ORIGINAL_EVENT_ID = 'evt-original-uuid-001';
+    const forceResendEvent = { ...CONTRACTOR_PENDING_EVENT, id: ORIGINAL_EVENT_ID };
+    vi.mocked(reserveEmailEventForResend).mockResolvedValueOnce(forceResendEvent);
+    vi.mocked(sendViaResend).mockResolvedValueOnce({ id: 'resend-msg-force-001' });
+    vi.mocked(markEmailEventSent).mockResolvedValueOnce(undefined);
+
+    await sendContractorOnboardingEmail({
+      contractorId: 'ctr-001',
+      contractorName: 'George Jefferson',
+      contractorEmail: 'george@example.com',
+      forceResend: true,
+    });
+
+    expect(sendViaResend).toHaveBeenCalledOnce();
+    const [, sentPayload] = vi.mocked(sendViaResend).mock.calls[0];
+
+    // The idempotency key must NOT be the original event UUID
+    expect(sentPayload.idempotencyKey).toBeDefined();
+    expect(sentPayload.idempotencyKey).not.toBe(ORIGINAL_EVENT_ID);
+    // It must be a valid UUID (different from the event row id)
+    expect(sentPayload.idempotencyKey).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
+    );
+
+    // Reset
+    (config as Record<string, unknown>).EMAIL_SEND_MODE = 'log_only';
+    (config as Record<string, unknown>).RESEND_API_KEY = '';
+  });
+
+  it('normal send (no forceResend) uses event.id as Resend idempotency key', async () => {
+    (config as Record<string, unknown>).EMAIL_SEND_MODE = 'send';
+    (config as Record<string, unknown>).RESEND_API_KEY = 'test-key';
+
+    const EVENT_ID = 'evt-normal-uuid-002';
+    const normalEvent = { ...CONTRACTOR_PENDING_EVENT, id: EVENT_ID };
+    vi.mocked(reserveEmailEvent).mockResolvedValueOnce({
+      row: normalEvent,
+      alreadyExists: false,
+    });
+    vi.mocked(sendViaResend).mockResolvedValueOnce({ id: 'resend-msg-normal-001' });
+    vi.mocked(markEmailEventSent).mockResolvedValueOnce(undefined);
+
+    await sendContractorOnboardingEmail({
+      contractorId: 'ctr-001',
+      contractorName: 'Marcus Johnson',
+      contractorEmail: 'marcus@example.com',
+      forceResend: false,
+    });
+
+    expect(sendViaResend).toHaveBeenCalledOnce();
+    const [, sentPayload] = vi.mocked(sendViaResend).mock.calls[0];
+
+    // Normal sends must still use event.id for idempotency
+    expect(sentPayload.idempotencyKey).toBe(EVENT_ID);
+
+    // Reset
+    (config as Record<string, unknown>).EMAIL_SEND_MODE = 'log_only';
+    (config as Record<string, unknown>).RESEND_API_KEY = '';
+  });
+
   it('does not leak a stale contractor name into subject or html for George Jefferson', async () => {
     (config as Record<string, unknown>).EMAIL_SEND_MODE = 'send';
     (config as Record<string, unknown>).RESEND_API_KEY = 'test-key';
