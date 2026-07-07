@@ -9,6 +9,13 @@
  * All Drive API calls include supportsAllDrives: true and, where applicable,
  * includeItemsFromAllDrives: true so that Shared Drive folders are accessible.
  *
+ * File downloads are validated before upload:
+ *   - HTTP status must be 200.
+ *   - Content-Type must not be text/html or application/json (login/error pages).
+ *   - Response body must not begin with an HTML doctype or tag.
+ *   - Response body must be at least MIN_FILE_BYTES in size.
+ * Any validation failure throws a descriptive error; the file is never uploaded.
+ *
  * Files are never stored in Postgres — only Drive file IDs and web-view URLs
  * are returned to callers for metadata persistence.
  */
@@ -17,6 +24,16 @@ import { Readable } from 'stream';
 import { google } from 'googleapis';
 import { config } from '../../common/config';
 import { logger } from '../../common/logger';
+
+// ── Constants ──────────────────────────────────────────────────────────────
+
+/** Minimum acceptable file size in bytes. Responses smaller than this are
+ *  almost certainly error pages or empty bodies. */
+const MIN_FILE_BYTES = 512;
+
+/** Content-Type prefixes that indicate a non-file response (login page, API
+ *  error, redirect page, etc.). Checked case-insensitively. */
+const REJECTED_CONTENT_TYPES = ['text/html', 'application/json', 'text/plain'];
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -57,6 +74,54 @@ function getDriveClient() {
   const auth = getAuthClient();
   _driveClient = google.drive({ version: 'v3', auth });
   return _driveClient;
+}
+
+// ── Download validation ────────────────────────────────────────────────────
+
+/**
+ * Validate that a downloaded buffer is genuine binary file content and not
+ * an HTML login page, JSON error, or empty response.
+ *
+ * Throws a descriptive error if validation fails.
+ * Safe logging: logs content-type and byte size only — never logs file contents.
+ */
+export function validateDownloadedBuffer(
+  buffer: Buffer,
+  contentType: string,
+  fileName: string,
+): void {
+  const ct = contentType.toLowerCase().split(';')[0].trim();
+
+  // 1. Reject known non-file content types
+  for (const rejected of REJECTED_CONTENT_TYPES) {
+    if (ct.startsWith(rejected)) {
+      throw new Error(
+        `[GoogleDrive] Download rejected for "${fileName}": ` +
+          `content-type "${ct}" indicates a non-file response (login page or error). ` +
+          `Byte size: ${buffer.length}. File was NOT uploaded.`,
+      );
+    }
+  }
+
+  // 2. Reject HTML body regardless of content-type header
+  //    (some servers return text/octet-stream with an HTML body)
+  const prefix = buffer.slice(0, 512).toString('utf-8').trimStart().toLowerCase();
+  if (prefix.startsWith('<!doctype html') || prefix.startsWith('<html')) {
+    throw new Error(
+      `[GoogleDrive] Download rejected for "${fileName}": ` +
+        `response body begins with HTML markup (likely a login or redirect page). ` +
+        `Content-Type: "${ct}", Byte size: ${buffer.length}. File was NOT uploaded.`,
+    );
+  }
+
+  // 3. Reject suspiciously small files
+  if (buffer.length < MIN_FILE_BYTES) {
+    throw new Error(
+      `[GoogleDrive] Download rejected for "${fileName}": ` +
+        `file is too small (${buffer.length} bytes < ${MIN_FILE_BYTES} byte minimum). ` +
+        `Content-Type: "${ct}". File was NOT uploaded.`,
+    );
+  }
 }
 
 // ── Folder operations ──────────────────────────────────────────────────────
@@ -126,7 +191,6 @@ export async function createFolder(
  */
 export function extractFolderIdFromUrl(url: string): string | null {
   if (!url) return null;
-  // Pattern: /folders/<id>
   const match = url.match(/\/folders\/([a-zA-Z0-9_-]+)/);
   if (match?.[1]) return match[1];
   return null;
@@ -191,8 +255,17 @@ export async function resolveContractorFolder(opts: {
 
 /**
  * Download a file from a URL and upload it to a Google Drive folder.
+ *
+ * Validates the download response before uploading:
+ *   - HTTP status must be 200
+ *   - Content-Type must not be text/html, application/json, or text/plain
+ *   - Body must not begin with HTML markup
+ *   - Body must be at least MIN_FILE_BYTES in size
+ *
+ * Throws a descriptive error if any validation fails; the file is never
+ * uploaded in that case.
+ *
  * supportsAllDrives required for Shared Drive targets.
- * Returns the Drive file ID and web-view link.
  *
  * If jotformApiKey is provided, it is appended to the download URL as a
  * query parameter for protected Jotform file downloads.
@@ -212,17 +285,34 @@ export async function downloadAndUploadFile(opts: {
     downloadUrl = `${downloadUrl}${sep}apiKey=${opts.jotformApiKey}`;
   }
 
-  // Download the file
-  const response = await fetch(downloadUrl);
-  if (!response.ok) {
+  // Download the file — follow redirects (fetch default)
+  const response = await fetch(downloadUrl, { redirect: 'follow' });
+
+  // Guard 1: HTTP status must be 200
+  if (response.status !== 200) {
     throw new Error(
-      `[GoogleDrive] Failed to download file from Jotform: ${response.status} ${response.statusText} — ${opts.sourceUrl}`,
+      `[GoogleDrive] Download failed for "${opts.fileName}": ` +
+        `HTTP ${response.status} ${response.statusText}. File was NOT uploaded.`,
     );
   }
 
   const contentType = response.headers.get('content-type') ?? 'application/octet-stream';
   const arrayBuffer = await response.arrayBuffer();
   const buffer = Buffer.from(arrayBuffer);
+
+  // Safe log: status, content-type, and byte size only — no file contents
+  logger.info(
+    {
+      fileName: opts.fileName,
+      httpStatus: response.status,
+      contentType,
+      byteSize: buffer.length,
+    },
+    '[GoogleDrive] Download response received — validating before upload',
+  );
+
+  // Guards 2–4: content-type, HTML body, minimum size
+  validateDownloadedBuffer(buffer, contentType, opts.fileName);
 
   // Upload to Drive — supportsAllDrives required for Shared Drive targets
   const safeFileName = sanitizeFileName(opts.fileName);
@@ -232,7 +322,7 @@ export async function downloadAndUploadFile(opts: {
       parents: [opts.folderId],
     },
     media: {
-      mimeType: contentType,
+      mimeType: contentType.split(';')[0].trim(),
       body: Readable.from(buffer),
     },
     fields: 'id, webViewLink',
@@ -248,7 +338,7 @@ export async function downloadAndUploadFile(opts: {
   }
 
   logger.info(
-    { fileId: id, fileName: safeFileName, folderId: opts.folderId },
+    { fileId: id, fileName: safeFileName, folderId: opts.folderId, byteSize: buffer.length },
     '[GoogleDrive] File uploaded successfully',
   );
 
