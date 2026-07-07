@@ -7,7 +7,11 @@ import { query, queryOne } from '../../db/pool';
 import { strictNormalizePhone } from '../../common/utils';
 import { recordAuditEvent } from '../audit/audit.service';
 import { logger } from '../../common/logger';
-import { sendContractorOnboardingEmail } from '../email/email.service';
+import {
+  sendContractorOnboardingEmail,
+  sendContractorMissingDocsEmail,
+  sendContractorOnboardingAcceptedEmail,
+} from '../email/email.service';
 import { config } from '../../common/config';
 
 export const adminRouter = Router();
@@ -444,6 +448,149 @@ adminRouter.post(
         providerMessageId:  result.providerMessageId ?? null,
         mode:               config.EMAIL_SEND_MODE,
         onboardingFormUrl:  result.jotformUrl ?? null,
+      });
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
+// Sends (or logs in log_only mode) a missing-docs / correction-needed email to the contractor.
+// Requires missingOrCorrectionText in the request body.
+// Never activates or marks the contractor dispatch-eligible.
+//
+// Body:
+//   missingOrCorrectionText  string   (required)
+//   onboardingFormUrl        string   (optional — include to add a resubmit button)
+//   forceResend              boolean  (optional, default false)
+adminRouter.post(
+  '/contractors/:id/send-missing-docs-email',
+  requireAdmin,
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const schema = z.object({
+        missingOrCorrectionText: z.string().min(1, 'missingOrCorrectionText is required'),
+        onboardingFormUrl:       z.string().url().optional().nullable(),
+        forceResend:             z.boolean().optional().default(false),
+      });
+      const body = schema.parse(req.body);
+
+      // ── 1. Look up contractor ─────────────────────────────────────────────────────────────────────────────────────
+      const contractor = await queryOne<{
+        id: string;
+        full_name: string;
+        email: string | null;
+      }>(
+        'SELECT id, full_name, email FROM contractors WHERE id = $1',
+        [req.params.id],
+      );
+      if (!contractor) {
+        res.status(404).json({ error: 'NOT_FOUND', message: 'Contractor not found' });
+        return;
+      }
+
+      // ── 2. Require email ─────────────────────────────────────────────────────────────────────────────────────────────
+      if (!contractor.email) {
+        res.status(422).json({ error: 'MISSING_EMAIL', message: 'Contractor has no email address on file' });
+        return;
+      }
+
+      // ── 3. Send / log email ─────────────────────────────────────────────────────────────────────────────────────────────
+      const result = await sendContractorMissingDocsEmail({
+        contractorId:            contractor.id,
+        contractorName:          contractor.full_name,
+        contractorEmail:         contractor.email,
+        missingOrCorrectionText: body.missingOrCorrectionText,
+        onboardingFormUrl:       body.onboardingFormUrl,
+        forceResend:             body.forceResend,
+      });
+
+      if (result.alreadySent) {
+        res.status(200).json({
+          status:            'already_sent',
+          alreadySent:       true,
+          eventId:           result.eventId,
+          providerMessageId: result.providerMessageId ?? null,
+          mode:              config.EMAIL_SEND_MODE,
+          message:           'Missing-docs email already sent — use forceResend=true to resend',
+        });
+        return;
+      }
+
+      res.status(200).json({
+        status:            config.EMAIL_SEND_MODE === 'send' ? 'sent' : 'logged',
+        alreadySent:       false,
+        eventId:           result.eventId,
+        providerMessageId: result.providerMessageId ?? null,
+        mode:              config.EMAIL_SEND_MODE,
+      });
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
+// Sends (or logs in log_only mode) the onboarding-accepted email to the contractor.
+// Never activates or marks the contractor dispatch-eligible.
+//
+// Body:
+//   forceResend  boolean  (optional, default false)
+adminRouter.post(
+  '/contractors/:id/send-onboarding-accepted-email',
+  requireAdmin,
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const schema = z.object({
+        forceResend: z.boolean().optional().default(false),
+      });
+      const body = schema.parse(req.body);
+
+      // ── 1. Look up contractor ─────────────────────────────────────────────────────────────────────────────────────
+      const contractor = await queryOne<{
+        id: string;
+        full_name: string;
+        email: string | null;
+      }>(
+        'SELECT id, full_name, email FROM contractors WHERE id = $1',
+        [req.params.id],
+      );
+      if (!contractor) {
+        res.status(404).json({ error: 'NOT_FOUND', message: 'Contractor not found' });
+        return;
+      }
+
+      // ── 2. Require email ─────────────────────────────────────────────────────────────────────────────────────────────
+      if (!contractor.email) {
+        res.status(422).json({ error: 'MISSING_EMAIL', message: 'Contractor has no email address on file' });
+        return;
+      }
+
+      // ── 3. Send / log email ─────────────────────────────────────────────────────────────────────────────────────────────
+      const result = await sendContractorOnboardingAcceptedEmail({
+        contractorId:    contractor.id,
+        contractorName:  contractor.full_name,
+        contractorEmail: contractor.email,
+        forceResend:     body.forceResend,
+      });
+
+      if (result.alreadySent) {
+        res.status(200).json({
+          status:            'already_sent',
+          alreadySent:       true,
+          eventId:           result.eventId,
+          providerMessageId: result.providerMessageId ?? null,
+          mode:              config.EMAIL_SEND_MODE,
+          message:           'Onboarding-accepted email already sent — use forceResend=true to resend',
+        });
+        return;
+      }
+
+      res.status(200).json({
+        status:            config.EMAIL_SEND_MODE === 'send' ? 'sent' : 'logged',
+        alreadySent:       false,
+        eventId:           result.eventId,
+        providerMessageId: result.providerMessageId ?? null,
+        mode:              config.EMAIL_SEND_MODE,
       });
     } catch (err) {
       next(err);

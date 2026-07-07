@@ -50,8 +50,12 @@ import {
   normalizePhoneForJotform,
   renderCustomerCompletionEmail,
   renderContractorOnboardingEmail,
+  renderContractorMissingDocsEmail,
+  renderContractorOnboardingAcceptedEmail,
   sendCustomerCompletionEmail,
   sendContractorOnboardingEmail,
+  sendContractorMissingDocsEmail,
+  sendContractorOnboardingAcceptedEmail,
 } from '../../src/modules/email/email.service';
 
 import {
@@ -700,5 +704,320 @@ describe('sendContractorOnboardingEmail', () => {
     // Reset
     (config as Record<string, unknown>).EMAIL_SEND_MODE = 'log_only';
     (config as Record<string, unknown>).RESEND_API_KEY = '';
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────────────
+// Phase 2 — renderContractorMissingDocsEmail
+// ────────────────────────────────────────────────────────────────────────────────
+describe('renderContractorMissingDocsEmail', () => {
+  it('includes contractor name and missing-docs text', () => {
+    const html = renderContractorMissingDocsEmail({
+      contractorName: 'George Jefferson',
+      missingOrCorrectionText: 'Your W-9 is missing a signature.',
+    });
+    expect(html).toContain('George Jefferson');
+    expect(html).toContain('Your W-9 is missing a signature.');
+  });
+
+  it('does not include contractor name in the preheader', () => {
+    const html = renderContractorMissingDocsEmail({
+      contractorName: 'George Jefferson',
+      missingOrCorrectionText: 'Please resubmit your Photo ID.',
+    });
+    const preheaderMatch = html.match(/display:none[^>]*>([^<]+)</);
+    expect(preheaderMatch).not.toBeNull();
+    expect(preheaderMatch![1]).not.toContain('George Jefferson');
+  });
+
+  it('includes Update Onboarding button when onboardingFormUrl is provided', () => {
+    const html = renderContractorMissingDocsEmail({
+      contractorName: 'George Jefferson',
+      missingOrCorrectionText: 'Please resubmit.',
+      onboardingFormUrl: 'https://form.jotform.com/test?id=123',
+    });
+    expect(html).toContain('Update Onboarding');
+    expect(html).toContain('https://form.jotform.com/test?id=123');
+  });
+
+  it('omits Update Onboarding button when onboardingFormUrl is not provided', () => {
+    const html = renderContractorMissingDocsEmail({
+      contractorName: 'George Jefferson',
+      missingOrCorrectionText: 'Please resubmit.',
+    });
+    expect(html).not.toContain('Update Onboarding');
+  });
+
+  it('HTML-escapes contractor name and missing text to prevent injection', () => {
+    const html = renderContractorMissingDocsEmail({
+      contractorName: '<script>alert(1)</script>',
+      missingOrCorrectionText: 'Missing: <W-9> & "photo"',
+    });
+    expect(html).not.toContain('<script>');
+    expect(html).toContain('&lt;script&gt;');
+    expect(html).toContain('&lt;W-9&gt; &amp; &quot;photo&quot;');
+  });
+
+  it('converts newlines in missingOrCorrectionText to <br />', () => {
+    const html = renderContractorMissingDocsEmail({
+      contractorName: 'George Jefferson',
+      missingOrCorrectionText: 'Line one.\nLine two.',
+    });
+    expect(html).toContain('Line one.<br />Line two.');
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────────────
+// Phase 2 — renderContractorOnboardingAcceptedEmail
+// ────────────────────────────────────────────────────────────────────────────────
+describe('renderContractorOnboardingAcceptedEmail', () => {
+  it('includes contractor name', () => {
+    const html = renderContractorOnboardingAcceptedEmail({ contractorName: 'George Jefferson' });
+    expect(html).toContain('George Jefferson');
+  });
+
+  it('does not include contractor name in the preheader', () => {
+    const html = renderContractorOnboardingAcceptedEmail({ contractorName: 'George Jefferson' });
+    const preheaderMatch = html.match(/display:none[^>]*>([^<]+)</);
+    expect(preheaderMatch).not.toBeNull();
+    expect(preheaderMatch![1]).not.toContain('George Jefferson');
+  });
+
+  it('contains accepted messaging and activation disclaimer', () => {
+    const html = renderContractorOnboardingAcceptedEmail({ contractorName: 'George Jefferson' });
+    expect(html).toContain('accepted');
+    expect(html).toContain('final activation');
+    expect(html).not.toContain('Complete Onboarding');
+    expect(html).not.toContain('jotform.com');
+  });
+
+  it('does not contain Jotform link', () => {
+    const html = renderContractorOnboardingAcceptedEmail({ contractorName: 'George Jefferson' });
+    expect(html).not.toContain('jotform.com');
+  });
+
+  it('HTML-escapes contractor name', () => {
+    const html = renderContractorOnboardingAcceptedEmail({ contractorName: '<b>Test</b>' });
+    expect(html).not.toContain('<b>Test</b>');
+    expect(html).toContain('&lt;b&gt;Test&lt;/b&gt;');
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────────────
+// Phase 2 — sendContractorMissingDocsEmail
+// ────────────────────────────────────────────────────────────────────────────────
+
+const MISSING_DOCS_PENDING_EVENT: import('../../src/modules/email/email_events.repository').EmailEventRow = {
+  id: 'evt-missing-001',
+  event_type: 'contractor_missing_docs',
+  recipient_email: 'george@example.com',
+  recipient_type: 'contractor' as const,
+  related_job_id: null,
+  related_contractor_id: 'ctr-001',
+  status: 'pending' as const,
+  provider_message_id: null,
+  created_at: new Date(),
+  sent_at: null,
+  error_message: null,
+};
+
+describe('sendContractorMissingDocsEmail', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('returns alreadySent=true when event already exists and forceResend=false', async () => {
+    vi.mocked(reserveEmailEvent).mockResolvedValueOnce({
+      row: MISSING_DOCS_PENDING_EVENT,
+      alreadyExists: true,
+    });
+
+    const result = await sendContractorMissingDocsEmail({
+      contractorId: 'ctr-001',
+      contractorName: 'George Jefferson',
+      contractorEmail: 'george@example.com',
+      missingOrCorrectionText: 'W-9 missing signature.',
+    });
+
+    expect(result.alreadySent).toBe(true);
+    expect(result.eventId).toBe('evt-missing-001');
+    expect(sendViaResend).not.toHaveBeenCalled();
+  });
+
+  it('reserves event and returns alreadySent=false in log_only mode', async () => {
+    vi.mocked(reserveEmailEvent).mockResolvedValueOnce({
+      row: MISSING_DOCS_PENDING_EVENT,
+      alreadyExists: false,
+    });
+
+    const result = await sendContractorMissingDocsEmail({
+      contractorId: 'ctr-001',
+      contractorName: 'George Jefferson',
+      contractorEmail: 'george@example.com',
+      missingOrCorrectionText: 'W-9 missing signature.',
+    });
+
+    expect(result.alreadySent).toBe(false);
+    expect(result.eventId).toBe('evt-missing-001');
+    expect(sendViaResend).not.toHaveBeenCalled();
+  });
+
+  it('uses forceResend path and generates fresh idempotency key', async () => {
+    vi.mocked(reserveEmailEventForResend).mockResolvedValueOnce(MISSING_DOCS_PENDING_EVENT);
+    vi.mocked(sendViaResend).mockResolvedValueOnce({ id: 'resend-msg-missing-001' });
+    vi.mocked(markEmailEventSent).mockResolvedValueOnce(undefined);
+
+    (config as Record<string, unknown>).EMAIL_SEND_MODE = 'send';
+    (config as Record<string, unknown>).RESEND_API_KEY = 'test-key';
+
+    await sendContractorMissingDocsEmail({
+      contractorId: 'ctr-001',
+      contractorName: 'George Jefferson',
+      contractorEmail: 'george@example.com',
+      missingOrCorrectionText: 'W-9 missing signature.',
+      forceResend: true,
+    });
+
+    expect(reserveEmailEventForResend).toHaveBeenCalledOnce();
+    expect(sendViaResend).toHaveBeenCalledOnce();
+    const [, sentPayload] = vi.mocked(sendViaResend).mock.calls[0];
+    expect(sentPayload.idempotencyKey).toBeDefined();
+    expect(sentPayload.idempotencyKey).not.toBe('evt-missing-001');
+    expect(sentPayload.subject).toContain('Action Required');
+    expect(sentPayload.html).toContain('George Jefferson');
+    expect(sentPayload.html).toContain('W-9 missing signature.');
+
+    (config as Record<string, unknown>).EMAIL_SEND_MODE = 'log_only';
+    (config as Record<string, unknown>).RESEND_API_KEY = '';
+  });
+
+  it('does not activate contractor (only calls email_events repository)', async () => {
+    vi.mocked(reserveEmailEvent).mockResolvedValueOnce({
+      row: MISSING_DOCS_PENDING_EVENT,
+      alreadyExists: false,
+    });
+
+    await sendContractorMissingDocsEmail({
+      contractorId: 'ctr-001',
+      contractorName: 'George Jefferson',
+      contractorEmail: 'george@example.com',
+      missingOrCorrectionText: 'Photo ID required.',
+    });
+
+    expect(reserveEmailEvent).toHaveBeenCalledOnce();
+    expect(reserveEmailEventForResend).not.toHaveBeenCalled();
+    expect(sendViaResend).not.toHaveBeenCalled();
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────────────
+// Phase 2 — sendContractorOnboardingAcceptedEmail
+// ────────────────────────────────────────────────────────────────────────────────
+
+const ACCEPTED_PENDING_EVENT: import('../../src/modules/email/email_events.repository').EmailEventRow = {
+  id: 'evt-accepted-001',
+  event_type: 'contractor_onboarding_accepted',
+  recipient_email: 'george@example.com',
+  recipient_type: 'contractor' as const,
+  related_job_id: null,
+  related_contractor_id: 'ctr-001',
+  status: 'pending' as const,
+  provider_message_id: null,
+  created_at: new Date(),
+  sent_at: null,
+  error_message: null,
+};
+
+describe('sendContractorOnboardingAcceptedEmail', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('returns alreadySent=true when event already exists and forceResend=false', async () => {
+    vi.mocked(reserveEmailEvent).mockResolvedValueOnce({
+      row: ACCEPTED_PENDING_EVENT,
+      alreadyExists: true,
+    });
+
+    const result = await sendContractorOnboardingAcceptedEmail({
+      contractorId: 'ctr-001',
+      contractorName: 'George Jefferson',
+      contractorEmail: 'george@example.com',
+    });
+
+    expect(result.alreadySent).toBe(true);
+    expect(result.eventId).toBe('evt-accepted-001');
+    expect(sendViaResend).not.toHaveBeenCalled();
+  });
+
+  it('sends email with correct subject and contractor name in send mode', async () => {
+    vi.mocked(reserveEmailEvent).mockResolvedValueOnce({
+      row: ACCEPTED_PENDING_EVENT,
+      alreadyExists: false,
+    });
+    vi.mocked(sendViaResend).mockResolvedValueOnce({ id: 'resend-msg-accepted-001' });
+    vi.mocked(markEmailEventSent).mockResolvedValueOnce(undefined);
+
+    (config as Record<string, unknown>).EMAIL_SEND_MODE = 'send';
+    (config as Record<string, unknown>).RESEND_API_KEY = 'test-key';
+
+    const result = await sendContractorOnboardingAcceptedEmail({
+      contractorId: 'ctr-001',
+      contractorName: 'George Jefferson',
+      contractorEmail: 'george@example.com',
+    });
+
+    expect(result.alreadySent).toBe(false);
+    expect(result.providerMessageId).toBe('resend-msg-accepted-001');
+    expect(sendViaResend).toHaveBeenCalledOnce();
+    const [, sentPayload] = vi.mocked(sendViaResend).mock.calls[0];
+    expect(sentPayload.subject).toContain('Onboarding Documents Accepted');
+    expect(sentPayload.html).toContain('George Jefferson');
+    expect(sentPayload.html).toContain('accepted');
+    expect(sentPayload.html).not.toContain('jotform.com');
+
+    (config as Record<string, unknown>).EMAIL_SEND_MODE = 'log_only';
+    (config as Record<string, unknown>).RESEND_API_KEY = '';
+  });
+
+  it('uses forceResend path and generates fresh idempotency key', async () => {
+    vi.mocked(reserveEmailEventForResend).mockResolvedValueOnce(ACCEPTED_PENDING_EVENT);
+    vi.mocked(sendViaResend).mockResolvedValueOnce({ id: 'resend-msg-accepted-002' });
+    vi.mocked(markEmailEventSent).mockResolvedValueOnce(undefined);
+
+    (config as Record<string, unknown>).EMAIL_SEND_MODE = 'send';
+    (config as Record<string, unknown>).RESEND_API_KEY = 'test-key';
+
+    await sendContractorOnboardingAcceptedEmail({
+      contractorId: 'ctr-001',
+      contractorName: 'George Jefferson',
+      contractorEmail: 'george@example.com',
+      forceResend: true,
+    });
+
+    expect(reserveEmailEventForResend).toHaveBeenCalledOnce();
+    const [, sentPayload] = vi.mocked(sendViaResend).mock.calls[0];
+    expect(sentPayload.idempotencyKey).toBeDefined();
+    expect(sentPayload.idempotencyKey).not.toBe('evt-accepted-001');
+
+    (config as Record<string, unknown>).EMAIL_SEND_MODE = 'log_only';
+    (config as Record<string, unknown>).RESEND_API_KEY = '';
+  });
+
+  it('does not activate contractor (only calls email_events repository)', async () => {
+    vi.mocked(reserveEmailEvent).mockResolvedValueOnce({
+      row: ACCEPTED_PENDING_EVENT,
+      alreadyExists: false,
+    });
+
+    await sendContractorOnboardingAcceptedEmail({
+      contractorId: 'ctr-001',
+      contractorName: 'George Jefferson',
+      contractorEmail: 'george@example.com',
+    });
+
+    expect(reserveEmailEvent).toHaveBeenCalledOnce();
+    expect(reserveEmailEventForResend).not.toHaveBeenCalled();
+    expect(sendViaResend).not.toHaveBeenCalled();
   });
 });

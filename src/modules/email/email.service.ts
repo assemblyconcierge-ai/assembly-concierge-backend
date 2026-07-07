@@ -34,8 +34,10 @@ import {
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 export const EMAIL_EVENT_TYPES = {
-  CUSTOMER_JOB_COMPLETE: 'customer_job_complete',
-  CONTRACTOR_ONBOARDING: 'contractor_onboarding',
+  CUSTOMER_JOB_COMPLETE:          'customer_job_complete',
+  CONTRACTOR_ONBOARDING:          'contractor_onboarding',
+  CONTRACTOR_MISSING_DOCS:        'contractor_missing_docs',
+  CONTRACTOR_ONBOARDING_ACCEPTED: 'contractor_onboarding_accepted',
 } as const;
 
 export type EmailEventType = (typeof EMAIL_EVENT_TYPES)[keyof typeof EMAIL_EVENT_TYPES];
@@ -312,6 +314,142 @@ export function renderContractorOnboardingEmail(params: {
 </html>`;
 }
 
+/**
+ * Inline HTML template for the contractor missing-docs / correction-needed email.
+ */
+export function renderContractorMissingDocsEmail(params: {
+  contractorName: string;
+  missingOrCorrectionText: string;
+  onboardingFormUrl?: string | null;
+}): string {
+  const { contractorName, missingOrCorrectionText, onboardingFormUrl } = params;
+  const esc = (s: string) =>
+    s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  // Convert plain-text newlines to <br /> for HTML display
+  const formattedText = esc(missingOrCorrectionText).replace(/\n/g, '<br />');
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+  <title>Assembly Concierge — Action Required</title>
+</head>
+<body style="margin:0;padding:0;background-color:#f4f4f4;font-family:Arial,Helvetica,sans-serif;">
+  <div style="display:none;max-height:0;overflow:hidden;mso-hide:all;font-size:1px;line-height:1px;color:#f4f4f4;opacity:0;">Action required: please review your onboarding submission.</div>
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#f4f4f4;padding:32px 16px;">
+    <tr><td align="center">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:600px;background-color:#ffffff;border-radius:6px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.08);">
+        <tr>
+          <td style="background-color:#1a1a1a;padding:28px 32px;">
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+              <tr>
+                <td><span style="font-size:22px;font-weight:700;color:#FFD700;letter-spacing:0.5px;">Assembly Concierge</span></td>
+                <td align="right"><span style="font-size:12px;color:#999999;letter-spacing:1px;text-transform:uppercase;">Contractor Onboarding</span></td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+        <tr><td style="background-color:#FFD700;height:4px;font-size:0;line-height:0;"></td></tr>
+        <tr>
+          <td style="padding:36px 32px 28px 32px;">
+            <p style="margin:0 0 20px 0;font-size:16px;color:#1a1a1a;line-height:1.5;">Hi ${esc(contractorName)},</p>
+            <p style="margin:0 0 16px 0;font-size:16px;color:#1a1a1a;line-height:1.6;">We have reviewed your onboarding submission and need you to address the following before we can proceed:</p>
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 28px 0;background-color:#fff8e1;border:1px solid #ffe57f;border-radius:4px;">
+              <tr><td style="padding:18px 20px;font-size:14px;color:#3a2e00;line-height:1.7;">${formattedText}</td></tr>
+            </table>
+            ${onboardingFormUrl ? `
+            <p style="margin:0 0 16px 0;font-size:14px;color:#444444;line-height:1.6;">Please use the link below to resubmit or update your onboarding materials:</p>
+            <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 28px 0;">
+              <tr><td style="border-radius:4px;background-color:#FFD700;">
+                <a href="${esc(onboardingFormUrl)}" style="display:inline-block;padding:13px 28px;font-size:14px;font-weight:700;color:#1a1a1a;text-decoration:none;letter-spacing:0.3px;">Update Onboarding</a>
+              </td></tr>
+            </table>` : ''}
+            <p style="margin:0;font-size:13px;color:#888888;line-height:1.6;">Questions? Reply to this email or reach us at <a href="mailto:support@assemblyconcierge.com" style="color:#1a1a1a;font-weight:600;text-decoration:none;">support@assemblyconcierge.com</a>.</p>
+          </td>
+        </tr>
+        <tr>
+          <td style="background-color:#f0f0f0;border-top:1px solid #e0e0e0;padding:20px 32px;">
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+              <tr>
+                <td style="font-size:11px;color:#aaaaaa;line-height:1.6;">Assembly Concierge &nbsp;&middot;&nbsp; McDonough / Henry County, GA<br /><a href="mailto:support@assemblyconcierge.com" style="color:#aaaaaa;text-decoration:underline;">support@assemblyconcierge.com</a> &nbsp;&middot;&nbsp; <a href="https://assemblyconcierge.com" style="color:#aaaaaa;text-decoration:underline;">assemblyconcierge.com</a></td>
+                <td align="right" style="font-size:11px;color:#cccccc;white-space:nowrap;">Contractor Onboarding</td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>`;
+}
+
+/**
+ * Inline HTML template for the contractor onboarding-accepted email.
+ */
+export function renderContractorOnboardingAcceptedEmail(params: {
+  contractorName: string;
+}): string {
+  const { contractorName } = params;
+  const esc = (s: string) =>
+    s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+  <title>Assembly Concierge — Onboarding Documents Accepted</title>
+</head>
+<body style="margin:0;padding:0;background-color:#f4f4f4;font-family:Arial,Helvetica,sans-serif;">
+  <div style="display:none;max-height:0;overflow:hidden;mso-hide:all;font-size:1px;line-height:1px;color:#f4f4f4;opacity:0;">Your Assembly Concierge onboarding documents have been accepted.</div>
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#f4f4f4;padding:32px 16px;">
+    <tr><td align="center">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:600px;background-color:#ffffff;border-radius:6px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.08);">
+        <tr>
+          <td style="background-color:#1a1a1a;padding:28px 32px;">
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+              <tr>
+                <td><span style="font-size:22px;font-weight:700;color:#FFD700;letter-spacing:0.5px;">Assembly Concierge</span></td>
+                <td align="right"><span style="font-size:12px;color:#999999;letter-spacing:1px;text-transform:uppercase;">Contractor Onboarding</span></td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+        <tr><td style="background-color:#FFD700;height:4px;font-size:0;line-height:0;"></td></tr>
+        <tr>
+          <td style="padding:36px 32px 28px 32px;">
+            <p style="margin:0 0 20px 0;font-size:16px;color:#1a1a1a;line-height:1.5;">Hi ${esc(contractorName)},</p>
+            <p style="margin:0 0 16px 0;font-size:16px;color:#1a1a1a;line-height:1.6;">Great news — your onboarding documents have been reviewed and <strong>accepted</strong>.</p>
+            <p style="margin:0 0 28px 0;font-size:14px;color:#666666;line-height:1.6;">Your account is now under final activation review by our team. You will receive a separate notification once your account is fully activated and you are eligible to receive job dispatches.</p>
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 24px 0;background-color:#fffbea;border:1px solid #ffe57f;border-radius:4px;">
+              <tr><td style="padding:14px 18px;">
+                <p style="margin:0;font-size:13px;color:#5a4a00;line-height:1.6;"><strong>Please note:</strong> Document acceptance is not final activation. Dispatch eligibility is granted only after your account has been fully activated by the Assembly Concierge team.</p>
+              </td></tr>
+            </table>
+            <p style="margin:0;font-size:13px;color:#888888;line-height:1.6;">Questions? Reply to this email or reach us at <a href="mailto:support@assemblyconcierge.com" style="color:#1a1a1a;font-weight:600;text-decoration:none;">support@assemblyconcierge.com</a>.</p>
+          </td>
+        </tr>
+        <tr>
+          <td style="background-color:#f0f0f0;border-top:1px solid #e0e0e0;padding:20px 32px;">
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+              <tr>
+                <td style="font-size:11px;color:#aaaaaa;line-height:1.6;">Assembly Concierge &nbsp;&middot;&nbsp; McDonough / Henry County, GA<br /><a href="mailto:support@assemblyconcierge.com" style="color:#aaaaaa;text-decoration:underline;">support@assemblyconcierge.com</a> &nbsp;&middot;&nbsp; <a href="https://assemblyconcierge.com" style="color:#aaaaaa;text-decoration:underline;">assemblyconcierge.com</a></td>
+                <td align="right" style="font-size:11px;color:#cccccc;white-space:nowrap;">Contractor Onboarding</td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>`;
+}
+
 // ── Send functions ─────────────────────────────────────────────────────────────
 
 export interface SendCustomerCompletionEmailParams {
@@ -470,6 +608,142 @@ export async function sendContractorOnboardingEmail(
   });
 
   return { ...result, jotformUrl };
+}
+
+// ── Phase 2 send functions ───────────────────────────────────────────────────
+
+export interface SendContractorMissingDocsEmailParams {
+  contractorId: string;
+  contractorName: string;
+  contractorEmail: string;
+  /** Required: operator-authored text describing what is missing or needs correction */
+  missingOrCorrectionText: string;
+  /** Optional: prefilled Jotform URL to include a resubmit button */
+  onboardingFormUrl?: string | null;
+  /** If true, reset the event row to pending and resend even if already sent */
+  forceResend?: boolean;
+}
+
+/**
+ * Send (or log) the contractor missing-docs / correction-needed email.
+ *
+ * Idempotency: INSERT ON CONFLICT DO NOTHING unless forceResend=true.
+ * Does NOT activate the contractor or alter is_active.
+ */
+export async function sendContractorMissingDocsEmail(
+  params: SendContractorMissingDocsEmailParams,
+): Promise<EmailSendResult> {
+  const eventType = EMAIL_EVENT_TYPES.CONTRACTOR_MISSING_DOCS;
+
+  let event: EmailEventRow;
+  let alreadyExists: boolean;
+
+  if (params.forceResend) {
+    event = await reserveEmailEventForResend({
+      recipientEmail:       params.contractorEmail,
+      recipientType:        'contractor',
+      eventType,
+      relatedContractorId:  params.contractorId,
+    });
+    alreadyExists = false;
+  } else {
+    const result = await reserveEmailEvent({
+      recipientEmail:       params.contractorEmail,
+      recipientType:        'contractor',
+      eventType,
+      relatedContractorId:  params.contractorId,
+    });
+    event = result.row;
+    alreadyExists = result.alreadyExists;
+  }
+
+  if (alreadyExists) {
+    logger.info(
+      { eventId: event.id, eventType, contractorId: params.contractorId },
+      '[email] event already reserved — skipping send',
+    );
+    return { alreadySent: true, eventId: event.id, providerMessageId: event.provider_message_id ?? undefined };
+  }
+
+  const html = renderContractorMissingDocsEmail({
+    contractorName:          params.contractorName,
+    missingOrCorrectionText: params.missingOrCorrectionText,
+    onboardingFormUrl:       params.onboardingFormUrl,
+  });
+
+  const resendIdempotencyKey = params.forceResend ? randomUUID() : event.id;
+
+  return _dispatchEmail({
+    event,
+    to:      params.contractorEmail,
+    subject: 'Assembly Concierge — Action Required: Onboarding Submission',
+    html,
+    resendIdempotencyKey,
+    logContext: { eventType, contractorId: params.contractorId, forceResend: params.forceResend ?? false },
+  });
+}
+
+export interface SendContractorOnboardingAcceptedEmailParams {
+  contractorId: string;
+  contractorName: string;
+  contractorEmail: string;
+  /** If true, reset the event row to pending and resend even if already sent */
+  forceResend?: boolean;
+}
+
+/**
+ * Send (or log) the contractor onboarding-accepted email.
+ *
+ * Idempotency: INSERT ON CONFLICT DO NOTHING unless forceResend=true.
+ * Does NOT activate the contractor or alter is_active.
+ */
+export async function sendContractorOnboardingAcceptedEmail(
+  params: SendContractorOnboardingAcceptedEmailParams,
+): Promise<EmailSendResult> {
+  const eventType = EMAIL_EVENT_TYPES.CONTRACTOR_ONBOARDING_ACCEPTED;
+
+  let event: EmailEventRow;
+  let alreadyExists: boolean;
+
+  if (params.forceResend) {
+    event = await reserveEmailEventForResend({
+      recipientEmail:       params.contractorEmail,
+      recipientType:        'contractor',
+      eventType,
+      relatedContractorId:  params.contractorId,
+    });
+    alreadyExists = false;
+  } else {
+    const result = await reserveEmailEvent({
+      recipientEmail:       params.contractorEmail,
+      recipientType:        'contractor',
+      eventType,
+      relatedContractorId:  params.contractorId,
+    });
+    event = result.row;
+    alreadyExists = result.alreadyExists;
+  }
+
+  if (alreadyExists) {
+    logger.info(
+      { eventId: event.id, eventType, contractorId: params.contractorId },
+      '[email] event already reserved — skipping send',
+    );
+    return { alreadySent: true, eventId: event.id, providerMessageId: event.provider_message_id ?? undefined };
+  }
+
+  const html = renderContractorOnboardingAcceptedEmail({ contractorName: params.contractorName });
+
+  const resendIdempotencyKey = params.forceResend ? randomUUID() : event.id;
+
+  return _dispatchEmail({
+    event,
+    to:      params.contractorEmail,
+    subject: 'Assembly Concierge — Onboarding Documents Accepted',
+    html,
+    resendIdempotencyKey,
+    logContext: { eventType, contractorId: params.contractorId, forceResend: params.forceResend ?? false },
+  });
 }
 
 // ── Internal dispatch helper ───────────────────────────────────────────────────

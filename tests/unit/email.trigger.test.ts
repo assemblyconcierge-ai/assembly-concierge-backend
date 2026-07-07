@@ -26,6 +26,8 @@ const {
   mockQueryOne,
   mockSendCustomerCompletionEmail,
   mockSendContractorOnboardingEmail,
+  mockSendContractorMissingDocsEmail,
+  mockSendContractorOnboardingAcceptedEmail,
   mockRecordAuditEvent,
   mockGetJobById,
   mockGetPaymentsByJobId,
@@ -35,6 +37,8 @@ const {
   mockQueryOne:                     vi.fn(),
   mockSendCustomerCompletionEmail:  vi.fn().mockResolvedValue({ eventId: 'evt-1', mode: 'log_only', alreadySent: false }),
   mockSendContractorOnboardingEmail: vi.fn().mockResolvedValue({ eventId: 'evt-2', mode: 'log_only', alreadySent: false, jotformUrl: 'https://form.jotform.com/test?contractorId=ctr-uuid-1' }),
+  mockSendContractorMissingDocsEmail: vi.fn().mockResolvedValue({ eventId: 'evt-3', mode: 'log_only', alreadySent: false }),
+  mockSendContractorOnboardingAcceptedEmail: vi.fn().mockResolvedValue({ eventId: 'evt-4', mode: 'log_only', alreadySent: false }),
   mockRecordAuditEvent:             vi.fn().mockResolvedValue(undefined),
   mockGetJobById:                   vi.fn(),
   mockGetPaymentsByJobId:           vi.fn(),
@@ -47,8 +51,10 @@ vi.mock('../../src/db/pool', () => ({
   withTransaction: vi.fn(),
 }));
 vi.mock('../../src/modules/email/email.service', () => ({
-  sendCustomerCompletionEmail:   mockSendCustomerCompletionEmail,
-  sendContractorOnboardingEmail: mockSendContractorOnboardingEmail,
+  sendCustomerCompletionEmail:              mockSendCustomerCompletionEmail,
+  sendContractorOnboardingEmail:            mockSendContractorOnboardingEmail,
+  sendContractorMissingDocsEmail:           mockSendContractorMissingDocsEmail,
+  sendContractorOnboardingAcceptedEmail:    mockSendContractorOnboardingAcceptedEmail,
 }));
 vi.mock('../../src/modules/audit/audit.service', () => ({
   recordAuditEvent: mockRecordAuditEvent,
@@ -379,5 +385,242 @@ describe('POST /admin/contractors/:id/send-onboarding-email', () => {
     expect(mockSendContractorOnboardingEmail).toHaveBeenCalledWith(
       expect.objectContaining({ preferredName: 'Marc' }),
     );
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 3. POST /admin/contractors/:id/send-missing-docs-email
+// ─────────────────────────────────────────────────────────────────────────────
+describe('POST /admin/contractors/:id/send-missing-docs-email', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockQueryOne.mockReset();
+    mockQuery.mockReset();
+    mockSendContractorMissingDocsEmail.mockReset();
+    mockSendContractorMissingDocsEmail.mockResolvedValue({ eventId: 'evt-3', alreadySent: false });
+    mockQuery.mockResolvedValue([]);
+    mockQueryOne.mockResolvedValue(null);
+  });
+
+  it('returns 200 and sends missing-docs email (log_only mode)', async () => {
+    mockQueryOne.mockResolvedValueOnce(BASE_CONTRACTOR);
+
+    const app = buildAdminApp();
+    const res = await request(app)
+      .post('/admin/contractors/ctr-uuid-1/send-missing-docs-email')
+      .send({ missingOrCorrectionText: 'Your W-9 is missing a signature.' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.alreadySent).toBe(false);
+    expect(res.body.eventId).toBe('evt-3');
+    expect(res.body.status).toMatch(/^(sent|logged)$/);
+    expect(mockSendContractorMissingDocsEmail).toHaveBeenCalledWith(
+      expect.objectContaining({
+        contractorId:            'ctr-uuid-1',
+        contractorName:          'Marcus Johnson',
+        contractorEmail:         'marcus@example.com',
+        missingOrCorrectionText: 'Your W-9 is missing a signature.',
+        forceResend:             false,
+      }),
+    );
+  });
+
+  it('returns 400 when missingOrCorrectionText is missing (Zod validation)', async () => {
+    mockQueryOne.mockResolvedValueOnce(BASE_CONTRACTOR);
+
+    const app = buildAdminApp();
+    const res = await request(app)
+      .post('/admin/contractors/ctr-uuid-1/send-missing-docs-email')
+      .send({});
+
+    expect(res.status).toBe(400);
+    expect(mockSendContractorMissingDocsEmail).not.toHaveBeenCalled();
+  });
+
+  it('returns 400 when missingOrCorrectionText is empty string (Zod validation)', async () => {
+    mockQueryOne.mockResolvedValueOnce(BASE_CONTRACTOR);
+
+    const app = buildAdminApp();
+    const res = await request(app)
+      .post('/admin/contractors/ctr-uuid-1/send-missing-docs-email')
+      .send({ missingOrCorrectionText: '' });
+
+    expect(res.status).toBe(400);
+    expect(mockSendContractorMissingDocsEmail).not.toHaveBeenCalled();
+  });
+
+  it('returns 200 alreadySent=true when email already sent and forceResend=false', async () => {
+    mockQueryOne.mockResolvedValueOnce(BASE_CONTRACTOR);
+    mockSendContractorMissingDocsEmail.mockResolvedValue({ eventId: 'evt-3', alreadySent: true });
+
+    const app = buildAdminApp();
+    const res = await request(app)
+      .post('/admin/contractors/ctr-uuid-1/send-missing-docs-email')
+      .send({ missingOrCorrectionText: 'W-9 missing.' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.alreadySent).toBe(true);
+    expect(res.body.status).toBe('already_sent');
+    expect(res.body.message).toMatch(/already sent/i);
+  });
+
+  it('returns 200 and resends when forceResend=true', async () => {
+    mockQueryOne.mockResolvedValueOnce(BASE_CONTRACTOR);
+    mockSendContractorMissingDocsEmail.mockResolvedValue({ eventId: 'evt-3b', alreadySent: false });
+
+    const app = buildAdminApp();
+    const res = await request(app)
+      .post('/admin/contractors/ctr-uuid-1/send-missing-docs-email')
+      .send({ missingOrCorrectionText: 'W-9 missing.', forceResend: true });
+
+    expect(res.status).toBe(200);
+    expect(res.body.alreadySent).toBe(false);
+    expect(mockSendContractorMissingDocsEmail).toHaveBeenCalledWith(
+      expect.objectContaining({ forceResend: true }),
+    );
+  });
+
+  it('returns 404 for unknown contractor', async () => {
+    mockQueryOne.mockResolvedValueOnce(null);
+
+    const app = buildAdminApp();
+    const res = await request(app)
+      .post('/admin/contractors/unknown-id/send-missing-docs-email')
+      .send({ missingOrCorrectionText: 'W-9 missing.' });
+
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('NOT_FOUND');
+  });
+
+  it('returns 422 MISSING_EMAIL when contractor has no email', async () => {
+    mockQueryOne.mockResolvedValueOnce({ ...BASE_CONTRACTOR, email: null });
+
+    const app = buildAdminApp();
+    const res = await request(app)
+      .post('/admin/contractors/ctr-uuid-1/send-missing-docs-email')
+      .send({ missingOrCorrectionText: 'W-9 missing.' });
+
+    expect(res.status).toBe(422);
+    expect(res.body.error).toBe('MISSING_EMAIL');
+    expect(mockSendContractorMissingDocsEmail).not.toHaveBeenCalled();
+  });
+
+  it('does not activate contractor or change is_active', async () => {
+    mockQueryOne.mockResolvedValueOnce(BASE_CONTRACTOR);
+
+    const app = buildAdminApp();
+    await request(app)
+      .post('/admin/contractors/ctr-uuid-1/send-missing-docs-email')
+      .send({ missingOrCorrectionText: 'W-9 missing.' });
+
+    const allQueryCalls = mockQuery.mock.calls.map((c: any[]) => String(c[0]));
+    const activationCalls = allQueryCalls.filter((sql: string) => sql.includes('is_active'));
+    expect(activationCalls).toHaveLength(0);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 4. POST /admin/contractors/:id/send-onboarding-accepted-email
+// ─────────────────────────────────────────────────────────────────────────────
+describe('POST /admin/contractors/:id/send-onboarding-accepted-email', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockQueryOne.mockReset();
+    mockQuery.mockReset();
+    mockSendContractorOnboardingAcceptedEmail.mockReset();
+    mockSendContractorOnboardingAcceptedEmail.mockResolvedValue({ eventId: 'evt-4', alreadySent: false });
+    mockQuery.mockResolvedValue([]);
+    mockQueryOne.mockResolvedValue(null);
+  });
+
+  it('returns 200 and sends accepted email (log_only mode)', async () => {
+    mockQueryOne.mockResolvedValueOnce(BASE_CONTRACTOR);
+
+    const app = buildAdminApp();
+    const res = await request(app)
+      .post('/admin/contractors/ctr-uuid-1/send-onboarding-accepted-email')
+      .send({});
+
+    expect(res.status).toBe(200);
+    expect(res.body.alreadySent).toBe(false);
+    expect(res.body.eventId).toBe('evt-4');
+    expect(res.body.status).toMatch(/^(sent|logged)$/);
+    expect(mockSendContractorOnboardingAcceptedEmail).toHaveBeenCalledWith(
+      expect.objectContaining({
+        contractorId:    'ctr-uuid-1',
+        contractorName:  'Marcus Johnson',
+        contractorEmail: 'marcus@example.com',
+        forceResend:     false,
+      }),
+    );
+  });
+
+  it('returns 200 alreadySent=true when email already sent and forceResend=false', async () => {
+    mockQueryOne.mockResolvedValueOnce(BASE_CONTRACTOR);
+    mockSendContractorOnboardingAcceptedEmail.mockResolvedValue({ eventId: 'evt-4', alreadySent: true });
+
+    const app = buildAdminApp();
+    const res = await request(app)
+      .post('/admin/contractors/ctr-uuid-1/send-onboarding-accepted-email')
+      .send({});
+
+    expect(res.status).toBe(200);
+    expect(res.body.alreadySent).toBe(true);
+    expect(res.body.status).toBe('already_sent');
+    expect(res.body.message).toMatch(/already sent/i);
+  });
+
+  it('returns 200 and resends when forceResend=true', async () => {
+    mockQueryOne.mockResolvedValueOnce(BASE_CONTRACTOR);
+    mockSendContractorOnboardingAcceptedEmail.mockResolvedValue({ eventId: 'evt-4b', alreadySent: false });
+
+    const app = buildAdminApp();
+    const res = await request(app)
+      .post('/admin/contractors/ctr-uuid-1/send-onboarding-accepted-email')
+      .send({ forceResend: true });
+
+    expect(res.status).toBe(200);
+    expect(res.body.alreadySent).toBe(false);
+    expect(mockSendContractorOnboardingAcceptedEmail).toHaveBeenCalledWith(
+      expect.objectContaining({ forceResend: true }),
+    );
+  });
+
+  it('returns 404 for unknown contractor', async () => {
+    mockQueryOne.mockResolvedValueOnce(null);
+
+    const app = buildAdminApp();
+    const res = await request(app)
+      .post('/admin/contractors/unknown-id/send-onboarding-accepted-email')
+      .send({});
+
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('NOT_FOUND');
+  });
+
+  it('returns 422 MISSING_EMAIL when contractor has no email', async () => {
+    mockQueryOne.mockResolvedValueOnce({ ...BASE_CONTRACTOR, email: null });
+
+    const app = buildAdminApp();
+    const res = await request(app)
+      .post('/admin/contractors/ctr-uuid-1/send-onboarding-accepted-email')
+      .send({});
+
+    expect(res.status).toBe(422);
+    expect(res.body.error).toBe('MISSING_EMAIL');
+    expect(mockSendContractorOnboardingAcceptedEmail).not.toHaveBeenCalled();
+  });
+
+  it('does not activate contractor or change is_active', async () => {
+    mockQueryOne.mockResolvedValueOnce(BASE_CONTRACTOR);
+
+    const app = buildAdminApp();
+    await request(app)
+      .post('/admin/contractors/ctr-uuid-1/send-onboarding-accepted-email')
+      .send({});
+
+    const allQueryCalls = mockQuery.mock.calls.map((c: any[]) => String(c[0]));
+    const activationCalls = allQueryCalls.filter((sql: string) => sql.includes('is_active'));
+    expect(activationCalls).toHaveLength(0);
   });
 });
