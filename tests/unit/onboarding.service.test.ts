@@ -170,15 +170,65 @@ describe('computeChecklist', () => {
     expect(c2.photo_id_received).toBe(true);
   });
 
-  it('signed_agreement_received requires both signature and checkbox', () => {
+  it('signed_agreement_received: legacy path — both signature and checkbox required', () => {
+    // Both present → true
     const payloadBoth = { ...BASE_PAYLOAD };
     expect(computeChecklist(payloadBoth, false, false).signed_agreement_received).toBe(true);
 
+    // Signature absent → false
     const payloadNoSig = { ...BASE_PAYLOAD, q20_q20_signature18: '' };
     expect(computeChecklist(payloadNoSig, false, false).signed_agreement_received).toBe(false);
 
+    // Checkbox absent → false
     const payloadNoCheck = { ...BASE_PAYLOAD, q19_q19_checkbox17: '' };
     expect(computeChecklist(payloadNoCheck, false, false).signed_agreement_received).toBe(false);
+  });
+
+  it('signed_agreement_received: uploadSigned49 only → true when signedAgreementUploaded=true', () => {
+    // No legacy signature fields, but uploadSigned49 file upload succeeded
+    const payloadUploadOnly = {
+      ...BASE_PAYLOAD,
+      q20_q20_signature18: '',   // legacy absent
+      q19_q19_checkbox17: '',    // legacy absent
+      uploadSigned49: 'https://jotform.com/signed_agreement.pdf',
+    };
+    // signedAgreementUploaded=false → still false (URL alone does not count)
+    expect(computeChecklist(payloadUploadOnly, false, false, false).signed_agreement_received).toBe(false);
+    // signedAgreementUploaded=true → true (upload succeeded)
+    expect(computeChecklist(payloadUploadOnly, false, false, true).signed_agreement_received).toBe(true);
+  });
+
+  it('signed_agreement_received: legacy only (no uploadSigned49) → true when legacy fields present', () => {
+    const payloadLegacyOnly = {
+      ...BASE_PAYLOAD,
+      uploadSigned49: undefined,  // new field absent
+    };
+    // signedAgreementUploaded defaults to false; legacy fields are present
+    expect(computeChecklist(payloadLegacyOnly, false, false).signed_agreement_received).toBe(true);
+  });
+
+  it('signed_agreement_received: neither legacy nor uploadSigned49 → false', () => {
+    const payloadNeither = {
+      ...BASE_PAYLOAD,
+      q20_q20_signature18: '',
+      q19_q19_checkbox17: '',
+      uploadSigned49: undefined,
+    };
+    expect(computeChecklist(payloadNeither, false, false, false).signed_agreement_received).toBe(false);
+  });
+
+  it('W-9, Photo ID, Insurance, Other Document mappings unaffected by uploadSigned49 changes', () => {
+    const payload = {
+      ...BASE_PAYLOAD,
+      uploadSigned49: 'https://jotform.com/signed.pdf',
+    };
+    const c = computeChecklist(payload, true, true, true);
+    expect(c.w9_received).toBe(true);
+    expect(c.photo_id_received).toBe(true);
+    expect(c.payment_setup_complete).toBe(true);
+    expect(c.sms_consent_confirmed).toBe(true);
+    expect(c.tools_transportation_confirmed).toBe(true);
+    expect(c.contractor_handbook_acknowledged).toBe(true);
   });
 });
 

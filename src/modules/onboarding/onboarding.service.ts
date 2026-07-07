@@ -66,8 +66,9 @@ export interface OnboardingPayload {
   q29_fileupload27?: string | string[];  // Photo ID
   q30_fileupload28?: string | string[];  // Proof of Insurance
   q31_fileupload29?: string | string[];  // Other document
+  uploadSigned49?: string | string[];    // Signed Contractor Agreement upload (new field)
   // Checklist fields
-  q20_q20_signature18?: string;          // Signature (existence check only)
+  q20_q20_signature18?: string;          // Legacy signature (existence check only)
   q19_q19_checkbox17?: string;           // Agreement acknowledgment
   q36_iAgree?: string;                   // SMS consent
   q14_q14_checkbox12?: string;           // Transportation
@@ -109,10 +110,20 @@ export function isChecked(value: unknown): boolean {
 }
 
 /** Compute checklist booleans from the raw Jotform payload. */
-export function computeChecklist(payload: OnboardingPayload, w9Uploaded: boolean, photoIdUploaded: boolean) {
+export function computeChecklist(
+  payload: OnboardingPayload,
+  w9Uploaded: boolean,
+  photoIdUploaded: boolean,
+  signedAgreementUploaded: boolean = false,
+) {
+  // Signed agreement is received if EITHER:
+  //   (a) legacy: both the signature field and the checkbox are present/truthy, OR
+  //   (b) new: the uploadSigned49 file was successfully downloaded, validated,
+  //       uploaded to Google Drive, and metadata saved (signedAgreementUploaded=true).
+  const legacySignature =
+    isChecked(payload.q20_q20_signature18) && isChecked(payload.q19_q19_checkbox17);
   return {
-    signed_agreement_received:
-      isChecked(payload.q20_q20_signature18) && isChecked(payload.q19_q19_checkbox17),
+    signed_agreement_received: legacySignature || signedAgreementUploaded,
     w9_received: w9Uploaded,
     photo_id_received: photoIdUploaded,
     payment_setup_complete: isChecked(payload.q25_q25_checkbox23),
@@ -294,6 +305,29 @@ export async function processOnboardingSubmission(
   let insuranceFileUrl: string | null = null;
   let otherDocFileId: string | null = null;
   let otherDocFileUrl: string | null = null;
+  let signedAgreementFileId: string | null = null;
+  let signedAgreementFileUrl: string | null = null;
+
+  // Signed Contractor Agreement upload (new uploadSigned49 field — optional,
+  // takes precedence over legacy q20/q19 signature for the file-based path)
+  const signedAgreementUrl = extractFileUrl(payload.uploadSigned49);
+  if (signedAgreementUrl) {
+    try {
+      const file = await downloadAndUploadFile({
+        sourceUrl: signedAgreementUrl,
+        fileName: `SignedAgreement_${airtableRecordId}.pdf`,
+        folderId: folder.id,
+        jotformApiKey,
+      });
+      signedAgreementFileId = file.id;
+      signedAgreementFileUrl = file.webViewLink;
+      processedFiles.push('Signed Agreement');
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      log.error({ err, submissionId }, '[Onboarding] Signed agreement upload failed');
+      errors.push(`Signed Agreement: ${msg}`);
+    }
+  }
 
   // W-9 (required)
   const w9Url = extractFileUrl(payload.q24_fileupload22);
@@ -376,7 +410,12 @@ export async function processOnboardingSubmission(
   }
 
   // ── 7. Compute checklist and status ──────────────────────────────────────
-  const checklist = computeChecklist(payload, w9FileId !== null, photoIdFileId !== null);
+  const checklist = computeChecklist(
+    payload,
+    w9FileId !== null,
+    photoIdFileId !== null,
+    signedAgreementFileId !== null,
+  );
   const documentStatus = computeDocumentStatus(checklist);
 
   // ── 8. Persist metadata to Postgres ──────────────────────────────────────
@@ -396,10 +435,12 @@ export async function processOnboardingSubmission(
        signed_agreement_received, w9_received, photo_id_received,
        payment_setup_complete, sms_consent_confirmed,
        tools_transportation_confirmed, contractor_handbook_acknowledged,
-       document_status, processing_error, processed_at
+       document_status, processing_error, processed_at,
+       signed_agreement_file_id, signed_agreement_file_url
      ) VALUES (
        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
-       $16, $17, $18, $19, $20, $21, $22, $23, $24, NOW()
+       $16, $17, $18, $19, $20, $21, $22, $23, $24, NOW(),
+       $25, $26
      )`,
     [
       backendContractorId,
@@ -426,6 +467,8 @@ export async function processOnboardingSubmission(
       checklist.contractor_handbook_acknowledged,
       documentStatus,
       processingError,
+      signedAgreementFileId,
+      signedAgreementFileUrl,
     ],
   );
 

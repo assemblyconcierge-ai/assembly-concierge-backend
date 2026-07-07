@@ -736,4 +736,17 @@ CREATE INDEX IF NOT EXISTS contractor_onboarding_docs_contractor_idx
   ON contractor_onboarding_documents(contractor_id);
 `,
   },
+  {
+    filename: '022_add_signed_agreement_file_columns.sql',
+    sql: `
+-- Migration 022: Add signed agreement file metadata columns to
+-- contractor_onboarding_documents. These are populated when the contractor
+-- uploads a signed agreement via the new uploadSigned49 Jotform field.
+-- The legacy q20/q19 signature path does not produce a file, so these
+-- columns remain NULL for legacy submissions.
+ALTER TABLE contractor_onboarding_documents
+  ADD COLUMN IF NOT EXISTS signed_agreement_file_id  TEXT,
+  ADD COLUMN IF NOT EXISTS signed_agreement_file_url TEXT;
+`,
+  },
 ];
