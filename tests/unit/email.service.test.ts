@@ -353,8 +353,39 @@ describe('renderContractorOnboardingEmail', () => {
     expect(html).not.toContain('<b>Hacker</b>');
     expect(html).toContain('&lt;b&gt;Hacker&lt;/b&gt;');
   });
-});
 
+  it('contains a generic hidden preheader positioned before the greeting, with no contractor name in it', () => {
+    const html = renderContractorOnboardingEmail({
+      contractorName: 'Marcus Johnson',
+      onboardingFormUrl: 'https://form.jotform.com/test',
+    });
+
+    const preheaderText = 'Complete your Assembly Concierge contractor onboarding.';
+    const preheaderIndex = html.indexOf(preheaderText);
+    const greetingIndex = html.indexOf('Marcus Johnson');
+
+    expect(preheaderIndex).toBeGreaterThan(-1);
+    expect(greetingIndex).toBeGreaterThan(-1);
+    expect(preheaderIndex).toBeLessThan(greetingIndex);
+
+    const preheaderDivStart = html.lastIndexOf('<div', preheaderIndex);
+    const preheaderDivEnd = html.indexOf('</div>', preheaderIndex);
+    const preheaderBlock = html.slice(preheaderDivStart, preheaderDivEnd);
+
+    expect(preheaderBlock).not.toContain('Marcus Johnson');
+  });
+
+  it('places the preheader as the first element inside <body>', () => {
+    const html = renderContractorOnboardingEmail({
+      contractorName: 'Marcus Johnson',
+      onboardingFormUrl: 'https://form.jotform.com/test',
+    });
+
+    expect(html).toMatch(
+      /<body[^>]*>\s*<div[^>]*>Complete your Assembly Concierge contractor onboarding\.<\/div>/,
+    );
+  });
+});
 // ══════════════════════════════════════════════════════════════════════════════
 // 4. sendCustomerCompletionEmail — INSERT-first idempotency
 // ══════════════════════════════════════════════════════════════════════════════
@@ -570,6 +601,35 @@ describe('sendContractorOnboardingEmail', () => {
 
     expect(sendViaResend).toHaveBeenCalledOnce();
     expect(result.providerMessageId).toBe('resend-msg-002');
+
+    // Reset
+    (config as Record<string, unknown>).EMAIL_SEND_MODE = 'log_only';
+    (config as Record<string, unknown>).RESEND_API_KEY = '';
+  });
+
+  it('does not leak a stale contractor name into subject or html for George Jefferson', async () => {
+    (config as Record<string, unknown>).EMAIL_SEND_MODE = 'send';
+    (config as Record<string, unknown>).RESEND_API_KEY = 'test-key';
+
+    vi.mocked(reserveEmailEvent).mockResolvedValueOnce({
+      row: CONTRACTOR_PENDING_EVENT,
+      alreadyExists: false,
+    });
+    vi.mocked(sendViaResend).mockResolvedValueOnce({ id: 'resend-msg-003' });
+    vi.mocked(markEmailEventSent).mockResolvedValueOnce(undefined);
+
+    await sendContractorOnboardingEmail({
+      contractorId: 'ctr-002',
+      contractorName: 'George Jefferson',
+      contractorEmail: 'george@example.com',
+    });
+
+    expect(sendViaResend).toHaveBeenCalledOnce();
+    const [, sentPayload] = vi.mocked(sendViaResend).mock.calls[0];
+
+    expect(sentPayload.subject).not.toContain('Karl Kani');
+    expect(sentPayload.html).not.toContain('Karl Kani');
+    expect(sentPayload.html).toContain('George Jefferson');
 
     // Reset
     (config as Record<string, unknown>).EMAIL_SEND_MODE = 'log_only';
