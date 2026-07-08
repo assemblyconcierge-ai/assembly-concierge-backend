@@ -241,6 +241,7 @@ const ACTIVATION_REQUIRED_FIELDS = [
   'toolsTransportationConfirmed',
   'handbookAcknowledged',
   'photoIdReceived',
+  'onboardingDocumentsAccepted',
 ] as const;
 
 type ActivationField = typeof ACTIVATION_REQUIRED_FIELDS[number];
@@ -261,6 +262,8 @@ adminRouter.post('/contractors/:id/activate', requireAdmin, async (req: Request,
       toolsTransportationConfirmed:  z.boolean().optional(),
       handbookAcknowledged:          z.boolean().optional(),
       photoIdReceived:               z.boolean().optional(),
+      // Phase 3 — owner/admin must explicitly accept onboarding documents before activation
+      onboardingDocumentsAccepted:   z.boolean().optional(),
       // Optional — if provided must match :id
       backendContractorId:           z.string().optional(),
     });

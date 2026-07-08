@@ -325,7 +325,7 @@ describe('POST /admin/contractors/:id/activate', () => {
   const app = buildApp();
   const CONTRACTOR_ID = 'contractor-uuid-activate';
 
-  /** All 10 required readiness fields set to true. */
+  /** All 11 required readiness fields set to true (Phase 3 adds onboardingDocumentsAccepted). */
   const FULL_READINESS_PAYLOAD = {
     activationRequested:          true,
     onboardingComplete:           true,
@@ -337,6 +337,7 @@ describe('POST /admin/contractors/:id/activate', () => {
     toolsTransportationConfirmed: true,
     handbookAcknowledged:         true,
     photoIdReceived:              true,
+    onboardingDocumentsAccepted:  true,
   };
 
   beforeEach(() => {
@@ -429,7 +430,8 @@ describe('POST /admin/contractors/:id/activate', () => {
       .send(partialPayload);
 
     expect(res.status).toBe(422);
-    expect(res.body.missingRequirements).toHaveLength(8);
+    // 9 fields missing: the original 8 plus onboardingDocumentsAccepted (Phase 3)
+    expect(res.body.missingRequirements).toHaveLength(9);
     expect(res.body.missingRequirements).toContain('activationReady');
     expect(res.body.missingRequirements).toContain('agreementReceived');
     expect(res.body.missingRequirements).toContain('w9Received');
@@ -438,6 +440,7 @@ describe('POST /admin/contractors/:id/activate', () => {
     expect(res.body.missingRequirements).toContain('toolsTransportationConfirmed');
     expect(res.body.missingRequirements).toContain('handbookAcknowledged');
     expect(res.body.missingRequirements).toContain('photoIdReceived');
+    expect(res.body.missingRequirements).toContain('onboardingDocumentsAccepted');
     expect(mockQuery).not.toHaveBeenCalled();
   });
 
@@ -514,6 +517,85 @@ describe('POST /admin/contractors/:id/activate', () => {
         actorType: 'admin',
       }),
     );
+  });
+
+  // ── Phase 3 — onboardingDocumentsAccepted gate ──────────────────────────────────
+
+  it('Phase 3: returns 422 Blocked when onboardingDocumentsAccepted is missing', async () => {
+    const { onboardingDocumentsAccepted: _omit, ...payloadWithout } = FULL_READINESS_PAYLOAD;
+
+    const res = await request(app)
+      .post(`/admin/contractors/${CONTRACTOR_ID}/activate`)
+      .send(payloadWithout);
+
+    expect(res.status).toBe(422);
+    expect(res.body.ok).toBe(false);
+    expect(res.body.activationStatus).toBe('Blocked - Missing Info');
+    expect(res.body.missingRequirements).toContain('onboardingDocumentsAccepted');
+    expect(mockQuery).not.toHaveBeenCalled();
+  });
+
+  it('Phase 3: returns 422 Blocked when onboardingDocumentsAccepted is false', async () => {
+    const res = await request(app)
+      .post(`/admin/contractors/${CONTRACTOR_ID}/activate`)
+      .send({ ...FULL_READINESS_PAYLOAD, onboardingDocumentsAccepted: false });
+
+    expect(res.status).toBe(422);
+    expect(res.body.ok).toBe(false);
+    expect(res.body.activationStatus).toBe('Blocked - Missing Info');
+    expect(res.body.missingRequirements).toContain('onboardingDocumentsAccepted');
+    expect(mockQuery).not.toHaveBeenCalled();
+  });
+
+  it('Phase 3: activation succeeds when all 11 fields are true including onboardingDocumentsAccepted', async () => {
+    mockQuery.mockResolvedValueOnce([{ id: CONTRACTOR_ID, is_active: false }]);
+    mockQuery.mockResolvedValueOnce([]);
+
+    const res = await request(app)
+      .post(`/admin/contractors/${CONTRACTOR_ID}/activate`)
+      .send(FULL_READINESS_PAYLOAD);
+
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(res.body.activationStatus).toBe('Activated');
+    expect(res.body.isActive).toBe(true);
+    expect(res.body.missingRequirements).toHaveLength(0);
+  });
+
+  it('Phase 3: failed activation (missing onboardingDocumentsAccepted) does not set contractor active', async () => {
+    const { onboardingDocumentsAccepted: _omit, ...payloadWithout } = FULL_READINESS_PAYLOAD;
+
+    const res = await request(app)
+      .post(`/admin/contractors/${CONTRACTOR_ID}/activate`)
+      .send(payloadWithout);
+
+    expect(res.status).toBe(422);
+    // DB must never have been queried — no SELECT, no UPDATE
+    expect(mockQuery).not.toHaveBeenCalled();
+  });
+
+  it('Phase 3: failed activation (onboardingDocumentsAccepted=false) does not set active contractor status', async () => {
+    const res = await request(app)
+      .post(`/admin/contractors/${CONTRACTOR_ID}/activate`)
+      .send({ ...FULL_READINESS_PAYLOAD, onboardingDocumentsAccepted: false });
+
+    expect(res.status).toBe(422);
+    expect(res.body.isActive).toBeUndefined();
+    // No UPDATE issued
+    expect(mockQuery).not.toHaveBeenCalled();
+  });
+
+  it('Phase 3: existing activation failure behavior still works for other missing fields (w9Received)', async () => {
+    const { w9Received: _omit, ...payloadMissingW9 } = FULL_READINESS_PAYLOAD;
+
+    const res = await request(app)
+      .post(`/admin/contractors/${CONTRACTOR_ID}/activate`)
+      .send(payloadMissingW9);
+
+    expect(res.status).toBe(422);
+    expect(res.body.missingRequirements).toContain('w9Received');
+    expect(res.body.missingRequirements).not.toContain('onboardingDocumentsAccepted');
+    expect(mockQuery).not.toHaveBeenCalled();
   });
 
   // ── SQL correctness ──────────────────────────────────────────────────────────────
