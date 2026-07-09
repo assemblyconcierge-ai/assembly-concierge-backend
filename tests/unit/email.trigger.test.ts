@@ -28,6 +28,8 @@ const {
   mockSendContractorOnboardingEmail,
   mockSendContractorMissingDocsEmail,
   mockSendContractorOnboardingAcceptedEmail,
+  mockSendContractorActivatedEmail,
+  mockRequireAdmin,
   mockRecordAuditEvent,
   mockGetJobById,
   mockGetPaymentsByJobId,
@@ -39,6 +41,8 @@ const {
   mockSendContractorOnboardingEmail: vi.fn().mockResolvedValue({ eventId: 'evt-2', mode: 'log_only', alreadySent: false, jotformUrl: 'https://form.jotform.com/test?contractorId=ctr-uuid-1' }),
   mockSendContractorMissingDocsEmail: vi.fn().mockResolvedValue({ eventId: 'evt-3', mode: 'log_only', alreadySent: false }),
   mockSendContractorOnboardingAcceptedEmail: vi.fn().mockResolvedValue({ eventId: 'evt-4', mode: 'log_only', alreadySent: false }),
+  mockSendContractorActivatedEmail:          vi.fn().mockResolvedValue({ eventId: 'evt-5', mode: 'log_only', alreadySent: false }),
+  mockRequireAdmin:                          vi.fn((_req: any, _res: any, next: any) => next()),
   mockRecordAuditEvent:             vi.fn().mockResolvedValue(undefined),
   mockGetJobById:                   vi.fn(),
   mockGetPaymentsByJobId:           vi.fn(),
@@ -55,6 +59,7 @@ vi.mock('../../src/modules/email/email.service', () => ({
   sendContractorOnboardingEmail:            mockSendContractorOnboardingEmail,
   sendContractorMissingDocsEmail:           mockSendContractorMissingDocsEmail,
   sendContractorOnboardingAcceptedEmail:    mockSendContractorOnboardingAcceptedEmail,
+  sendContractorActivatedEmail:             mockSendContractorActivatedEmail,
 }));
 vi.mock('../../src/modules/audit/audit.service', () => ({
   recordAuditEvent: mockRecordAuditEvent,
@@ -95,7 +100,7 @@ vi.mock('../../src/modules/service-areas/serviceArea.service', () => ({
   upsertServiceArea:  vi.fn(),
 }));
 vi.mock('../../src/common/middleware/auth', () => ({
-  requireAdmin: (_req: any, _res: any, next: any) => next(),
+  requireAdmin: mockRequireAdmin,
   requireAuth:  (_req: any, _res: any, next: any) => next(),
 }));
 vi.mock('../../src/common/logger', () => ({
@@ -617,6 +622,160 @@ describe('POST /admin/contractors/:id/send-onboarding-accepted-email', () => {
     const app = buildAdminApp();
     await request(app)
       .post('/admin/contractors/ctr-uuid-1/send-onboarding-accepted-email')
+      .send({});
+
+    const allQueryCalls = mockQuery.mock.calls.map((c: any[]) => String(c[0]));
+    const activationCalls = allQueryCalls.filter((sql: string) => sql.includes('is_active'));
+    expect(activationCalls).toHaveLength(0);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 5. POST /admin/contractors/:id/send-activated-email
+// ─────────────────────────────────────────────────────────────────────────────
+describe('POST /admin/contractors/:id/send-activated-email', () => {
+  const ACTIVE_CONTRACTOR = { ...BASE_CONTRACTOR, is_active: true };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockQueryOne.mockReset();
+    mockQuery.mockReset();
+    mockSendContractorActivatedEmail.mockReset();
+    mockSendContractorActivatedEmail.mockResolvedValue({ eventId: 'evt-5', alreadySent: false });
+    mockQuery.mockResolvedValue([]);
+    mockQueryOne.mockResolvedValue(null);
+    // Reset requireAdmin to pass-through by default
+    mockRequireAdmin.mockImplementation((_req: any, _res: any, next: any) => next());
+  });
+
+  it('returns 200 and sends activated email (log_only mode)', async () => {
+    mockQueryOne.mockResolvedValueOnce(ACTIVE_CONTRACTOR);
+
+    const app = buildAdminApp();
+    const res = await request(app)
+      .post('/admin/contractors/ctr-uuid-1/send-activated-email')
+      .send({});
+
+    expect(res.status).toBe(200);
+    expect(res.body.alreadySent).toBe(false);
+    expect(res.body.eventId).toBe('evt-5');
+    expect(res.body.status).toMatch(/^(sent|logged)$/);
+    expect(mockSendContractorActivatedEmail).toHaveBeenCalledWith(
+      expect.objectContaining({
+        contractorId:    'ctr-uuid-1',
+        contractorName:  'Marcus Johnson',
+        contractorEmail: 'marcus@example.com',
+        forceResend:     false,
+      }),
+    );
+  });
+
+  it('returns 200 alreadySent=true when email already sent and forceResend=false', async () => {
+    mockQueryOne.mockResolvedValueOnce(ACTIVE_CONTRACTOR);
+    mockSendContractorActivatedEmail.mockResolvedValue({ eventId: 'evt-5', alreadySent: true });
+
+    const app = buildAdminApp();
+    const res = await request(app)
+      .post('/admin/contractors/ctr-uuid-1/send-activated-email')
+      .send({});
+
+    expect(res.status).toBe(200);
+    expect(res.body.alreadySent).toBe(true);
+    expect(res.body.status).toBe('already_sent');
+    expect(res.body.message).toMatch(/already sent/i);
+  });
+
+  it('returns 200 and resends when forceResend=true', async () => {
+    mockQueryOne.mockResolvedValueOnce(ACTIVE_CONTRACTOR);
+    mockSendContractorActivatedEmail.mockResolvedValue({ eventId: 'evt-5b', alreadySent: false });
+
+    const app = buildAdminApp();
+    const res = await request(app)
+      .post('/admin/contractors/ctr-uuid-1/send-activated-email')
+      .send({ forceResend: true });
+
+    expect(res.status).toBe(200);
+    expect(res.body.alreadySent).toBe(false);
+    expect(mockSendContractorActivatedEmail).toHaveBeenCalledWith(
+      expect.objectContaining({ forceResend: true }),
+    );
+  });
+
+  it('returns 422 NOT_ACTIVE when contractor is not active', async () => {
+    mockQueryOne.mockResolvedValueOnce({ ...BASE_CONTRACTOR, is_active: false });
+
+    const app = buildAdminApp();
+    const res = await request(app)
+      .post('/admin/contractors/ctr-uuid-1/send-activated-email')
+      .send({});
+
+    expect(res.status).toBe(422);
+    expect(res.body.error).toBe('NOT_ACTIVE');
+    expect(mockSendContractorActivatedEmail).not.toHaveBeenCalled();
+  });
+
+  it('returns 404 for unknown contractor', async () => {
+    mockQueryOne.mockResolvedValueOnce(null);
+
+    const app = buildAdminApp();
+    const res = await request(app)
+      .post('/admin/contractors/unknown-id/send-activated-email')
+      .send({});
+
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('NOT_FOUND');
+  });
+
+  it('returns 422 MISSING_EMAIL when contractor has no email', async () => {
+    mockQueryOne.mockResolvedValueOnce({ ...ACTIVE_CONTRACTOR, email: null });
+
+    const app = buildAdminApp();
+    const res = await request(app)
+      .post('/admin/contractors/ctr-uuid-1/send-activated-email')
+      .send({});
+
+    expect(res.status).toBe(422);
+    expect(res.body.error).toBe('MISSING_EMAIL');
+    expect(mockSendContractorActivatedEmail).not.toHaveBeenCalled();
+  });
+
+  it('returns 401 when no auth token is provided', async () => {
+    mockRequireAdmin.mockImplementationOnce((_req: any, res: any, _next: any) => {
+      res.status(401).json({ error: 'UNAUTHORIZED', message: 'Admin authentication required' });
+    });
+
+    const app = buildAdminApp();
+    const res = await request(app)
+      .post('/admin/contractors/ctr-uuid-1/send-activated-email')
+      .send({});
+
+    expect(res.status).toBe(401);
+    expect(res.body.error).toBe('UNAUTHORIZED');
+    expect(mockSendContractorActivatedEmail).not.toHaveBeenCalled();
+  });
+
+  it('returns 403 when wrong auth token is provided', async () => {
+    mockRequireAdmin.mockImplementationOnce((_req: any, res: any, _next: any) => {
+      res.status(403).json({ error: 'FORBIDDEN', message: 'Invalid admin token' });
+    });
+
+    const app = buildAdminApp();
+    const res = await request(app)
+      .post('/admin/contractors/ctr-uuid-1/send-activated-email')
+      .set('Authorization', 'Bearer wrong-token')
+      .send({});
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe('FORBIDDEN');
+    expect(mockSendContractorActivatedEmail).not.toHaveBeenCalled();
+  });
+
+  it('does not alter is_active when sending activated email', async () => {
+    mockQueryOne.mockResolvedValueOnce(ACTIVE_CONTRACTOR);
+
+    const app = buildAdminApp();
+    await request(app)
+      .post('/admin/contractors/ctr-uuid-1/send-activated-email')
       .send({});
 
     const allQueryCalls = mockQuery.mock.calls.map((c: any[]) => String(c[0]));

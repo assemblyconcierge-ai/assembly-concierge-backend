@@ -52,10 +52,12 @@ import {
   renderContractorOnboardingEmail,
   renderContractorMissingDocsEmail,
   renderContractorOnboardingAcceptedEmail,
+  renderContractorActivatedEmail,
   sendCustomerCompletionEmail,
   sendContractorOnboardingEmail,
   sendContractorMissingDocsEmail,
   sendContractorOnboardingAcceptedEmail,
+  sendContractorActivatedEmail,
 } from '../../src/modules/email/email.service';
 
 import {
@@ -1011,6 +1013,154 @@ describe('sendContractorOnboardingAcceptedEmail', () => {
     });
 
     await sendContractorOnboardingAcceptedEmail({
+      contractorId: 'ctr-001',
+      contractorName: 'George Jefferson',
+      contractorEmail: 'george@example.com',
+    });
+
+    expect(reserveEmailEvent).toHaveBeenCalledOnce();
+    expect(reserveEmailEventForResend).not.toHaveBeenCalled();
+    expect(sendViaResend).not.toHaveBeenCalled();
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────────────
+// Phase 3 — renderContractorActivatedEmail
+// ────────────────────────────────────────────────────────────────────────────────
+
+describe('renderContractorActivatedEmail', () => {
+  it('includes contractor name', () => {
+    const html = renderContractorActivatedEmail({ contractorName: 'George Jefferson' });
+    expect(html).toContain('George Jefferson');
+  });
+
+  it('does not include contractor name in the preheader', () => {
+    const html = renderContractorActivatedEmail({ contractorName: 'George Jefferson' });
+    const preheaderMatch = html.match(/display:none[^>]*>([^<]+)</);
+    expect(preheaderMatch).not.toBeNull();
+    expect(preheaderMatch![1]).not.toContain('George Jefferson');
+  });
+
+  it('contains activated messaging', () => {
+    const html = renderContractorActivatedEmail({ contractorName: 'George Jefferson' });
+    expect(html).toContain('activated');
+    expect(html).toContain('dispatch');
+    expect(html).not.toContain('jotform.com');
+  });
+
+  it('does not contain another contractor name', () => {
+    const html = renderContractorActivatedEmail({ contractorName: 'George Jefferson' });
+    expect(html).not.toContain('Jane Doe');
+  });
+
+  it('HTML-escapes contractor name', () => {
+    const html = renderContractorActivatedEmail({ contractorName: '<b>Test</b>' });
+    expect(html).not.toContain('<b>Test</b>');
+    expect(html).toContain('&lt;b&gt;Test&lt;/b&gt;');
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────────────
+// Phase 3 — sendContractorActivatedEmail
+// ────────────────────────────────────────────────────────────────────────────────
+
+const ACTIVATED_PENDING_EVENT: import('../../src/modules/email/email_events.repository').EmailEventRow = {
+  id: 'evt-activated-001',
+  event_type: 'contractor_activated',
+  recipient_email: 'george@example.com',
+  recipient_type: 'contractor' as const,
+  related_job_id: null,
+  related_contractor_id: 'ctr-001',
+  status: 'pending' as const,
+  provider_message_id: null,
+  created_at: new Date(),
+  sent_at: null,
+  error_message: null,
+};
+
+describe('sendContractorActivatedEmail', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('returns alreadySent=true when event already exists and forceResend=false', async () => {
+    vi.mocked(reserveEmailEvent).mockResolvedValueOnce({
+      row: ACTIVATED_PENDING_EVENT,
+      alreadyExists: true,
+    });
+
+    const result = await sendContractorActivatedEmail({
+      contractorId: 'ctr-001',
+      contractorName: 'George Jefferson',
+      contractorEmail: 'george@example.com',
+    });
+
+    expect(result.alreadySent).toBe(true);
+    expect(result.eventId).toBe('evt-activated-001');
+    expect(sendViaResend).not.toHaveBeenCalled();
+  });
+
+  it('sends email with correct subject and contractor name in send mode', async () => {
+    vi.mocked(reserveEmailEvent).mockResolvedValueOnce({
+      row: ACTIVATED_PENDING_EVENT,
+      alreadyExists: false,
+    });
+    vi.mocked(sendViaResend).mockResolvedValueOnce({ id: 'resend-msg-activated-001' });
+    vi.mocked(markEmailEventSent).mockResolvedValueOnce(undefined);
+
+    (config as Record<string, unknown>).EMAIL_SEND_MODE = 'send';
+    (config as Record<string, unknown>).RESEND_API_KEY = 'test-key';
+
+    const result = await sendContractorActivatedEmail({
+      contractorId: 'ctr-001',
+      contractorName: 'George Jefferson',
+      contractorEmail: 'george@example.com',
+    });
+
+    expect(result.alreadySent).toBe(false);
+    expect(result.providerMessageId).toBe('resend-msg-activated-001');
+    expect(sendViaResend).toHaveBeenCalledOnce();
+    const [, sentPayload] = vi.mocked(sendViaResend).mock.calls[0];
+    expect(sentPayload.subject).toContain('Activated');
+    expect(sentPayload.html).toContain('George Jefferson');
+    expect(sentPayload.html).toContain('activated');
+    expect(sentPayload.html).not.toContain('jotform.com');
+
+    (config as Record<string, unknown>).EMAIL_SEND_MODE = 'log_only';
+    (config as Record<string, unknown>).RESEND_API_KEY = '';
+  });
+
+  it('uses forceResend path and generates fresh idempotency key', async () => {
+    vi.mocked(reserveEmailEventForResend).mockResolvedValueOnce(ACTIVATED_PENDING_EVENT);
+    vi.mocked(sendViaResend).mockResolvedValueOnce({ id: 'resend-msg-activated-002' });
+    vi.mocked(markEmailEventSent).mockResolvedValueOnce(undefined);
+
+    (config as Record<string, unknown>).EMAIL_SEND_MODE = 'send';
+    (config as Record<string, unknown>).RESEND_API_KEY = 'test-key';
+
+    await sendContractorActivatedEmail({
+      contractorId: 'ctr-001',
+      contractorName: 'George Jefferson',
+      contractorEmail: 'george@example.com',
+      forceResend: true,
+    });
+
+    expect(reserveEmailEventForResend).toHaveBeenCalledOnce();
+    const [, sentPayload] = vi.mocked(sendViaResend).mock.calls[0];
+    expect(sentPayload.idempotencyKey).toBeDefined();
+    expect(sentPayload.idempotencyKey).not.toBe('evt-activated-001');
+
+    (config as Record<string, unknown>).EMAIL_SEND_MODE = 'log_only';
+    (config as Record<string, unknown>).RESEND_API_KEY = '';
+  });
+
+  it('does not activate contractor (only calls email_events repository)', async () => {
+    vi.mocked(reserveEmailEvent).mockResolvedValueOnce({
+      row: ACTIVATED_PENDING_EVENT,
+      alreadyExists: false,
+    });
+
+    await sendContractorActivatedEmail({
       contractorId: 'ctr-001',
       contractorName: 'George Jefferson',
       contractorEmail: 'george@example.com',

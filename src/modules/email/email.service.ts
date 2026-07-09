@@ -38,6 +38,7 @@ export const EMAIL_EVENT_TYPES = {
   CONTRACTOR_ONBOARDING:          'contractor_onboarding',
   CONTRACTOR_MISSING_DOCS:        'contractor_missing_docs',
   CONTRACTOR_ONBOARDING_ACCEPTED: 'contractor_onboarding_accepted',
+  CONTRACTOR_ACTIVATED:           'contractor_activated',
 } as const;
 
 export type EmailEventType = (typeof EMAIL_EVENT_TYPES)[keyof typeof EMAIL_EVENT_TYPES];
@@ -740,6 +741,133 @@ export async function sendContractorOnboardingAcceptedEmail(
     event,
     to:      params.contractorEmail,
     subject: 'Assembly Concierge — Onboarding Documents Accepted',
+    html,
+    resendIdempotencyKey,
+    logContext: { eventType, contractorId: params.contractorId, forceResend: params.forceResend ?? false },
+  });
+}
+
+export interface SendContractorActivatedEmailParams {
+  contractorId: string;
+  contractorName: string;
+  contractorEmail: string;
+  /** If true, reset the event row to pending and resend even if already sent */
+  forceResend?: boolean;
+}
+
+/**
+ * Render the contractor-activated HTML email.
+ */
+export function renderContractorActivatedEmail(params: { contractorName: string }): string {
+  const { contractorName } = params;
+  const esc = (s: string) =>
+    s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+  <title>Assembly Concierge — Contractor Account Activated</title>
+</head>
+<body style="margin:0;padding:0;background-color:#f4f4f4;font-family:Arial,Helvetica,sans-serif;">
+  <div style="display:none;max-height:0;overflow:hidden;mso-hide:all;font-size:1px;line-height:1px;color:#f4f4f4;opacity:0;">Your Assembly Concierge contractor account has been activated.</div>
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#f4f4f4;padding:32px 16px;">
+    <tr><td align="center">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:600px;background-color:#ffffff;border-radius:6px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.08);">
+        <tr>
+          <td style="background-color:#1a1a1a;padding:28px 32px;">
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+              <tr>
+                <td><span style="font-size:22px;font-weight:700;color:#FFD700;letter-spacing:0.5px;">Assembly Concierge</span></td>
+                <td align="right"><span style="font-size:12px;color:#999999;letter-spacing:1px;text-transform:uppercase;">Contractor Activation</span></td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+        <tr><td style="background-color:#FFD700;height:4px;font-size:0;line-height:0;"></td></tr>
+        <tr>
+          <td style="padding:36px 32px 28px 32px;">
+            <p style="margin:0 0 20px 0;font-size:16px;color:#1a1a1a;line-height:1.5;">Hi ${esc(contractorName)},</p>
+            <p style="margin:0 0 16px 0;font-size:16px;color:#1a1a1a;line-height:1.6;">Your Assembly Concierge contractor account has been <strong>activated</strong>.</p>
+            <p style="margin:0 0 16px 0;font-size:15px;color:#444444;line-height:1.7;">You are now eligible to receive job dispatch opportunities when work matches your approved services, coverage area, and availability.</p>
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 24px 0;background-color:#fffbea;border:1px solid #ffe57f;border-radius:4px;">
+              <tr><td style="padding:14px 18px;">
+                <p style="margin:0;font-size:13px;color:#5a4a00;line-height:1.6;"><strong>What to expect:</strong> Please monitor your phone and SMS for dispatch notifications. Accept only jobs you can complete professionally and on time. Follow the expectations outlined in the Contractor Handbook.</p>
+              </td></tr>
+            </table>
+            <p style="margin:0 0 16px 0;font-size:14px;color:#666666;line-height:1.6;">Job volume and dispatch frequency depend on service area demand, your availability, and approved service types. We cannot guarantee immediate dispatches, but we will notify you as matching opportunities arise.</p>
+            <p style="margin:0;font-size:13px;color:#888888;line-height:1.6;">Thank you for completing onboarding. Questions? Reply to this email or reach us at <a href="mailto:support@assemblyconcierge.com" style="color:#1a1a1a;font-weight:600;text-decoration:none;">support@assemblyconcierge.com</a>.</p>
+          </td>
+        </tr>
+        <tr>
+          <td style="background-color:#f0f0f0;border-top:1px solid #e0e0e0;padding:20px 32px;">
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+              <tr>
+                <td style="font-size:11px;color:#aaaaaa;line-height:1.6;">Assembly Concierge &nbsp;&middot;&nbsp; McDonough / Henry County, GA<br /><a href="mailto:support@assemblyconcierge.com" style="color:#aaaaaa;text-decoration:underline;">support@assemblyconcierge.com</a> &nbsp;&middot;&nbsp; <a href="https://assemblyconcierge.com" style="color:#aaaaaa;text-decoration:underline;">assemblyconcierge.com</a></td>
+                <td align="right" style="font-size:11px;color:#cccccc;white-space:nowrap;">Contractor Activation</td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>`;
+}
+
+/**
+ * Send (or log) the contractor-activated email.
+ *
+ * Idempotency: INSERT ON CONFLICT DO NOTHING unless forceResend=true.
+ * Does NOT activate the contractor or alter is_active.
+ * Only sends if contractor is already active — callers must verify is_active before calling.
+ */
+export async function sendContractorActivatedEmail(
+  params: SendContractorActivatedEmailParams,
+): Promise<EmailSendResult> {
+  const eventType = EMAIL_EVENT_TYPES.CONTRACTOR_ACTIVATED;
+
+  let event: EmailEventRow;
+  let alreadyExists: boolean;
+
+  if (params.forceResend) {
+    event = await reserveEmailEventForResend({
+      recipientEmail:      params.contractorEmail,
+      recipientType:       'contractor',
+      eventType,
+      relatedContractorId: params.contractorId,
+    });
+    alreadyExists = false;
+  } else {
+    const result = await reserveEmailEvent({
+      recipientEmail:      params.contractorEmail,
+      recipientType:       'contractor',
+      eventType,
+      relatedContractorId: params.contractorId,
+    });
+    event = result.row;
+    alreadyExists = result.alreadyExists;
+  }
+
+  if (alreadyExists) {
+    logger.info(
+      { eventId: event.id, eventType, contractorId: params.contractorId },
+      '[email] event already reserved — skipping send',
+    );
+    return { alreadySent: true, eventId: event.id, providerMessageId: event.provider_message_id ?? undefined };
+  }
+
+  const html = renderContractorActivatedEmail({ contractorName: params.contractorName });
+
+  const resendIdempotencyKey = params.forceResend ? randomUUID() : event.id;
+
+  return _dispatchEmail({
+    event,
+    to:      params.contractorEmail,
+    subject: 'Assembly Concierge — Contractor Account Activated',
     html,
     resendIdempotencyKey,
     logContext: { eventType, contractorId: params.contractorId, forceResend: params.forceResend ?? false },
