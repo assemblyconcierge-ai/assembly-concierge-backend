@@ -7,9 +7,10 @@
  *   3. Idempotency check on jotform_submission_id
  *   4. Resolve/create Google Drive folder
  *   5. Download Jotform files and upload to Drive
- *   6. Compute checklist booleans and document status
- *   7. Persist metadata to Postgres
- *   8. Mirror checklist/status/links to Airtable
+ *   6. Upload a complete submission summary document to Drive
+ *   7. Compute checklist booleans and document status
+ *   8. Persist metadata to Postgres
+ *   9. Mirror checklist/status/links to Airtable
  *
  * Never touches activation or dispatch fields.
  * Never overwrites existing successful file links with blank/null.
@@ -22,6 +23,7 @@ import { logger } from '../../common/logger';
 import {
   resolveContractorFolder,
   downloadAndUploadFile,
+  uploadBufferToFolder,
 } from '../storage/googleDrive.service';
 import {
   getContractorAirtableField,
@@ -407,6 +409,57 @@ export async function processOnboardingSubmission(
       log.warn({ err, submissionId }, '[Onboarding] Other document upload failed');
       errors.push(`Other Document: ${msg}`);
     }
+  }
+
+  // ── 6b. Upload complete submission summary to Drive ────────────────────
+  // Generates a plain-text summary of the sanitised payload and uploads it
+  // to the contractor's Drive folder.  The submissionId is embedded in the
+  // filename so that reprocessing the same webhook produces the same filename
+  // (Drive will create a second copy, but the name makes it identifiable).
+  // Failure is non-fatal: logged and appended to errors, but processing continues.
+  try {
+    const summaryDate = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+    const safeName    = (String(payload.q43_typeA ?? contractor.full_name)).replace(/[/\\:*?"<>|]/g, '-').trim();
+    const summaryFileName = `${safeName} - Onboarding Submission - ${summaryDate} - ${submissionId}.txt`;
+    const summaryLines: string[] = [
+      'Assembly Concierge — Contractor Onboarding Submission',
+      '======================================================',
+      `Submission ID : ${submissionId}`,
+      `Submitted At  : ${new Date().toISOString()}`,
+      `Contractor    : ${contractor.full_name}`,
+      `Backend ID    : ${backendContractorId}`,
+      `Airtable ID   : ${airtableRecordId}`,
+      '',
+      '── Submission Fields ──────────────────────────────────',
+    ];
+    const sanitizedForSummary = buildSanitizedPayload(payload);
+    for (const [key, value] of Object.entries(sanitizedForSummary)) {
+      if (value === undefined || value === null || value === '') continue;
+      // Skip file URL fields — they are long and already stored separately
+      const isFileField = [
+        'q24_fileupload22', 'q29_fileupload27', 'q30_fileupload28',
+        'q31_fileupload29', 'uploadSigned49',
+      ].includes(key);
+      if (isFileField) {
+        summaryLines.push(`${key} : [file uploaded]`);
+      } else {
+        summaryLines.push(`${key} : ${JSON.stringify(value)}`);
+      }
+    }
+    summaryLines.push('');
+    summaryLines.push('── End of Submission ──────────────────────────────────');
+    const summaryBuffer = Buffer.from(summaryLines.join('\n'), 'utf-8');
+    await uploadBufferToFolder({
+      buffer:   summaryBuffer,
+      mimeType: 'text/plain',
+      fileName: summaryFileName,
+      folderId: folder.id,
+    });
+    processedFiles.push('Submission Summary');
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    log.error({ err, submissionId }, '[Onboarding] Submission summary upload failed (non-fatal)');
+    errors.push(`Submission Summary: ${msg}`);
   }
 
   // ── 7. Compute checklist and status ──────────────────────────────────────

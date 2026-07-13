@@ -368,3 +368,45 @@ export function sanitizeFileName(name: string): string {
     .trim()
     .slice(0, 255);
 }
+
+/**
+ * Upload a raw in-memory buffer directly to a Drive folder.
+ *
+ * Unlike downloadAndUploadFile, this function does not fetch from a URL —
+ * it accepts a pre-built Buffer and uploads it as-is.  Used to store
+ * generated documents (e.g. onboarding submission summaries) that are
+ * created in-process rather than downloaded from an external source.
+ */
+export async function uploadBufferToFolder(opts: {
+  buffer: Buffer;
+  mimeType: string;
+  fileName: string;
+  folderId: string;
+}): Promise<DriveFile> {
+  const drive = getDriveClient();
+  const safeFileName = sanitizeFileName(opts.fileName);
+  const uploadRes = await drive.files.create({
+    requestBody: {
+      name:    safeFileName,
+      parents: [opts.folderId],
+    },
+    media: {
+      mimeType: opts.mimeType,
+      body:     Readable.from(opts.buffer),
+    },
+    fields:            'id, webViewLink',
+    supportsAllDrives: true,
+  });
+  const id          = uploadRes.data.id;
+  const webViewLink = uploadRes.data.webViewLink;
+  if (!id || !webViewLink) {
+    throw new Error(
+      `[GoogleDrive] uploadBufferToFolder returned incomplete data for "${safeFileName}"`,
+    );
+  }
+  logger.info(
+    { fileId: id, fileName: safeFileName, folderId: opts.folderId, byteSize: opts.buffer.length },
+    '[GoogleDrive] Buffer uploaded successfully',
+  );
+  return { id, webViewLink };
+}

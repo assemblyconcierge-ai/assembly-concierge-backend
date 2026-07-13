@@ -31,6 +31,7 @@ vi.mock('../../src/db/pool', () => ({
 vi.mock('../../src/modules/storage/googleDrive.service', () => ({
   resolveContractorFolder: vi.fn(),
   downloadAndUploadFile: vi.fn(),
+  uploadBufferToFolder: vi.fn(),
 }));
 vi.mock('../../src/modules/airtable-sync/airtable.contractor.adapter', () => ({
   getContractorAirtableField: vi.fn(),
@@ -41,6 +42,7 @@ import { query, queryOne } from '../../src/db/pool';
 import {
   resolveContractorFolder,
   downloadAndUploadFile,
+  uploadBufferToFolder,
 } from '../../src/modules/storage/googleDrive.service';
 import {
   getContractorAirtableField,
@@ -63,6 +65,7 @@ const mockQuery = query as ReturnType<typeof vi.fn>;
 const mockResolveFolder = resolveContractorFolder as ReturnType<typeof vi.fn>;
 const mockDownloadAndUpload = downloadAndUploadFile as ReturnType<typeof vi.fn>;
 const mockDownloadAndUploadFile = mockDownloadAndUpload;
+const mockUploadBufferToFolder = uploadBufferToFolder as ReturnType<typeof vi.fn>;
 const mockGetAirtableField = getContractorAirtableField as ReturnType<typeof vi.fn>;
 const mockUpdateAirtable = updateContractorAirtableFields as ReturnType<typeof vi.fn>;
 
@@ -105,6 +108,10 @@ function setupHappyPath() {
   mockResolveFolder.mockResolvedValue(MOCK_FOLDER);
   mockQuery.mockResolvedValue({ rows: [] });
   mockUpdateAirtable.mockResolvedValue(undefined);
+  mockUploadBufferToFolder.mockResolvedValue({
+    id: 'summary_file_id',
+    webViewLink: 'https://drive.google.com/file/d/summary_file_id/view',
+  });
 }
 
 beforeEach(() => {
@@ -468,6 +475,10 @@ describe('processOnboardingSubmission', () => {
     });
     mockQuery.mockResolvedValue({ rows: [] });
     mockUpdateAirtable.mockResolvedValue(undefined);
+    mockUploadBufferToFolder.mockResolvedValue({
+      id: 'summary_file_id',
+      webViewLink: 'https://drive.google.com/file/d/summary_file_id/view',
+    });
 
     const result = await processOnboardingSubmission(BASE_PAYLOAD);
     expect(result.status).toBe('processed');
@@ -475,5 +486,68 @@ describe('processOnboardingSubmission', () => {
     expect(mockResolveFolder).toHaveBeenCalledWith(
       expect.objectContaining({ existingFolderId: 'existing_folder_id' }),
     );
+  });
+
+  // ── Submission summary upload (Change 2) ────────────────────────────────
+
+  it('uploads a submission summary text file to Drive on successful processing', async () => {
+    setupHappyPath();
+    const result = await processOnboardingSubmission(BASE_PAYLOAD);
+
+    expect(result.status).toBe('processed');
+    expect(result.processedFiles).toContain('Submission Summary');
+    expect(mockUploadBufferToFolder).toHaveBeenCalledOnce();
+
+    const uploadCall = mockUploadBufferToFolder.mock.calls[0][0] as {
+      buffer: Buffer;
+      mimeType: string;
+      fileName: string;
+      folderId: string;
+    };
+    expect(uploadCall.mimeType).toBe('text/plain');
+    expect(uploadCall.folderId).toBe(MOCK_FOLDER.id);
+    // Filename must include the contractor name, 'Onboarding Submission', and submissionId
+    expect(uploadCall.fileName).toContain('Onboarding Submission');
+    expect(uploadCall.fileName).toContain(SUBMISSION_ID);
+    // Buffer must be non-empty and contain the submissionId
+    const content = uploadCall.buffer.toString('utf-8');
+    expect(content).toContain(SUBMISSION_ID);
+    expect(content).toContain(AIRTABLE_RECORD_ID);
+  });
+
+  it('continues processing when submission summary upload fails (non-fatal)', async () => {
+    setupHappyPath();
+    mockUploadBufferToFolder.mockRejectedValueOnce(new Error('Drive quota exceeded'));
+
+    const result = await processOnboardingSubmission(BASE_PAYLOAD);
+
+    expect(result.status).toBe('processed');
+    // Error is recorded but does not abort processing
+    expect(result.errors.some((e) => e.includes('Submission Summary'))).toBe(true);
+    // Submission Summary should NOT be in processedFiles since it failed
+    expect(result.processedFiles).not.toContain('Submission Summary');
+    // Airtable update should still have been called (processing completed)
+    expect(mockUpdateAirtable).toHaveBeenCalledOnce();
+  });
+
+  it('summary filename includes submissionId for idempotency', async () => {
+    setupHappyPath();
+    await processOnboardingSubmission(BASE_PAYLOAD);
+
+    const uploadCall = mockUploadBufferToFolder.mock.calls[0][0] as { fileName: string };
+    // submissionId embedded in filename prevents duplicate files being
+    // indistinguishable on reprocessing
+    expect(uploadCall.fileName).toContain(SUBMISSION_ID);
+  });
+
+  it('summary content redacts signature field', async () => {
+    setupHappyPath();
+    await processOnboardingSubmission(BASE_PAYLOAD);
+
+    const uploadCall = mockUploadBufferToFolder.mock.calls[0][0] as { buffer: Buffer };
+    const content = uploadCall.buffer.toString('utf-8');
+    // Signature value should be redacted, not the raw base64 data
+    expect(content).toContain('[SIGNATURE_REDACTED]');
+    expect(content).not.toContain('data:image/png;base64');
   });
 });

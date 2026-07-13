@@ -29,6 +29,8 @@ const {
   mockSendContractorMissingDocsEmail,
   mockSendContractorOnboardingAcceptedEmail,
   mockSendContractorActivatedEmail,
+  mockBuildJotformPrefillUrl,
+  mockGetContractorAirtableField,
   mockRequireAdmin,
   mockRecordAuditEvent,
   mockGetJobById,
@@ -42,6 +44,8 @@ const {
   mockSendContractorMissingDocsEmail: vi.fn().mockResolvedValue({ eventId: 'evt-3', mode: 'log_only', alreadySent: false }),
   mockSendContractorOnboardingAcceptedEmail: vi.fn().mockResolvedValue({ eventId: 'evt-4', mode: 'log_only', alreadySent: false }),
   mockSendContractorActivatedEmail:          vi.fn().mockResolvedValue({ eventId: 'evt-5', mode: 'log_only', alreadySent: false }),
+  mockBuildJotformPrefillUrl:                vi.fn().mockReturnValue('https://form.jotform.com/261801729818060?contractorRecord=recABC123'),
+  mockGetContractorAirtableField:            vi.fn().mockResolvedValue(null),
   mockRequireAdmin:                          vi.fn((_req: any, _res: any, next: any) => next()),
   mockRecordAuditEvent:             vi.fn().mockResolvedValue(undefined),
   mockGetJobById:                   vi.fn(),
@@ -60,6 +64,11 @@ vi.mock('../../src/modules/email/email.service', () => ({
   sendContractorMissingDocsEmail:           mockSendContractorMissingDocsEmail,
   sendContractorOnboardingAcceptedEmail:    mockSendContractorOnboardingAcceptedEmail,
   sendContractorActivatedEmail:             mockSendContractorActivatedEmail,
+  buildJotformPrefillUrl:                   mockBuildJotformPrefillUrl,
+}));
+vi.mock('../../src/modules/airtable-sync/airtable.contractor.adapter', () => ({
+  getContractorAirtableField: mockGetContractorAirtableField,
+  updateContractorAirtableFields: vi.fn(),
 }));
 vi.mock('../../src/modules/audit/audit.service', () => ({
   recordAuditEvent: mockRecordAuditEvent,
@@ -154,6 +163,12 @@ const BASE_CONTRACTOR = {
   email:              'marcus@example.com',
   phone_e164:         '+14045551234',
   airtable_record_id: null,
+};
+
+/** Contractor with a stored Airtable record ID — required for missing-docs email */
+const CONTRACTOR_WITH_AIRTABLE = {
+  ...BASE_CONTRACTOR,
+  airtable_record_id: 'recABC123',
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -407,8 +422,8 @@ describe('POST /admin/contractors/:id/send-missing-docs-email', () => {
     mockQueryOne.mockResolvedValue(null);
   });
 
-  it('returns 200 and sends missing-docs email (log_only mode)', async () => {
-    mockQueryOne.mockResolvedValueOnce(BASE_CONTRACTOR);
+  it('returns 200 and sends missing-docs email with auto-built Jotform URL (log_only mode)', async () => {
+    mockQueryOne.mockResolvedValueOnce(CONTRACTOR_WITH_AIRTABLE);
 
     const app = buildAdminApp();
     const res = await request(app)
@@ -419,19 +434,45 @@ describe('POST /admin/contractors/:id/send-missing-docs-email', () => {
     expect(res.body.alreadySent).toBe(false);
     expect(res.body.eventId).toBe('evt-3');
     expect(res.body.status).toMatch(/^(sent|logged)$/);
+    // buildJotformPrefillUrl should have been called with contractor data
+    expect(mockBuildJotformPrefillUrl).toHaveBeenCalledWith(
+      expect.objectContaining({
+        airtableRecordId:    'recABC123',
+        backendContractorId: 'ctr-uuid-1',
+        legalFullName:       'Marcus Johnson',
+        phoneE164:           '+14045551234',
+        email:               'marcus@example.com',
+      }),
+    );
+    // sendContractorMissingDocsEmail should receive the auto-built URL
     expect(mockSendContractorMissingDocsEmail).toHaveBeenCalledWith(
       expect.objectContaining({
         contractorId:            'ctr-uuid-1',
         contractorName:          'Marcus Johnson',
         contractorEmail:         'marcus@example.com',
         missingOrCorrectionText: 'Your W-9 is missing a signature.',
+        onboardingFormUrl:       'https://form.jotform.com/261801729818060?contractorRecord=recABC123',
         forceResend:             false,
       }),
     );
   });
 
+  it('returns 422 MISSING_AIRTABLE_RECORD_ID when contractor has no airtable_record_id', async () => {
+    mockQueryOne.mockResolvedValueOnce(BASE_CONTRACTOR); // airtable_record_id: null
+
+    const app = buildAdminApp();
+    const res = await request(app)
+      .post('/admin/contractors/ctr-uuid-1/send-missing-docs-email')
+      .send({ missingOrCorrectionText: 'W-9 missing.' });
+
+    expect(res.status).toBe(422);
+    expect(res.body.error).toBe('MISSING_AIRTABLE_RECORD_ID');
+    expect(mockSendContractorMissingDocsEmail).not.toHaveBeenCalled();
+    expect(mockBuildJotformPrefillUrl).not.toHaveBeenCalled();
+  });
+
   it('returns 400 when missingOrCorrectionText is missing (Zod validation)', async () => {
-    mockQueryOne.mockResolvedValueOnce(BASE_CONTRACTOR);
+    mockQueryOne.mockResolvedValueOnce(CONTRACTOR_WITH_AIRTABLE);
 
     const app = buildAdminApp();
     const res = await request(app)
@@ -443,7 +484,7 @@ describe('POST /admin/contractors/:id/send-missing-docs-email', () => {
   });
 
   it('returns 400 when missingOrCorrectionText is empty string (Zod validation)', async () => {
-    mockQueryOne.mockResolvedValueOnce(BASE_CONTRACTOR);
+    mockQueryOne.mockResolvedValueOnce(CONTRACTOR_WITH_AIRTABLE);
 
     const app = buildAdminApp();
     const res = await request(app)
@@ -455,7 +496,7 @@ describe('POST /admin/contractors/:id/send-missing-docs-email', () => {
   });
 
   it('returns 200 alreadySent=true when email already sent and forceResend=false', async () => {
-    mockQueryOne.mockResolvedValueOnce(BASE_CONTRACTOR);
+    mockQueryOne.mockResolvedValueOnce(CONTRACTOR_WITH_AIRTABLE);
     mockSendContractorMissingDocsEmail.mockResolvedValue({ eventId: 'evt-3', alreadySent: true });
 
     const app = buildAdminApp();
@@ -470,7 +511,7 @@ describe('POST /admin/contractors/:id/send-missing-docs-email', () => {
   });
 
   it('returns 200 and resends when forceResend=true', async () => {
-    mockQueryOne.mockResolvedValueOnce(BASE_CONTRACTOR);
+    mockQueryOne.mockResolvedValueOnce(CONTRACTOR_WITH_AIRTABLE);
     mockSendContractorMissingDocsEmail.mockResolvedValue({ eventId: 'evt-3b', alreadySent: false });
 
     const app = buildAdminApp();
@@ -498,7 +539,7 @@ describe('POST /admin/contractors/:id/send-missing-docs-email', () => {
   });
 
   it('returns 422 MISSING_EMAIL when contractor has no email', async () => {
-    mockQueryOne.mockResolvedValueOnce({ ...BASE_CONTRACTOR, email: null });
+    mockQueryOne.mockResolvedValueOnce({ ...CONTRACTOR_WITH_AIRTABLE, email: null });
 
     const app = buildAdminApp();
     const res = await request(app)
@@ -511,7 +552,7 @@ describe('POST /admin/contractors/:id/send-missing-docs-email', () => {
   });
 
   it('does not activate contractor or change is_active', async () => {
-    mockQueryOne.mockResolvedValueOnce(BASE_CONTRACTOR);
+    mockQueryOne.mockResolvedValueOnce(CONTRACTOR_WITH_AIRTABLE);
 
     const app = buildAdminApp();
     await request(app)

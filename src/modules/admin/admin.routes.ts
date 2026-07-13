@@ -12,7 +12,9 @@ import {
   sendContractorMissingDocsEmail,
   sendContractorOnboardingAcceptedEmail,
   sendContractorActivatedEmail,
+  buildJotformPrefillUrl,
 } from '../email/email.service';
+import { getContractorAirtableField } from '../airtable-sync/airtable.contractor.adapter';
 import { config } from '../../common/config';
 
 export const adminRouter = Router();
@@ -463,9 +465,14 @@ adminRouter.post(
 // Requires missingOrCorrectionText in the request body.
 // Never activates or marks the contractor dispatch-eligible.
 //
+// The contractor's personalised Jotform prefill URL is auto-built from their
+// Postgres record (id, full_name, phone_e164, email) and their Airtable record ID.
+// If the contractor has no airtable_record_id, the request is rejected with
+// 422 MISSING_AIRTABLE_RECORD_ID so the admin can resolve the data gap before
+// sending — a broken email (no resubmit button) is never sent.
+//
 // Body:
 //   missingOrCorrectionText  string   (required)
-//   onboardingFormUrl        string   (optional — include to add a resubmit button)
 //   forceResend              boolean  (optional, default false)
 adminRouter.post(
   '/contractors/:id/send-missing-docs-email',
@@ -474,18 +481,19 @@ adminRouter.post(
     try {
       const schema = z.object({
         missingOrCorrectionText: z.string().min(1, 'missingOrCorrectionText is required'),
-        onboardingFormUrl:       z.string().url().optional().nullable(),
         forceResend:             z.boolean().optional().default(false),
       });
       const body = schema.parse(req.body);
 
-      // ── 1. Look up contractor ─────────────────────────────────────────────────────────────────────────────────────
+      // ── 1. Look up contractor ─────────────────────────────────────────────
       const contractor = await queryOne<{
         id: string;
         full_name: string;
         email: string | null;
+        phone_e164: string;
+        airtable_record_id: string | null;
       }>(
-        'SELECT id, full_name, email FROM contractors WHERE id = $1',
+        'SELECT id, full_name, email, phone_e164, airtable_record_id FROM contractors WHERE id = $1',
         [req.params.id],
       );
       if (!contractor) {
@@ -493,19 +501,42 @@ adminRouter.post(
         return;
       }
 
-      // ── 2. Require email ─────────────────────────────────────────────────────────────────────────────────────────────
+      // ── 2. Require email ──────────────────────────────────────────────────
       if (!contractor.email) {
         res.status(422).json({ error: 'MISSING_EMAIL', message: 'Contractor has no email address on file' });
         return;
       }
 
-      // ── 3. Send / log email ─────────────────────────────────────────────────────────────────────────────────────────────
+      // ── 3. Require Airtable record ID (needed to build the Jotform prefill URL) ──
+      if (!contractor.airtable_record_id) {
+        logger.warn(
+          { contractorId: contractor.id },
+          '[send-missing-docs-email] Blocked: contractor has no airtable_record_id — cannot build Jotform prefill URL',
+        );
+        res.status(422).json({
+          error:   'MISSING_AIRTABLE_RECORD_ID',
+          message: 'Contractor has no Airtable record ID on file — cannot build the Jotform resubmit link. Set airtableRecordId via send-onboarding-email first.',
+        });
+        return;
+      }
+
+      // ── 4. Build personalised Jotform prefill URL ─────────────────────────
+      // NOTE: Do not log this URL — it contains contractor identifiers.
+      const onboardingFormUrl = buildJotformPrefillUrl({
+        airtableRecordId:    contractor.airtable_record_id,
+        backendContractorId: contractor.id,
+        legalFullName:       contractor.full_name,
+        phoneE164:           contractor.phone_e164,
+        email:               contractor.email,
+      });
+
+      // ── 5. Send / log email ───────────────────────────────────────────────
       const result = await sendContractorMissingDocsEmail({
         contractorId:            contractor.id,
         contractorName:          contractor.full_name,
         contractorEmail:         contractor.email,
         missingOrCorrectionText: body.missingOrCorrectionText,
-        onboardingFormUrl:       body.onboardingFormUrl,
+        onboardingFormUrl,
         forceResend:             body.forceResend,
       });
 
