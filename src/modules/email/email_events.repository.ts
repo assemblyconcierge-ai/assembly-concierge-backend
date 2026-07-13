@@ -167,6 +167,40 @@ export async function markEmailEventFailed(
   );
 }
 
+// ── Resubmission helpers ─────────────────────────────────────────────────────
+
+// Local constant to avoid a circular import: email.service.ts imports from
+// this module, so this module must not import from email.service.ts.
+const CONTRACTOR_MISSING_DOCS_EVENT_TYPE = 'contractor_missing_docs' as const;
+
+/**
+ * Delete the contractor_missing_docs email event for a contractor.
+ *
+ * Called by processOnboardingSubmission after a successful Airtable PATCH
+ * so the admin can send another missing-docs follow-up without forceResend
+ * if items are still missing after the new submission.
+ *
+ * Non-fatal caller contract: if no row exists (first submission, or already
+ * deleted), the DELETE is a no-op.
+ *
+ * Audit note: DELETE removes the prior email event row, including sent_at
+ * and provider_message_id. The contractor_onboarding_documents row for the
+ * resubmission records the later submission, but does not preserve the
+ * deleted email-send audit record. This audit loss is accepted as a launch
+ * tradeoff. A future email-event history redesign can preserve multiple
+ * send cycles if needed.
+ */
+export async function clearContractorMissingDocsEvent(
+  contractorId: string,
+): Promise<void> {
+  await query(
+    `DELETE FROM email_events
+      WHERE event_type = $1
+        AND related_contractor_id = $2`,
+    [CONTRACTOR_MISSING_DOCS_EVENT_TYPE, contractorId],
+  );
+}
+
 // ── Internal helpers ───────────────────────────────────────────────────────────
 
 async function _findExistingEvent(

@@ -37,6 +37,9 @@ vi.mock('../../src/modules/airtable-sync/airtable.contractor.adapter', () => ({
   getContractorAirtableField: vi.fn(),
   updateContractorAirtableFields: vi.fn(),
 }));
+vi.mock('../../src/modules/email/email_events.repository', () => ({
+  clearContractorMissingDocsEvent: vi.fn(),
+}));
 
 import { query, queryOne } from '../../src/db/pool';
 import {
@@ -48,6 +51,7 @@ import {
   getContractorAirtableField,
   updateContractorAirtableFields,
 } from '../../src/modules/airtable-sync/airtable.contractor.adapter';
+import { clearContractorMissingDocsEvent } from '../../src/modules/email/email_events.repository';
 
 import {
   extractFileUrl,
@@ -68,6 +72,7 @@ const mockDownloadAndUploadFile = mockDownloadAndUpload;
 const mockUploadBufferToFolder = uploadBufferToFolder as ReturnType<typeof vi.fn>;
 const mockGetAirtableField = getContractorAirtableField as ReturnType<typeof vi.fn>;
 const mockUpdateAirtable = updateContractorAirtableFields as ReturnType<typeof vi.fn>;
+const mockClearMissingDocsEvent = clearContractorMissingDocsEvent as ReturnType<typeof vi.fn>;
 
 const CONTRACTOR_ID = 'aaaaaaaa-0000-0000-0000-000000000001';
 const AIRTABLE_RECORD_ID = 'recABC123';
@@ -103,7 +108,8 @@ function setupHappyPath() {
   mockQueryOne
     .mockResolvedValueOnce(MOCK_CONTRACTOR)  // contractor lookup
     .mockResolvedValueOnce(null)             // idempotency check
-    .mockResolvedValueOnce(null);            // existing folder check
+    .mockResolvedValueOnce(null)             // existing folder check
+    .mockResolvedValueOnce(null);            // BOOL_OR prior checklist (null = first submission)
   mockGetAirtableField.mockResolvedValue(null);
   mockResolveFolder.mockResolvedValue(MOCK_FOLDER);
   mockQuery.mockResolvedValue({ rows: [] });
@@ -112,6 +118,7 @@ function setupHappyPath() {
     id: 'summary_file_id',
     webViewLink: 'https://drive.google.com/file/d/summary_file_id/view',
   });
+  mockClearMissingDocsEvent.mockResolvedValue(undefined);
 }
 
 beforeEach(() => {
@@ -467,7 +474,8 @@ describe('processOnboardingSubmission', () => {
       .mockResolvedValueOnce({
         drive_folder_id: 'existing_folder_id',
         drive_folder_url: 'https://drive.google.com/drive/folders/existing_folder_id',
-      });
+      })
+      .mockResolvedValueOnce(null);  // BOOL_OR prior checklist
     mockGetAirtableField.mockResolvedValue(null);
     mockResolveFolder.mockResolvedValue({
       id: 'existing_folder_id',
@@ -479,6 +487,7 @@ describe('processOnboardingSubmission', () => {
       id: 'summary_file_id',
       webViewLink: 'https://drive.google.com/file/d/summary_file_id/view',
     });
+    mockClearMissingDocsEvent.mockResolvedValue(undefined);
 
     const result = await processOnboardingSubmission(BASE_PAYLOAD);
     expect(result.status).toBe('processed');
@@ -549,5 +558,295 @@ describe('processOnboardingSubmission', () => {
     // Signature value should be redacted, not the raw base64 data
     expect(content).toContain('[SIGNATURE_REDACTED]');
     expect(content).not.toContain('data:image/png;base64');
+  });
+});
+
+// ── Fix 1: BOOL_OR cumulative checklist ──────────────────────────────────────
+
+describe('processOnboardingSubmission — cumulative receipt booleans (BOOL_OR)', () => {
+  // Helper: sets up the 4-call queryOne sequence with a custom priorChecklist
+  function setupWithPrior(priorChecklist: Record<string, boolean | null> | null) {
+    mockQueryOne
+      .mockResolvedValueOnce(MOCK_CONTRACTOR)  // contractor lookup
+      .mockResolvedValueOnce(null)             // idempotency check
+      .mockResolvedValueOnce(null)             // existing folder check
+      .mockResolvedValueOnce(priorChecklist);  // BOOL_OR aggregate
+    mockGetAirtableField.mockResolvedValue(null);
+    mockResolveFolder.mockResolvedValue(MOCK_FOLDER);
+    mockQuery.mockResolvedValue({ rows: [] });
+    mockUpdateAirtable.mockResolvedValue(undefined);
+    mockUploadBufferToFolder.mockResolvedValue({
+      id: 'summary_file_id',
+      webViewLink: 'https://drive.google.com/file/d/summary_file_id/view',
+    });
+    mockClearMissingDocsEvent.mockResolvedValue(undefined);
+  }
+
+  it('T1: prior w9_received=true is preserved when W-9 absent from resubmission', async () => {
+    setupWithPrior({
+      signed_agreement_received: false,
+      w9_received: true,
+      photo_id_received: false,
+      payment_setup_complete: false,
+      sms_consent_confirmed: false,
+      tools_transportation_confirmed: false,
+      contractor_handbook_acknowledged: false,
+    });
+    // Payload has no W-9 URL — upload will not run
+    const result = await processOnboardingSubmission(BASE_PAYLOAD);
+    expect(result.status).toBe('processed');
+
+    // Airtable PATCH must have w9_received = true (preserved from prior)
+    const airtableFields = mockUpdateAirtable.mock.calls[0][1] as Record<string, unknown>;
+    expect(airtableFields['fld06XS5VPue6uSj8']).toBe(true);  // AT.W9_RECEIVED
+
+    // Postgres INSERT values: w9_received is at index 16 (0-based)
+    const insertCall = mockQuery.mock.calls.find((c) =>
+      String(c[0]).includes('INSERT INTO contractor_onboarding_documents'),
+    );
+    expect(insertCall).toBeDefined();
+    const values = insertCall![1] as unknown[];
+    expect(values[16]).toBe(true);  // w9_received
+  });
+
+  it('T2: prior photo_id_received=true is preserved when Photo ID absent from resubmission', async () => {
+    setupWithPrior({
+      signed_agreement_received: false,
+      w9_received: false,
+      photo_id_received: true,
+      payment_setup_complete: false,
+      sms_consent_confirmed: false,
+      tools_transportation_confirmed: false,
+      contractor_handbook_acknowledged: false,
+    });
+    const result = await processOnboardingSubmission(BASE_PAYLOAD);
+    expect(result.status).toBe('processed');
+
+    const airtableFields = mockUpdateAirtable.mock.calls[0][1] as Record<string, unknown>;
+    expect(airtableFields['fldqZOgILUTVbqzii']).toBe(true);  // AT.PHOTO_ID_RECEIVED
+
+    const insertCall = mockQuery.mock.calls.find((c) =>
+      String(c[0]).includes('INSERT INTO contractor_onboarding_documents'),
+    );
+    const values = insertCall![1] as unknown[];
+    expect(values[17]).toBe(true);  // photo_id_received
+  });
+
+  it('T3: all seven cumulative fields written to Postgres and Airtable when all true from prior rows', async () => {
+    setupWithPrior({
+      signed_agreement_received: true,
+      w9_received: true,
+      photo_id_received: true,
+      payment_setup_complete: true,
+      sms_consent_confirmed: true,
+      tools_transportation_confirmed: true,
+      contractor_handbook_acknowledged: true,
+    });
+    // Payload with no files and no checkboxes — everything comes from prior
+    const emptyPayload: OnboardingPayload = {
+      formID: '261801729818060',
+      submissionID: SUBMISSION_ID,
+      q34_contractorRecord: AIRTABLE_RECORD_ID,
+      q35_backendContractor: CONTRACTOR_ID,
+    };
+    const result = await processOnboardingSubmission(emptyPayload);
+    expect(result.status).toBe('processed');
+
+    const airtableFields = mockUpdateAirtable.mock.calls[0][1] as Record<string, unknown>;
+    expect(airtableFields['fldQH4HCChb5i8HM9']).toBe(true);  // AT.SIGNED_AGREEMENT
+    expect(airtableFields['fld06XS5VPue6uSj8']).toBe(true);  // AT.W9_RECEIVED
+    expect(airtableFields['fldqZOgILUTVbqzii']).toBe(true);  // AT.PHOTO_ID_RECEIVED
+    expect(airtableFields['fldZ1q3cYMvYwni8q']).toBe(true);  // AT.PAYMENT_SETUP
+    expect(airtableFields['fldd92BZZcGigAshI']).toBe(true);  // AT.SMS_CONSENT
+    expect(airtableFields['fldWjj2Ox2reuMG8I']).toBe(true);  // AT.TOOLS_TRANSPORTATION
+    expect(airtableFields['fld85axOvjHgJDmiS']).toBe(true);  // AT.HANDBOOK
+    expect(airtableFields['fldauRRFrJoe7FrKQ']).toBe('Submitted - Docs Complete');
+
+    const insertCall = mockQuery.mock.calls.find((c) =>
+      String(c[0]).includes('INSERT INTO contractor_onboarding_documents'),
+    );
+    const values = insertCall![1] as unknown[];
+    expect(values[15]).toBe(true);  // signed_agreement_received
+    expect(values[16]).toBe(true);  // w9_received
+    expect(values[17]).toBe(true);  // photo_id_received
+    expect(values[18]).toBe(true);  // payment_setup_complete
+    expect(values[19]).toBe(true);  // sms_consent_confirmed
+    expect(values[20]).toBe(true);  // tools_transportation_confirmed
+    expect(values[21]).toBe(true);  // contractor_handbook_acknowledged
+  });
+
+  it('T4: current submission true takes precedence over prior false', async () => {
+    setupWithPrior({
+      signed_agreement_received: false,
+      w9_received: false,
+      photo_id_received: false,
+      payment_setup_complete: false,
+      sms_consent_confirmed: false,
+      tools_transportation_confirmed: false,
+      contractor_handbook_acknowledged: false,
+    });
+    mockDownloadAndUploadFile
+      .mockResolvedValueOnce({ id: 'w9_id', webViewLink: 'https://drive.google.com/w9' })
+      .mockResolvedValueOnce({ id: 'photo_id', webViewLink: 'https://drive.google.com/photo' });
+
+    const payload = {
+      ...BASE_PAYLOAD,
+      q24_fileupload22: 'https://jotform.com/w9.pdf',
+      q29_fileupload27: 'https://jotform.com/id.jpg',
+    };
+    const result = await processOnboardingSubmission(payload);
+    expect(result.status).toBe('processed');
+
+    const airtableFields = mockUpdateAirtable.mock.calls[0][1] as Record<string, unknown>;
+    expect(airtableFields['fld06XS5VPue6uSj8']).toBe(true);  // W-9 from current upload
+    expect(airtableFields['fldqZOgILUTVbqzii']).toBe(true);  // Photo ID from current upload
+  });
+
+  it('T5: first submission (no prior rows, priorChecklist=null) behaves identically to prior behavior', async () => {
+    setupWithPrior(null);  // same as setupHappyPath
+    const result = await processOnboardingSubmission(BASE_PAYLOAD);
+    expect(result.status).toBe('processed');
+
+    const airtableFields = mockUpdateAirtable.mock.calls[0][1] as Record<string, unknown>;
+    // BASE_PAYLOAD has legacy signature + all checkboxes → all non-file fields true
+    expect(airtableFields['fldQH4HCChb5i8HM9']).toBe(true);  // signed_agreement_received
+    expect(airtableFields['fld06XS5VPue6uSj8']).toBe(false); // w9_received (no file)
+    expect(airtableFields['fldqZOgILUTVbqzii']).toBe(false); // photo_id_received (no file)
+    expect(airtableFields['fldZ1q3cYMvYwni8q']).toBe(true);  // payment_setup_complete
+    expect(airtableFields['fldd92BZZcGigAshI']).toBe(true);  // sms_consent_confirmed
+    expect(airtableFields['fldWjj2Ox2reuMG8I']).toBe(true);  // tools_transportation_confirmed
+    expect(airtableFields['fld85axOvjHgJDmiS']).toBe(true);  // contractor_handbook_acknowledged
+  });
+
+  it('T6: duplicate submission returns early without running BOOL_OR or DELETE', async () => {
+    // Only 2 queryOne calls: contractor lookup + idempotency check (hit)
+    mockQueryOne
+      .mockResolvedValueOnce(MOCK_CONTRACTOR)
+      .mockResolvedValueOnce({ id: 'existing_doc_id', document_status: 'Submitted - Docs Complete' });
+
+    const result = await processOnboardingSubmission(BASE_PAYLOAD);
+    expect(result.status).toBe('duplicate');
+    // BOOL_OR call (4th queryOne) must not have been made
+    expect(mockQueryOne).toHaveBeenCalledTimes(2);
+    expect(mockClearMissingDocsEvent).not.toHaveBeenCalled();
+  });
+
+  it('T7: Drive upload failure does not prevent BOOL_OR from preserving prior true values', async () => {
+    setupWithPrior({
+      signed_agreement_received: false,
+      w9_received: true,
+      photo_id_received: false,
+      payment_setup_complete: false,
+      sms_consent_confirmed: false,
+      tools_transportation_confirmed: false,
+      contractor_handbook_acknowledged: false,
+    });
+    // W-9 URL present but upload fails
+    mockDownloadAndUploadFile.mockRejectedValueOnce(new Error('Drive upload failed'));
+    const payload = { ...BASE_PAYLOAD, q24_fileupload22: 'https://jotform.com/w9.pdf' };
+
+    const result = await processOnboardingSubmission(payload);
+    expect(result.status).toBe('processed');
+    expect(result.errors.some((e) => e.includes('W-9'))).toBe(true);
+
+    // BOOL_OR preserved w9_received=true from prior despite upload failure
+    const airtableFields = mockUpdateAirtable.mock.calls[0][1] as Record<string, unknown>;
+    expect(airtableFields['fld06XS5VPue6uSj8']).toBe(true);
+  });
+});
+
+// ── Fix 2: Conditional email-lock DELETE ─────────────────────────────────────
+
+describe('processOnboardingSubmission — conditional missing-docs email lock DELETE', () => {
+  it('T8: DELETE runs after a successful Airtable PATCH', async () => {
+    setupHappyPath();
+    await processOnboardingSubmission(BASE_PAYLOAD);
+
+    expect(mockClearMissingDocsEvent).toHaveBeenCalledOnce();
+    expect(mockClearMissingDocsEvent).toHaveBeenCalledWith(CONTRACTOR_ID);
+  });
+
+  it('T9: DELETE does not run when Airtable PATCH fails', async () => {
+    setupHappyPath();
+    mockUpdateAirtable.mockRejectedValueOnce(new Error('Airtable API error'));
+
+    const result = await processOnboardingSubmission(BASE_PAYLOAD);
+    expect(result.status).toBe('processed');
+    expect(result.errors.some((e) => e.includes('Airtable sync failed'))).toBe(true);
+    expect(mockClearMissingDocsEvent).not.toHaveBeenCalled();
+  });
+
+  it('T10: DELETE does not run on duplicate submission', async () => {
+    mockQueryOne
+      .mockResolvedValueOnce(MOCK_CONTRACTOR)
+      .mockResolvedValueOnce({ id: 'existing_doc_id', document_status: 'Submitted - Docs Complete' });
+
+    const result = await processOnboardingSubmission(BASE_PAYLOAD);
+    expect(result.status).toBe('duplicate');
+    expect(mockClearMissingDocsEvent).not.toHaveBeenCalled();
+  });
+
+  it('T11: DELETE runs when Drive upload fails but Airtable PATCH succeeds', async () => {
+    setupHappyPath();
+    mockDownloadAndUploadFile.mockRejectedValueOnce(new Error('Drive upload failed'));
+    const payload = { ...BASE_PAYLOAD, q24_fileupload22: 'https://jotform.com/w9.pdf' };
+
+    const result = await processOnboardingSubmission(payload);
+    expect(result.status).toBe('processed');
+    expect(result.errors.some((e) => e.includes('W-9'))).toBe(true);
+    // Airtable succeeded → DELETE must run
+    expect(mockClearMissingDocsEvent).toHaveBeenCalledOnce();
+    expect(mockClearMissingDocsEvent).toHaveBeenCalledWith(CONTRACTOR_ID);
+  });
+
+  it('T12: DELETE failure is non-fatal — function still returns processed', async () => {
+    setupHappyPath();
+    mockClearMissingDocsEvent.mockRejectedValueOnce(new Error('DB connection lost'));
+
+    const result = await processOnboardingSubmission(BASE_PAYLOAD);
+    expect(result.status).toBe('processed');
+    // Airtable was still called
+    expect(mockUpdateAirtable).toHaveBeenCalledOnce();
+    // No error surfaced to caller from the DELETE failure
+    expect(result.errors.every((e) => !e.includes('email'))).toBe(true);
+  });
+
+  it('T13: DELETE does not run when both Drive upload and Airtable PATCH fail', async () => {
+    setupHappyPath();
+    mockDownloadAndUploadFile.mockRejectedValueOnce(new Error('Drive upload failed'));
+    mockUpdateAirtable.mockRejectedValueOnce(new Error('Airtable API error'));
+    const payload = { ...BASE_PAYLOAD, q24_fileupload22: 'https://jotform.com/w9.pdf' };
+
+    const result = await processOnboardingSubmission(payload);
+    expect(result.status).toBe('processed');
+    expect(result.errors.some((e) => e.includes('W-9'))).toBe(true);
+    expect(result.errors.some((e) => e.includes('Airtable sync failed'))).toBe(true);
+    expect(mockClearMissingDocsEvent).not.toHaveBeenCalled();
+  });
+
+  it('T14: DELETE is called with the correct contractorId from the payload', async () => {
+    const CUSTOM_ID = 'bbbbbbbb-1111-1111-1111-000000000002';
+    mockQueryOne
+      .mockResolvedValueOnce({ id: CUSTOM_ID, full_name: 'Bob Smith', airtable_record_id: null })
+      .mockResolvedValueOnce(null)   // idempotency
+      .mockResolvedValueOnce(null)   // folder check
+      .mockResolvedValueOnce(null);  // BOOL_OR
+    mockGetAirtableField.mockResolvedValue(null);
+    mockResolveFolder.mockResolvedValue(MOCK_FOLDER);
+    mockQuery.mockResolvedValue({ rows: [] });
+    mockUpdateAirtable.mockResolvedValue(undefined);
+    mockUploadBufferToFolder.mockResolvedValue({
+      id: 'summary_file_id',
+      webViewLink: 'https://drive.google.com/file/d/summary_file_id/view',
+    });
+    mockClearMissingDocsEvent.mockResolvedValue(undefined);
+
+    const payload: OnboardingPayload = {
+      ...BASE_PAYLOAD,
+      q35_backendContractor: CUSTOM_ID,
+    };
+    await processOnboardingSubmission(payload);
+
+    expect(mockClearMissingDocsEvent).toHaveBeenCalledWith(CUSTOM_ID);
   });
 });
