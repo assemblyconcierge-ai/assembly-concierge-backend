@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { queryOne, query, withTransaction } from '../../src/db/pool';
 import { enqueueAirtableSync } from '../../src/modules/airtable-sync/airtableSync.queue';
+import { logger } from '../../src/common/logger';
 
 const { mockSendSms, mockRecordAuditEvent } = vi.hoisted(() => ({
   mockSendSms: vi.fn(),
@@ -71,6 +72,40 @@ beforeEach(() => {
   vi.mocked(withTransaction).mockReset();
   mockSendSms.mockResolvedValue({ messageId: 'msg-1' });
   mockRecordAuditEvent.mockResolvedValue(undefined);
+});
+
+describe('processSmsWebhook logging safety', () => {
+  it('does not log the contractor phone when no active contractor is found', async () => {
+    const rawPhone = '+1 (404) 555-0199';
+    vi.mocked(queryOne).mockResolvedValueOnce(null);
+
+    await processSmsWebhook(rawPhone, 'confirm', 'corr-log-phone');
+
+    const childResults = vi.mocked(logger.child).mock.results;
+    const loggedCalls = childResults.flatMap((result) => {
+      const child = result.value as { info: ReturnType<typeof vi.fn> };
+      return child?.info?.mock.calls ?? [];
+    });
+    const serializedLogs = JSON.stringify(loggedCalls);
+    expect(serializedLogs).not.toContain(rawPhone);
+    expect(serializedLogs).not.toContain('+14045550199');
+  });
+
+  it('does not log unrecognized SMS message text or phone', async () => {
+    const sensitiveMessage = 'private free-form contractor message';
+    vi.mocked(queryOne).mockResolvedValueOnce(contractor as any);
+
+    await processSmsWebhook(contractor.phone_e164, sensitiveMessage, 'corr-log-message');
+
+    const childResults = vi.mocked(logger.child).mock.results;
+    const loggedCalls = childResults.flatMap((result) => {
+      const child = result.value as { info: ReturnType<typeof vi.fn> };
+      return child?.info?.mock.calls ?? [];
+    });
+    const serializedLogs = JSON.stringify(loggedCalls);
+    expect(serializedLogs).not.toContain(sensitiveMessage);
+    expect(serializedLogs).not.toContain(contractor.phone_e164);
+  });
 });
 
 // ---------------------------------------------------------------------------

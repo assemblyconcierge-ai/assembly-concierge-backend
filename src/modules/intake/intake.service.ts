@@ -48,7 +48,7 @@ export async function processIntake(
     intake.address.city,
     intake.address.state || 'GA',
   );
-  log.info({ city: intake.address.city, areaStatus: areaResult.status }, 'Service area classified');
+  log.info({ areaStatus: areaResult.status }, 'Service area classified');
 
   // Honour the Jotform areaTag for standard service types.
   // classifyServiceArea falls back to 'quote_only' for cities not yet in the DB;
@@ -61,7 +61,7 @@ export async function processIntake(
       : areaResult.status;
   if (effectiveAreaStatus !== areaResult.status) {
     log.info(
-      { areaTag: intake.meta?.areaTag, dbStatus: areaResult.status, effectiveAreaStatus },
+      { areaTagOverrideApplied: true, dbStatus: areaResult.status, effectiveAreaStatus },
       'areaTag override applied — treating as in_area',
     );
   }
@@ -152,7 +152,7 @@ export async function processIntake(
         scheduledEndAt = parsed.scheduledEndAt;
       } catch (schedErr) {
         log.warn(
-          { err: schedErr, appointmentDate: intake.appointment.date, appointmentWindow: intake.appointment.window },
+          { err: schedErr },
           '[Intake] Failed to parse schedule — scheduled_start_at/end_at will be null',
         );
       }
@@ -244,13 +244,13 @@ export async function processIntake(
   if (result.checkoutRequired) {
     setImmediate(async () => {
       try {
-        const { checkoutUrl, sessionId, customerPhone } = await createJobCheckoutSession(
+        const { checkoutUrl, customerPhone } = await createJobCheckoutSession(
           result.jobId,
           checkoutType,
           correlationId,
         );
         log.info(
-          { jobId: result.jobId, sessionId, checkoutUrl },
+          { jobId: result.jobId },
           'Checkout session auto-created after intake',
         );
         if (customerPhone) {

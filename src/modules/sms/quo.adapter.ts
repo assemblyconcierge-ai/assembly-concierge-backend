@@ -39,7 +39,7 @@ export async function sendSms(
     phoneNumberId: config.QUO_PHONE_NUMBER_ID,
   };
 
-  log.info({ to, phoneNumberId: config.QUO_PHONE_NUMBER_ID }, '[Quo] Sending outbound SMS');
+  log.info({ phoneNumberId: config.QUO_PHONE_NUMBER_ID }, '[Quo] Sending outbound SMS');
 
   const response = await fetch(QUO_API_URL, {
     method: 'POST',
@@ -58,6 +58,6 @@ export async function sendSms(
   const data = (await response.json()) as { data?: { id?: string } };
   const messageId = data?.data?.id ?? null;
 
-  log.info({ to, messageId }, '[Quo] Outbound SMS sent successfully');
+  log.info({ messageId }, '[Quo] Outbound SMS sent successfully');
   return { messageId };
 }

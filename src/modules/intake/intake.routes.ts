@@ -43,7 +43,10 @@ intakeRouter.post('/webhooks/jotform', async (req: Request, res: Response, next:
         if (!rawPayload['formID'] && body['formID']) rawPayload['formID'] = body['formID'];
         if (!rawPayload['formTitle'] && body['formTitle']) rawPayload['formTitle'] = body['formTitle'];
       } catch {
-        log.warn({ body }, 'Failed to parse rawRequest — using body directly');
+        log.warn(
+          { bodyKeys: Object.keys(body) },
+          'Failed to parse rawRequest — using already-parsed fields',
+        );
         rawPayload = body;
       }
     } else {
@@ -97,26 +100,17 @@ intakeRouter.post('/webhooks/jotform', async (req: Request, res: Response, next:
         await markProcessing(submission.id);
         const normalized = normalizeJotformPayload(rawPayload);
 
-        // Structured log of normalized intake — confirms field mapping is working
+        // Log field presence and workflow classifications without customer PII.
         log.info({
           normalizedIntake: {
-            customerName:     normalized.customer.fullName,
-            customerEmail:    normalized.customer.email,
-            customerPhone:    normalized.customer.phone,
-            city:             normalized.address.city,
-            state:            normalized.address.state,
-            postalCode:       normalized.address.postalCode,
+            hasCustomerName:  Boolean(normalized.customer.fullName),
+            hasCustomerEmail: Boolean(normalized.customer.email),
+            hasCustomerPhone: Boolean(normalized.customer.phone),
+            hasAddress:       Boolean(normalized.address.line1),
             serviceTypeCode:  normalized.service.typeCode,
             rushRequested:    normalized.service.rushRequested,
             rushType:         normalized.service.rushType,
-            appointmentDate:  normalized.appointment.date,
-            appointmentWindow: normalized.appointment.window,
-            totalAmount:      normalized.financials?.totalAmount,
-            depositAmount:    normalized.financials?.amountChargedToday,
-            remainingBalance: normalized.financials?.remainingBalance,
             paymentType:      normalized.financials?.paymentType,
-            areaTag:          normalized.meta?.areaTag,
-            uniqueId:         normalized.meta?.uniqueId,
           },
         }, 'Normalized intake object');
 
@@ -140,6 +134,6 @@ intakeRouter.post('/webhooks/jotform', async (req: Request, res: Response, next:
  */
 intakeRouter.post('/webhooks/dispatch-response', (req: Request, res: Response) => {
   const correlationId = req.correlationId;
-  logger.info({ correlationId, body: req.body }, 'Dispatch response received (stub)');
+  logger.info({ correlationId }, 'Dispatch response received (stub)');
   res.status(200).json({ status: 'received', correlationId });
 });

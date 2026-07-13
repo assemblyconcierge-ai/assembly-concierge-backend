@@ -6,6 +6,7 @@
 # No Jotform UI, no frontend required.
 #
 # Prerequisites on the Render service:
+#   NODE_ENV                  must not be production (test routes are disabled there)
 #   ENABLE_TEST_ROUTES=true   (required — routes return 404 without this)
 #   STRIPE_SECRET_KEY         must start with sk_test_ (enforced server-side too)
 #
@@ -92,7 +93,7 @@ PREFLIGHT=$(curl -sf -o /dev/null -w "%{http_code}" -X POST "${BASE_URL}/admin/t
   -H "${AUTH_HEADER}" -H "Content-Type: application/json" -d '{"serviceTypeCode":"__preflight__"}' 2>/dev/null || true)
 
 if [[ "${PREFLIGHT}" == "404" ]]; then
-  fail "POST /admin/test-jobs returned 404. Set ENABLE_TEST_ROUTES=true on the Render service and redeploy."
+  fail "POST /admin/test-jobs returned 404. Test routes are unavailable in production; on a non-production service, set ENABLE_TEST_ROUTES=true and redeploy."
 elif [[ "${PREFLIGHT}" == "401" || "${PREFLIGHT}" == "403" ]]; then
   fail "Admin auth failed (HTTP ${PREFLIGHT}). Check ADMIN_TOKEN matches ADMIN_JWT_SECRET on the server."
 elif [[ "${PREFLIGHT}" == "500" ]]; then

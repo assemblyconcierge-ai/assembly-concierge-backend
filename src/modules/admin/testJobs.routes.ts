@@ -11,13 +11,14 @@
  *     Provides backend-truth proof that the Stripe webhook path executed.
  *
  * Safeguards:
- *   1. ENABLE_TEST_ROUTES=true must be set — routes return 404 otherwise.
- *   2. STRIPE_SECRET_KEY must start with sk_test_ — aborts if misconfigured.
- *   3. No customer-facing side effects: email/SMS providers are not wired up
+ *   1. Routes always return 404 in production.
+ *   2. ENABLE_TEST_ROUTES=true must be set — routes return 404 otherwise.
+ *   3. STRIPE_SECRET_KEY must start with sk_test_ — aborts if misconfigured.
+ *   4. No customer-facing side effects: email/SMS providers are not wired up
  *      in processIntake (EMAIL_PROVIDER_API_KEY / SMS_PROVIDER_API_KEY are
  *      optional and unused in the current codebase). ALERT_WEBHOOK_URL is not
  *      triggered by intake — only by async failure handlers. Safe to run.
- *   4. Test jobs use @assemblyconcierge.test email domain and unique UUIDs
+ *   5. Test jobs use @assemblyconcierge.test email domain and unique UUIDs
  *      per run — easy to identify and clean up.
  *
  * Auth: requireAdmin (X-Admin-Token or Bearer matching ADMIN_JWT_SECRET)
@@ -44,7 +45,7 @@ export const testJobsRouter = Router();
 
 // ── Guard: reject all test routes unless explicitly enabled ──────────────────
 function requireTestRoutes(_req: Request, res: Response, next: NextFunction): void {
-  if (config.ENABLE_TEST_ROUTES !== 'true') {
+  if (config.NODE_ENV === 'production' || config.ENABLE_TEST_ROUTES !== 'true') {
     res.status(404).json({ error: 'NOT_FOUND', message: 'Route not found' });
     return;
   }

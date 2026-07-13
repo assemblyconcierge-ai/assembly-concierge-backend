@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import request from 'supertest';
 import { createApp } from '../../src/app';
+import { logger } from '../../src/common/logger';
 
 // Mock all DB and service dependencies
 vi.mock('../../src/db/pool', () => ({
@@ -53,6 +54,10 @@ vi.mock('../../src/modules/intake/intake.repository', () => ({
 }));
 
 const app = createApp();
+
+beforeEach(() => {
+  vi.clearAllMocks();
+});
 
 describe('POST /webhooks/jotform', () => {
   const validPayload = {
@@ -115,6 +120,22 @@ describe('POST /webhooks/jotform', () => {
 
     expect(res.body.status).toBe('received');
   });
+
+  it('does not log request-body values when rawRequest parsing fails', async () => {
+    const sensitiveValue = 'private-customer-value';
+    await request(app)
+      .post('/webhooks/jotform')
+      .send({ submissionID: 'SUB-BAD-JSON', rawRequest: '{bad-json', q4_email: sensitiveValue })
+      .expect(202);
+
+    const childResults = vi.mocked(logger.child).mock.results;
+    const loggedCalls = childResults.flatMap((result) => {
+      const child = result.value as { warn: ReturnType<typeof vi.fn> };
+      return child?.warn?.mock.calls ?? [];
+    });
+    expect(JSON.stringify(loggedCalls)).not.toContain(sensitiveValue);
+    expect(JSON.stringify(loggedCalls)).not.toContain('{bad-json');
+  });
 });
 
 describe('GET /health', () => {
@@ -133,5 +154,7 @@ describe('POST /webhooks/dispatch-response', () => {
       .expect(200);
 
     expect(res.body.status).toBe('received');
+    expect(JSON.stringify(vi.mocked(logger.info).mock.calls)).not.toContain('disp-1');
+    expect(JSON.stringify(vi.mocked(logger.info).mock.calls)).not.toContain('accepted');
   });
 });

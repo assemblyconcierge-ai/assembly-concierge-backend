@@ -227,14 +227,14 @@ export async function processSmsWebhook(
   );
 
   if (!contractor) {
-    log.info({ phoneE164 }, '[SMS] No active contractor found for phone - ignoring');
+    log.info('[SMS] No active contractor found for phone - ignoring');
     return;
   }
 
   const parsed = parseCommand(messageBody);
   if (!parsed) {
     log.info(
-      { contractorId: contractor.id, messageBody },
+      { contractorId: contractor.id },
       '[SMS] Message not recognized - ignoring',
     );
     return;

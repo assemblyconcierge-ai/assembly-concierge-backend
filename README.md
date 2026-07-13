@@ -243,7 +243,7 @@ When BullMQ exhausts all 5 retries on an Airtable sync job, the operator is aler
 `POST /jobs/:jobId/recalculate` was unguarded — it would overwrite pricing on already-paid jobs. Added a check that blocks recalculation when `job.status` is in `{paid_in_full, deposit_paid, closed_paid}`.
 
 ### Feature: Test seeding endpoint
-`POST /admin/test-jobs` seeds a test job + payment event for end-to-end lifecycle testing. Guarded by `ENABLE_TEST_ROUTES=true` env var and requires `sk_test_` Stripe key. Companion shell script `scripts/test-payment-lifecycle.sh` automates a full checkout → webhook → verify sequence.
+`POST /admin/test-jobs` seeds a test job + payment event for end-to-end lifecycle testing. The test routes always return 404 in production; outside production they require `ENABLE_TEST_ROUTES=true`, admin authentication, and an `sk_test_` Stripe key for job creation. Companion shell script `scripts/test-payment-lifecycle.sh` automates a full checkout → webhook → verify sequence.
 
 ---
 
@@ -1518,8 +1518,9 @@ Hosted on **Render** (Oregon region).
 | `AIRTABLE_BASE_ID` | Yes | app... base ID |
 | `QUO_API_KEY` | Yes | Quo SMS API key |
 | `QUO_PHONE_NUMBER_ID` | Yes | Quo sending number ID |
+| `JOTFORM_CONTRACTOR_ONBOARDING_WEBHOOK_TOKEN` | Production | Shared token on the contractor onboarding webhook URL |
 | `REDIS_URL` | No | BullMQ degrades to in-process if absent |
-| `ENABLE_TEST_ROUTES` | No | Set true only in staging |
+| `ENABLE_TEST_ROUTES` | No | Set true only outside production; production always returns 404 |
 | `CORS_ALLOWED_ORIGINS` | No | Comma-separated browser origins allowed by CORS. |
 
 ---

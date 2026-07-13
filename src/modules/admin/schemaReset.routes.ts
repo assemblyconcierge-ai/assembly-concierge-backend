@@ -5,6 +5,7 @@
  *   Header required: X-Reset-Token: <value of RESET_SCHEMA_TOKEN env var>
  *
  * Activation:
+ *   - Always returns 404 in production, even if RESET_SCHEMA_TOKEN is set.
  *   - Only active when RESET_SCHEMA_TOKEN is set in the environment.
  *   - After one successful reset, the endpoint disables itself for the
  *     lifetime of the process (in-memory flag) AND deletes the env var
@@ -22,6 +23,7 @@
 import { Router, Request, Response } from 'express';
 import { getPool } from '../../db/pool';
 import { logger } from '../../common/logger';
+import { config } from '../../common/config';
 
 export const schemaResetRouter = Router();
 
@@ -52,6 +54,11 @@ const DROP_ORDER = [
 ];
 
 schemaResetRouter.post('/reset-schema', async (req: Request, res: Response) => {
+  // Destructive recovery is never available in production.
+  if (config.NODE_ENV === 'production') {
+    return res.status(404).json({ error: 'NOT_FOUND', message: 'Route not found' });
+  }
+
   // ── Guard 1: env var must be present ──────────────────────────────────────
   const configuredToken = process.env.RESET_SCHEMA_TOKEN;
   if (!configuredToken) {

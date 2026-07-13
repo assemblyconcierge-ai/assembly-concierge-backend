@@ -88,7 +88,7 @@ const envSchema = z.object({
   // Airtable — Contractors table (separate from Jobs table)
   AIRTABLE_TABLE_CONTRACTORS: z.string().default('tblQzDt6XtSSaFAlX'),
 
-  // Validation / test routes — must be explicitly enabled; never expose in production without intent
+  // Validation / test routes — explicitly enabled outside production only
   ENABLE_TEST_ROUTES: z.string().optional(),
 
   // Owner alerting — POST alert payload here on final async failure

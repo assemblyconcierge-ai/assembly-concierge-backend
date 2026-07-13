@@ -25,8 +25,7 @@ export const onboardingRouter = Router();
  * POST /webhooks/jotform/contractor-onboarding
  *
  * Security: requires ?token=<JOTFORM_CONTRACTOR_ONBOARDING_WEBHOOK_TOKEN>
- * Responds 202 Accepted immediately after durable receipt.
- * Processing is synchronous for now; structured for async queue upgrade.
+ * Responds after synchronous processing completes.
  */
 onboardingRouter.post(
   '/webhooks/jotform/contractor-onboarding',
@@ -37,6 +36,15 @@ onboardingRouter.post(
     // ── Token validation ──────────────────────────────────────────────────
     const expectedToken = config.JOTFORM_CONTRACTOR_ONBOARDING_WEBHOOK_TOKEN;
     const providedToken = req.query['token'] as string | undefined;
+
+    if (!expectedToken && config.NODE_ENV === 'production') {
+      log.error('[Onboarding] Webhook token is not configured in production');
+      res.status(503).json({
+        error: 'WEBHOOK_SECURITY_NOT_CONFIGURED',
+        message: 'Webhook security is not configured',
+      });
+      return;
+    }
 
     if (expectedToken) {
       if (!providedToken || providedToken !== expectedToken) {
@@ -62,7 +70,10 @@ onboardingRouter.post(
           rawPayload.submissionID = String(body['submissionID']);
         }
       } catch {
-        log.warn({ body }, '[Onboarding] Failed to parse rawRequest — using body directly');
+        log.warn(
+          { bodyKeys: Object.keys(body) },
+          '[Onboarding] Failed to parse rawRequest — using already-parsed fields',
+        );
         rawPayload = body as OnboardingPayload;
       }
     } else {

@@ -33,6 +33,8 @@ vi.mock('../../src/common/config', () => ({
 
 import { processOnboardingSubmission } from '../../src/modules/onboarding/onboarding.service';
 import { onboardingRouter } from '../../src/modules/onboarding/onboarding.routes';
+import { config } from '../../src/common/config';
+import { logger } from '../../src/common/logger';
 
 const mockProcess = processOnboardingSubmission as ReturnType<typeof vi.fn>;
 
@@ -59,9 +61,28 @@ const VALID_BODY = {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  Object.assign(config, {
+    JOTFORM_CONTRACTOR_ONBOARDING_WEBHOOK_TOKEN: VALID_TOKEN,
+    NODE_ENV: 'test',
+  });
 });
 
 describe('POST /webhooks/jotform/contractor-onboarding', () => {
+  it('returns 503 in production when the configured webhook token is absent', async () => {
+    Object.assign(config, {
+      JOTFORM_CONTRACTOR_ONBOARDING_WEBHOOK_TOKEN: undefined,
+      NODE_ENV: 'production',
+    });
+
+    const res = await request(buildTestApp())
+      .post('/webhooks/jotform/contractor-onboarding')
+      .send(VALID_BODY);
+
+    expect(res.status).toBe(503);
+    expect(res.body.error).toBe('WEBHOOK_SECURITY_NOT_CONFIGURED');
+    expect(mockProcess).not.toHaveBeenCalled();
+  });
+
   it('returns 401 when token is missing', async () => {
     const app = buildTestApp();
     const res = await request(app)
@@ -194,6 +215,30 @@ describe('POST /webhooks/jotform/contractor-onboarding', () => {
     const callArg = mockProcess.mock.calls[0][0];
     expect(callArg.q34_contractorRecord).toBe(AIRTABLE_RECORD_ID);
     expect(callArg.q35_backendContractor).toBe(CONTRACTOR_ID);
+  });
+
+  it('does not log request-body values when rawRequest parsing fails', async () => {
+    const sensitiveValue = 'private-onboarding-value';
+    mockProcess.mockResolvedValueOnce({
+      status: 'processed',
+      contractorId: CONTRACTOR_ID,
+      documentStatus: 'Submitted - Missing Items',
+      processedFiles: [],
+      errors: [],
+    });
+
+    await request(buildTestApp())
+      .post(`/webhooks/jotform/contractor-onboarding?token=${VALID_TOKEN}`)
+      .send({ ...VALID_BODY, rawRequest: '{bad-json', q8_q8_email6: sensitiveValue })
+      .expect(200);
+
+    const childResults = vi.mocked(logger.child).mock.results;
+    const loggedCalls = childResults.flatMap((result) => {
+      const child = result.value as { warn: ReturnType<typeof vi.fn> };
+      return child?.warn?.mock.calls ?? [];
+    });
+    expect(JSON.stringify(loggedCalls)).not.toContain(sensitiveValue);
+    expect(JSON.stringify(loggedCalls)).not.toContain('{bad-json');
   });
 
   it('returns 200 with partial errors when some files fail', async () => {
