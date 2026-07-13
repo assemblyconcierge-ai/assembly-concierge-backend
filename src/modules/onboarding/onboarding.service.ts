@@ -2,18 +2,22 @@
  * Onboarding Service
  *
  * Handles inbound contractor onboarding Jotform submissions:
- *   1. Validate payload (formID, contractorRecord, backendContractor)
- *   2. Verify contractor exists in Postgres and IDs match
- *   3. Idempotency check on jotform_submission_id
- *   4. Resolve/create Google Drive folder
- *   5. Download Jotform files and upload to Drive
- *   6. Upload a complete submission summary document to Drive
- *   7. Compute checklist booleans and document status
- *   8. Persist metadata to Postgres
- *   9. Mirror checklist/status/links to Airtable
+ *   1.  Validate payload (formID, contractorRecord, backendContractor)
+ *   2.  Verify contractor exists in Postgres and IDs match
+ *   3.  Idempotency check on jotform_submission_id
+ *   4.  Resolve/create Google Drive folder
+ *   5.  BOOL_OR aggregate: fetch cumulative prior receipt booleans
+ *   6.  Download Jotform files and upload to Drive
+ *   6b. Upload a complete submission summary document to Drive
+ *   7.  Compute checklist booleans, merge with prior cumulative state
+ *   8.  Persist metadata to Postgres (uses mergedChecklist)
+ *   9.  Mirror checklist/status/links to Airtable (uses mergedChecklist)
+ *   10. Clear contractor_missing_docs email lock (only if Airtable PATCH succeeded)
  *
  * Never touches activation or dispatch fields.
  * Never overwrites existing successful file links with blank/null.
+ * Receipt booleans are cumulative: a field that was true in any prior
+ * submission can never revert to false on a later submission.
  */
 
 import crypto from 'crypto';
@@ -29,6 +33,7 @@ import {
   getContractorAirtableField,
   updateContractorAirtableFields,
 } from '../airtable-sync/airtable.contractor.adapter';
+import { clearContractorMissingDocsEvent } from '../email/email_events.repository';
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
@@ -294,6 +299,33 @@ export async function processOnboardingSubmission(
     airtableRecordId,
   });
 
+  // ── 5. BOOL_OR aggregate: fetch cumulative prior receipt booleans ──────────
+  // Aggregates all prior contractor_onboarding_documents rows so that a field
+  // which was true in any earlier submission can never revert to false here.
+  // Returns null when this is the first submission (no prior rows).
+  type PriorChecklist = {
+    signed_agreement_received:        boolean | null;
+    w9_received:                      boolean | null;
+    photo_id_received:                boolean | null;
+    payment_setup_complete:           boolean | null;
+    sms_consent_confirmed:            boolean | null;
+    tools_transportation_confirmed:   boolean | null;
+    contractor_handbook_acknowledged: boolean | null;
+  };
+  const priorChecklist = await queryOne<PriorChecklist>(
+    `SELECT
+       BOOL_OR(signed_agreement_received)        AS signed_agreement_received,
+       BOOL_OR(w9_received)                      AS w9_received,
+       BOOL_OR(photo_id_received)                AS photo_id_received,
+       BOOL_OR(payment_setup_complete)           AS payment_setup_complete,
+       BOOL_OR(sms_consent_confirmed)            AS sms_consent_confirmed,
+       BOOL_OR(tools_transportation_confirmed)   AS tools_transportation_confirmed,
+       BOOL_OR(contractor_handbook_acknowledged) AS contractor_handbook_acknowledged
+     FROM contractor_onboarding_documents
+     WHERE contractor_id = $1`,
+    [backendContractorId],
+  );
+
   // ── 6. Download and upload files ─────────────────────────────────────────
   const jotformApiKey = config.JOTFORM_API_KEY;
   const processedFiles: string[] = [];
@@ -463,13 +495,25 @@ export async function processOnboardingSubmission(
   }
 
   // ── 7. Compute checklist and status ──────────────────────────────────────
+  // computeChecklist evaluates only the current payload. mergedChecklist
+  // applies BOOL_OR semantics: a field that was true in any prior submission
+  // (captured in priorChecklist) can never revert to false here.
   const checklist = computeChecklist(
     payload,
     w9FileId !== null,
     photoIdFileId !== null,
     signedAgreementFileId !== null,
   );
-  const documentStatus = computeDocumentStatus(checklist);
+  const mergedChecklist = {
+    signed_agreement_received:        checklist.signed_agreement_received        || (priorChecklist?.signed_agreement_received        ?? false),
+    w9_received:                      checklist.w9_received                      || (priorChecklist?.w9_received                      ?? false),
+    photo_id_received:                checklist.photo_id_received                || (priorChecklist?.photo_id_received                ?? false),
+    payment_setup_complete:           checklist.payment_setup_complete           || (priorChecklist?.payment_setup_complete           ?? false),
+    sms_consent_confirmed:            checklist.sms_consent_confirmed            || (priorChecklist?.sms_consent_confirmed            ?? false),
+    tools_transportation_confirmed:   checklist.tools_transportation_confirmed   || (priorChecklist?.tools_transportation_confirmed   ?? false),
+    contractor_handbook_acknowledged: checklist.contractor_handbook_acknowledged || (priorChecklist?.contractor_handbook_acknowledged ?? false),
+  };
+  const documentStatus = computeDocumentStatus(mergedChecklist);
 
   // ── 8. Persist metadata to Postgres ──────────────────────────────────────
   const payloadHash = hashPayload(payload);
@@ -511,13 +555,13 @@ export async function processOnboardingSubmission(
       insuranceFileUrl,
       otherDocFileId,
       otherDocFileUrl,
-      checklist.signed_agreement_received,
-      checklist.w9_received,
-      checklist.photo_id_received,
-      checklist.payment_setup_complete,
-      checklist.sms_consent_confirmed,
-      checklist.tools_transportation_confirmed,
-      checklist.contractor_handbook_acknowledged,
+      mergedChecklist.signed_agreement_received,
+      mergedChecklist.w9_received,
+      mergedChecklist.photo_id_received,
+      mergedChecklist.payment_setup_complete,
+      mergedChecklist.sms_consent_confirmed,
+      mergedChecklist.tools_transportation_confirmed,
+      mergedChecklist.contractor_handbook_acknowledged,
       documentStatus,
       processingError,
       signedAgreementFileId,
@@ -539,13 +583,13 @@ export async function processOnboardingSubmission(
     [AT.SUBMITTED_AT]:         now,
     [AT.SUBMISSION_ID]:        submissionId,
     [AT.DRIVE_FOLDER]:         folder.webViewLink,
-    [AT.SIGNED_AGREEMENT]:     checklist.signed_agreement_received,
-    [AT.W9_RECEIVED]:          checklist.w9_received,
-    [AT.PAYMENT_SETUP]:        checklist.payment_setup_complete,
-    [AT.SMS_CONSENT]:          checklist.sms_consent_confirmed,
-    [AT.TOOLS_TRANSPORTATION]: checklist.tools_transportation_confirmed,
-    [AT.HANDBOOK]:             checklist.contractor_handbook_acknowledged,
-    [AT.PHOTO_ID_RECEIVED]:    checklist.photo_id_received,
+    [AT.SIGNED_AGREEMENT]:     mergedChecklist.signed_agreement_received,
+    [AT.W9_RECEIVED]:          mergedChecklist.w9_received,
+    [AT.PAYMENT_SETUP]:        mergedChecklist.payment_setup_complete,
+    [AT.SMS_CONSENT]:          mergedChecklist.sms_consent_confirmed,
+    [AT.TOOLS_TRANSPORTATION]: mergedChecklist.tools_transportation_confirmed,
+    [AT.HANDBOOK]:             mergedChecklist.contractor_handbook_acknowledged,
+    [AT.PHOTO_ID_RECEIVED]:    mergedChecklist.photo_id_received,
     [AT.DOCUMENT_STATUS]:      documentStatus,
   };
 
@@ -554,11 +598,39 @@ export async function processOnboardingSubmission(
     airtableFields[AT.PHOTO_ID_FILE_LINK] = photoIdFileUrl;
   }
 
+  let airtablePatchSucceeded = false;
   try {
     await updateContractorAirtableFields(airtableRecordId, airtableFields);
+    airtablePatchSucceeded = true;
   } catch (err) {
     log.error({ err, airtableRecordId }, '[Onboarding] Airtable update failed — metadata saved to Postgres');
     errors.push(`Airtable sync failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  // ── 10. Clear missing-docs email lock ─────────────────────────────────────
+  // Only runs when the Airtable PATCH succeeded so the admin cannot send
+  // another missing-docs follow-up while Airtable may contain stale receipt
+  // fields or a stale missing-requirements list.
+  //
+  // Drive upload failures are non-fatal and do not block this step: if Drive
+  // failed but Airtable was updated with the resulting incomplete state, the
+  // admin can send a corrected follow-up normally.
+  //
+  // Audit note: DELETE removes the prior email event row, including sent_at
+  // and provider_message_id. The contractor_onboarding_documents row for this
+  // resubmission records that a new submission was received, but does not
+  // preserve the deleted email-send audit record. This audit loss is accepted
+  // as a launch tradeoff. A future email-event history redesign can preserve
+  // multiple send cycles if needed.
+  if (airtablePatchSucceeded) {
+    try {
+      await clearContractorMissingDocsEvent(backendContractorId);
+    } catch (err) {
+      log.warn(
+        { err, contractorId: backendContractorId },
+        '[Onboarding] Could not clear missing-docs email event — non-fatal',
+      );
+    }
   }
 
   log.info(
