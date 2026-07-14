@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
-# Live end-to-end test POST to /webhooks/jotform
+# Non-production end-to-end test POST to /webhooks/jotform.
+# The dormant customer Jotform route intentionally returns 404 in production.
 # Uses correct payload shape matching DEFAULT_JOTFORM_FIELD_MAPPING:
 #   - q3_fullName as nested object (first/last)
 #   - q26_typeA26 for city (NOT q18_city)
 #   - unique submissionID to avoid idempotency dedup
 
 SUBMISSION_ID="test-$(date +%s)"
-BASE_URL="https://assembly-concierge-backend.onrender.com"
+BASE_URL="${BASE_URL:-http://localhost:3000}"
 
 echo "=== Sending test POST to ${BASE_URL}/webhooks/jotform ==="
 echo "=== submissionID: ${SUBMISSION_ID} ==="

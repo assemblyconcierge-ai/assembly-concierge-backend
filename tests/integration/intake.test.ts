@@ -1,7 +1,14 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import request from 'supertest';
 import { createApp } from '../../src/app';
+import { config } from '../../src/common/config';
 import { logger } from '../../src/common/logger';
+import { processIntake } from '../../src/modules/intake/intake.service';
+import {
+  createIntakeSubmission,
+  findByIdempotencyKey,
+} from '../../src/modules/intake/intake.repository';
+import { processOnboardingSubmission } from '../../src/modules/onboarding/onboarding.service';
 
 // Mock all DB and service dependencies
 vi.mock('../../src/db/pool', () => ({
@@ -37,6 +44,10 @@ vi.mock('../../src/modules/intake/intake.service', () => ({
   })),
 }));
 
+vi.mock('../../src/modules/onboarding/onboarding.service', () => ({
+  processOnboardingSubmission: vi.fn(),
+}));
+
 vi.mock('../../src/modules/intake/intake.repository', () => ({
   findByIdempotencyKey: vi.fn(async () => null),
   createIntakeSubmission: vi.fn(async () => ({
@@ -54,9 +65,22 @@ vi.mock('../../src/modules/intake/intake.repository', () => ({
 }));
 
 const app = createApp();
+const originalNodeEnv = config.NODE_ENV;
+const originalOnboardingToken = config.JOTFORM_CONTRACTOR_ONBOARDING_WEBHOOK_TOKEN;
 
 beforeEach(() => {
   vi.clearAllMocks();
+  Object.assign(config, {
+    NODE_ENV: originalNodeEnv,
+    JOTFORM_CONTRACTOR_ONBOARDING_WEBHOOK_TOKEN: originalOnboardingToken,
+  });
+});
+
+afterEach(() => {
+  Object.assign(config, {
+    NODE_ENV: originalNodeEnv,
+    JOTFORM_CONTRACTOR_ONBOARDING_WEBHOOK_TOKEN: originalOnboardingToken,
+  });
 });
 
 describe('POST /webhooks/jotform', () => {
@@ -70,6 +94,45 @@ describe('POST /webhooks/jotform', () => {
     q8_serviceType: 'Small Assembly',
     q9_rush: 'No',
   };
+
+  it('returns 404 in production before parsing or processing customer intake', async () => {
+    Object.assign(config, { NODE_ENV: 'production' });
+
+    const res = await request(app)
+      .post('/webhooks/jotform')
+      .set('Content-Type', 'application/json')
+      .send('{"rawRequest":')
+      .expect(404);
+
+    expect(res.body).toEqual({ error: 'NOT_FOUND', message: 'Route not found' });
+    expect(findByIdempotencyKey).not.toHaveBeenCalled();
+    expect(createIntakeSubmission).not.toHaveBeenCalled();
+    expect(processIntake).not.toHaveBeenCalled();
+    expect(JSON.stringify(vi.mocked(logger.info).mock.calls)).not.toContain('[JotformParser]');
+  });
+
+  it('keeps contractor onboarding available in production', async () => {
+    const token = 'contractor-onboarding-test-token';
+    Object.assign(config, {
+      NODE_ENV: 'production',
+      JOTFORM_CONTRACTOR_ONBOARDING_WEBHOOK_TOKEN: token,
+    });
+    vi.mocked(processOnboardingSubmission).mockResolvedValueOnce({
+      status: 'processed',
+      contractorId: 'contractor-123',
+      documentStatus: 'Submitted - Docs Complete',
+      processedFiles: [],
+      errors: [],
+    });
+
+    const res = await request(app)
+      .post(`/webhooks/jotform/contractor-onboarding?token=${token}`)
+      .send({ formID: '261801729818060', submissionID: 'onboarding-submission-1' })
+      .expect(200);
+
+    expect(res.body.status).toBe('processed');
+    expect(processOnboardingSubmission).toHaveBeenCalledOnce();
+  });
 
   it('returns 202 for a valid new submission', async () => {
     const res = await request(app)

@@ -147,7 +147,7 @@ Built from scratch — a full production-grade Node.js/TypeScript backend:
 Every status change goes through `assertTransition()` — no direct DB writes bypass it. The machine defines every valid transition explicitly.
 
 **Intake pipeline:**
-- `POST /webhooks/jotform` receives Jotform submissions
+- Legacy `POST /webhooks/jotform` receives Jotform submissions outside production; it is dormant and returns `404` in production
 - `jotformBodyParser` handles all Jotform content types (multipart, urlencoded, JSON, text/plain)
 - Normalizer extracts `CanonicalIntake` from raw Jotform payload using `DEFAULT_JOTFORM_FIELD_MAPPING`
 - `processIntake()` classifies service area, looks up pricing, creates job in PostgreSQL
@@ -1225,9 +1225,9 @@ End-to-end smoke test completed: applicant submission → token generation → s
 ## Current Architecture
 
 ```
-Customer fills Jotform
+Customer uses the booking frontend
         ↓
-POST /webhooks/jotform
+POST /public/bookings
         ↓
 Intake normalization → Job creation (PostgreSQL) → Airtable sync (async)
         ↓
@@ -1316,7 +1316,8 @@ awaiting_remainder_payment  →  (Stripe webhook)  →  closed_paid
 ### Webhooks
 | Method | Path | Description |
 |--------|------|-------------|
-| POST | `/webhooks/jotform` | Customer intake |
+| POST | `/webhooks/jotform` | Dormant legacy customer intake; disabled (`404`) in production |
+| POST | `/webhooks/jotform/contractor-onboarding` | Token-authenticated contractor onboarding |
 | POST | `/webhooks/stripe` | Payment events |
 | POST | `/webhooks/sms` | Contractor SMS replies |
 

@@ -115,6 +115,16 @@ export function createApp(): express.Application {
   // ─── Correlation ID ──────────────────────────────────────────────────────
   app.use(correlationIdMiddleware);
 
+  // The legacy customer Jotform intake is dormant; reject its exact path in production.
+  // Register before all body parsers so rejected payloads are never consumed or processed.
+  app.post('/webhooks/jotform', (_req: Request, res: Response, next: NextFunction) => {
+    if (config.NODE_ENV === 'production') {
+      res.status(404).json({ error: 'NOT_FOUND', message: 'Route not found' });
+      return;
+    }
+    next();
+  });
+
   // ─── Stripe webhook MUST receive raw body — register BEFORE json() ───────
   app.use(
     '/webhooks/stripe',
