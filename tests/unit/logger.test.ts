@@ -26,6 +26,7 @@ describe('logger sensitive-value redaction', () => {
           authorization: 'Bearer admin-secret',
           'x-admin-token': 'admin-secret',
           'x-reset-token': 'reset-secret',
+          'openphone-signature': 'hmac;1;1234567890123;signature-secret',
         },
         query: { token: 'webhook-secret' },
       },
@@ -53,6 +54,7 @@ describe('logger sensitive-value redaction', () => {
     for (const sensitiveValue of [
       'admin-secret',
       'reset-secret',
+      'signature-secret',
       'webhook-secret',
       'root@example.com',
       '+14045550128',

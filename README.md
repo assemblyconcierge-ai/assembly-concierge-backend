@@ -1519,6 +1519,7 @@ Hosted on **Render** (Oregon region).
 | `AIRTABLE_BASE_ID` | Yes | app... base ID |
 | `QUO_API_KEY` | Yes | Quo SMS API key |
 | `QUO_PHONE_NUMBER_ID` | Yes | Quo sending number ID |
+| `QUO_WEBHOOK_SIGNING_SECRET` | Yes | Base64 signing secret for authenticating inbound Quo webhooks |
 | `JOTFORM_CONTRACTOR_ONBOARDING_WEBHOOK_TOKEN` | Production | Shared token on the contractor onboarding webhook URL |
 | `REDIS_URL` | No | BullMQ degrades to in-process if absent |
 | `ENABLE_TEST_ROUTES` | No | Set true only outside production; production always returns 404 |

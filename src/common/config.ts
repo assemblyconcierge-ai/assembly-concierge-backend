@@ -45,6 +45,7 @@ const envSchema = z.object({
   QUO_API_KEY: z.string().optional(),
   QUO_PHONE_NUMBER: z.string().optional(),       // E.164, e.g. +14705742191
   QUO_PHONE_NUMBER_ID: z.string().optional(),    // e.g. PNLQwgD2g3
+  QUO_WEBHOOK_SIGNING_SECRET: z.string().optional(), // Base64 secret from Quo webhook details
 
   // Storage
   STORAGE_BUCKET: z.string().optional(),

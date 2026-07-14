@@ -6,6 +6,7 @@ export const LOGGER_REDACT_PATHS = [
   'req.headers["x-api-key"]',
   'req.headers["x-admin-token"]',
   'req.headers["x-reset-token"]',
+  'req.headers["openphone-signature"]',
   'req.query.token',
   'token',
   '*.token',

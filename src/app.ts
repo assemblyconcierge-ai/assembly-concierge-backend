@@ -132,13 +132,16 @@ export function createApp(): express.Application {
     stripeWebhookRouter,
   );
 
+  // Quo signatures may cover the exact request bytes, so preserve them before JSON parsing.
+  app.use(
+    '/webhooks/sms',
+    express.raw({ type: 'application/json', limit: '1mb' }),
+    smsWebhookRouter,
+  );
+
   // ─── JSON body parser for all other routes ───────────────────────────────
   app.use(express.json({ limit: '1mb' }));
   app.use(express.urlencoded({ extended: true, limit: '1mb' }));
-
-  // ─── SMS webhook (Quo inbound contractor messages) ────────────────────────
-  // Must be mounted AFTER express.json() so req.body is populated.
-  app.use('/webhooks/sms', smsWebhookRouter);
 
   // ─── Health (always responds — no DB dependency) ─────────────────────────
   app.get('/health', (_req: Request, res: Response) => {

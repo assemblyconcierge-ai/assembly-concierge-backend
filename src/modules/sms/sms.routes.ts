@@ -9,10 +9,11 @@
 import { Router, Request, Response } from 'express';
 import { logger } from '../../common/logger';
 import { processSmsWebhook } from './sms.service';
+import { verifyQuoWebhookSignature } from './quoWebhookSignature';
 
 export const smsWebhookRouter = Router();
 
-smsWebhookRouter.post('/', async (req: Request, res: Response) => {
+smsWebhookRouter.post('/', verifyQuoWebhookSignature, async (req: Request, res: Response) => {
   const correlationId = req.correlationId;
   const log = logger.child({ correlationId, handler: 'sms-webhook' });
 
