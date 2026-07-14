@@ -133,12 +133,30 @@ function validateSchedule(body: PublicBookingRequest): { error?: string; message
     };
   }
 
-  const today = DateTime.now().setZone(PUBLIC_BOOKING_TIMEZONE).startOf('day');
+  const now = DateTime.now().setZone(PUBLIC_BOOKING_TIMEZONE);
+  const today = now.startOf('day');
   if (appointmentDate.startOf('day') < today) {
     return {
       error: 'PAST_APPOINTMENT_DATE',
       message: 'appointmentDate must not be in the past.',
     };
+  }
+
+  // If the appointment is today, reject any window whose start hour has already passed.
+  if (appointmentDate.startOf('day').valueOf() === today.valueOf()) {
+    const WINDOW_START_HOURS: Record<string, number> = {
+      'morning(8am-12pm)': 8,
+      'afternoon(12pm-4pm)': 12,
+      'evening(4pm-8pm)': 16,
+    };
+    const windowKey = body.appointmentWindow.trim().toLowerCase().replace(/\s+/g, '');
+    const windowStartHour = WINDOW_START_HOURS[windowKey];
+    if (windowStartHour !== undefined && now.hour >= windowStartHour) {
+      return {
+        error: 'WINDOW_ALREADY_PASSED',
+        message: 'This time window has already passed today. Please choose a later window or a future date.',
+      };
+    }
   }
 
   try {

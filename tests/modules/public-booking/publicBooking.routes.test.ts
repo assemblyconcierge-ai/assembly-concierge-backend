@@ -453,6 +453,25 @@ describe('publicBookingRouter', () => {
     ]));
   });
 
+  it('rejects a same-day booking when the window start hour has already passed', async () => {
+    const app = createTestApp();
+    // Simulate 10:00 AM ET on 2026-07-14 — after the Morning (8am) window start.
+    const { DateTime } = await import('luxon');
+    const fakeNow = DateTime.fromObject(
+      { year: 2026, month: 7, day: 14, hour: 10, minute: 0 },
+      { zone: 'America/New_York' },
+    );
+    vi.spyOn(DateTime, 'now').mockReturnValue(fakeNow as ReturnType<typeof DateTime.now>);
+    const res = await request(app)
+      .post('/public/bookings')
+      .send({ ...validPayload, appointmentDate: '2026-07-14', appointmentWindow: 'Morning(8am-12pm)' })
+      .expect(400);
+    expect(res.body.error).toBe('WINDOW_ALREADY_PASSED');
+    expect(createIntakeSubmission).not.toHaveBeenCalled();
+    expect(processIntake).not.toHaveBeenCalled();
+    vi.restoreAllMocks();
+  });
+
   it('rejects unknown fields', async () => {
     const app = createTestApp();
 
