@@ -466,6 +466,44 @@ describe('processOnboardingSubmission', () => {
     expect(airtableFields['fldauRRFrJoe7FrKQ']).toBe('Submitted - Docs Complete');
   });
 
+  it('preserves all five contractor document download paths', async () => {
+    setupHappyPath();
+    mockDownloadAndUploadFile
+      .mockResolvedValueOnce({ id: 'signed_id', webViewLink: 'https://drive.google.com/signed' })
+      .mockResolvedValueOnce({ id: 'w9_id', webViewLink: 'https://drive.google.com/w9' })
+      .mockResolvedValueOnce({ id: 'photo_id', webViewLink: 'https://drive.google.com/photo' })
+      .mockResolvedValueOnce({ id: 'insurance_id', webViewLink: 'https://drive.google.com/insurance' })
+      .mockResolvedValueOnce({ id: 'other_id', webViewLink: 'https://drive.google.com/other' });
+
+    const payload = {
+      ...BASE_PAYLOAD,
+      uploadSigned49: 'https://www.jotform.com/uploads/signed.pdf',
+      q24_fileupload22: 'https://www.jotform.com/uploads/w9.pdf',
+      q29_fileupload27: 'https://www.jotform.com/uploads/id.jpg',
+      q30_fileupload28: 'https://www.jotform.com/uploads/insurance.pdf',
+      q31_fileupload29: 'https://www.jotform.com/uploads/other.pdf',
+    };
+
+    const result = await processOnboardingSubmission(payload);
+
+    expect(mockDownloadAndUploadFile).toHaveBeenCalledTimes(5);
+    expect(mockDownloadAndUploadFile.mock.calls.map(([opts]) => opts.sourceUrl)).toEqual([
+      payload.uploadSigned49,
+      payload.q24_fileupload22,
+      payload.q29_fileupload27,
+      payload.q30_fileupload28,
+      payload.q31_fileupload29,
+    ]);
+    expect(result.processedFiles).toEqual(expect.arrayContaining([
+      'Signed Agreement',
+      'W-9',
+      'Photo ID',
+      'Proof of Insurance',
+      'Other Document',
+    ]));
+    expect(result.errors).toHaveLength(0);
+  });
+
   it('uses existing Postgres folder ID without creating a new folder', async () => {
     // Contractor found, no duplicate, existing folder in Postgres
     mockQueryOne

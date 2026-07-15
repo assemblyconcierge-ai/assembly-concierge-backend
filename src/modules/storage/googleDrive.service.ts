@@ -31,9 +31,30 @@ import { logger } from '../../common/logger';
  *  almost certainly error pages or empty bodies. */
 const MIN_FILE_BYTES = 512;
 
+/** Contractor documents are limited to 10 MiB to keep in-memory processing
+ * bounded. W-9s, IDs, insurance certificates, and signed agreements should
+ * all fit comfortably within this limit. */
+export const MAX_DOWNLOAD_BYTES = 10 * 1024 * 1024;
+
+/** Maximum total time for redirects and body streaming. */
+export const DOWNLOAD_TIMEOUT_MS = 15_000;
+
+/** At most three redirect hops are permitted before the download fails. */
+export const MAX_DOWNLOAD_REDIRECTS = 3;
+
+/** Exact hosts evidenced by Jotform's upload documentation and repository
+ * fixtures. Deliberately no wildcard/suffix matching. */
+const APPROVED_JOTFORM_DOWNLOAD_HOSTS = new Set([
+  'jotform.com',
+  'www.jotform.com',
+  'files.jotform.com',
+]);
+
 /** Content-Type prefixes that indicate a non-file response (login page, API
  *  error, redirect page, etc.). Checked case-insensitively. */
 const REJECTED_CONTENT_TYPES = ['text/html', 'application/json', 'text/plain'];
+
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -45,6 +66,164 @@ export interface DriveFile {
 export interface DriveFolder {
   id: string;
   webViewLink: string;
+}
+
+class SafeDownloadError extends Error {}
+
+function downloadError(fileName: string, reason: string): SafeDownloadError {
+  return new SafeDownloadError(
+    `[GoogleDrive] Download rejected for "${fileName}": ${reason}. File was NOT uploaded.`,
+  );
+}
+
+/** Parse and validate a Jotform download URL without making a network request. */
+export function validateJotformDownloadUrl(sourceUrl: string, fileName: string): URL {
+  const safeFileName = sanitizeFileName(fileName);
+  let url: URL;
+  try {
+    url = new URL(sourceUrl);
+  } catch {
+    throw downloadError(safeFileName, 'source URL is malformed');
+  }
+
+  if (url.protocol !== 'https:') {
+    throw downloadError(safeFileName, 'source URL must use HTTPS');
+  }
+  if (url.username || url.password) {
+    throw downloadError(safeFileName, 'source URL must not contain embedded credentials');
+  }
+  if (url.port && url.port !== '443') {
+    throw downloadError(safeFileName, 'source URL uses an unapproved port');
+  }
+  if (!APPROVED_JOTFORM_DOWNLOAD_HOSTS.has(url.hostname.toLowerCase())) {
+    throw downloadError(safeFileName, 'source URL host is not approved');
+  }
+
+  return url;
+}
+
+function addJotformApiKey(url: URL, jotformApiKey?: string): URL {
+  const authenticatedUrl = new URL(url);
+  if (jotformApiKey) {
+    authenticatedUrl.searchParams.set('apiKey', jotformApiKey);
+  }
+  return authenticatedUrl;
+}
+
+async function readBoundedResponseBody(
+  response: Response,
+  fileName: string,
+  controller: AbortController,
+): Promise<Buffer> {
+  const contentLength = response.headers.get('content-length')?.trim();
+  if (contentLength && /^\d+$/.test(contentLength)) {
+    const declaredBytes = BigInt(contentLength);
+    if (declaredBytes > BigInt(MAX_DOWNLOAD_BYTES)) {
+      controller.abort();
+      throw downloadError(
+        fileName,
+        `response exceeds the ${MAX_DOWNLOAD_BYTES}-byte size limit`,
+      );
+    }
+  }
+
+  if (!response.body) {
+    throw downloadError(fileName, 'response body is missing');
+  }
+
+  const reader = response.body.getReader();
+  const chunks: Buffer[] = [];
+  let totalBytes = 0;
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      totalBytes += value.byteLength;
+      if (totalBytes > MAX_DOWNLOAD_BYTES) {
+        controller.abort();
+        throw downloadError(
+          fileName,
+          `response exceeds the ${MAX_DOWNLOAD_BYTES}-byte size limit`,
+        );
+      }
+      chunks.push(Buffer.from(value));
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  return Buffer.concat(chunks, totalBytes);
+}
+
+async function fetchJotformFile(
+  sourceUrl: string,
+  fileName: string,
+  jotformApiKey?: string,
+): Promise<{ response: Response; buffer: Buffer }> {
+  let currentUrl = validateJotformDownloadUrl(sourceUrl, fileName);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), DOWNLOAD_TIMEOUT_MS);
+
+  try {
+    for (let redirectCount = 0; ; ) {
+      const requestUrl = addJotformApiKey(currentUrl, jotformApiKey);
+      let response: Response;
+      try {
+        response = await fetch(requestUrl, {
+          redirect: 'manual',
+          signal: controller.signal,
+        });
+      } catch {
+        if (controller.signal.aborted) {
+          throw downloadError(fileName, 'request timed out');
+        }
+        throw downloadError(fileName, 'request failed');
+      }
+
+      if (REDIRECT_STATUSES.has(response.status)) {
+        if (redirectCount >= MAX_DOWNLOAD_REDIRECTS) {
+          controller.abort();
+          throw downloadError(fileName, 'redirect limit exceeded');
+        }
+        const location = response.headers.get('location');
+        if (!location) {
+          controller.abort();
+          throw downloadError(fileName, 'redirect location is missing');
+        }
+
+        let redirectUrl: URL;
+        try {
+          redirectUrl = new URL(location, currentUrl);
+        } catch {
+          controller.abort();
+          throw downloadError(fileName, 'redirect location is malformed');
+        }
+        currentUrl = validateJotformDownloadUrl(redirectUrl.toString(), fileName);
+        redirectCount += 1;
+        continue;
+      }
+
+      if (response.status !== 200) {
+        controller.abort();
+        throw downloadError(fileName, `request returned HTTP ${response.status}`);
+      }
+
+      const buffer = await readBoundedResponseBody(response, fileName, controller);
+      return { response, buffer };
+    }
+  } catch (err) {
+    if (err instanceof SafeDownloadError) {
+      throw err;
+    }
+    if (controller.signal.aborted) {
+      throw downloadError(fileName, 'request timed out');
+    }
+    // Never propagate fetch/stream exceptions: they may embed the authenticated URL.
+    throw downloadError(fileName, 'response processing failed');
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 // ── Auth ───────────────────────────────────────────────────────────────────
@@ -276,34 +455,18 @@ export async function downloadAndUploadFile(opts: {
   folderId: string;
   jotformApiKey?: string;
 }): Promise<DriveFile> {
-  const drive = getDriveClient();
-
-  // Build download URL — append Jotform API key if provided
-  let downloadUrl = opts.sourceUrl;
-  if (opts.jotformApiKey) {
-    const sep = downloadUrl.includes('?') ? '&' : '?';
-    downloadUrl = `${downloadUrl}${sep}apiKey=${opts.jotformApiKey}`;
-  }
-
-  // Download the file — follow redirects (fetch default)
-  const response = await fetch(downloadUrl, { redirect: 'follow' });
-
-  // Guard 1: HTTP status must be 200
-  if (response.status !== 200) {
-    throw new Error(
-      `[GoogleDrive] Download failed for "${opts.fileName}": ` +
-        `HTTP ${response.status} ${response.statusText}. File was NOT uploaded.`,
-    );
-  }
-
+  const safeFileName = sanitizeFileName(opts.fileName);
+  const { response, buffer } = await fetchJotformFile(
+    opts.sourceUrl,
+    safeFileName,
+    opts.jotformApiKey,
+  );
   const contentType = response.headers.get('content-type') ?? 'application/octet-stream';
-  const arrayBuffer = await response.arrayBuffer();
-  const buffer = Buffer.from(arrayBuffer);
 
   // Safe log: status, content-type, and byte size only — no file contents
   logger.info(
     {
-      fileName: opts.fileName,
+      fileName: safeFileName,
       httpStatus: response.status,
       contentType,
       byteSize: buffer.length,
@@ -312,10 +475,10 @@ export async function downloadAndUploadFile(opts: {
   );
 
   // Guards 2–4: content-type, HTML body, minimum size
-  validateDownloadedBuffer(buffer, contentType, opts.fileName);
+  validateDownloadedBuffer(buffer, contentType, safeFileName);
 
   // Upload to Drive — supportsAllDrives required for Shared Drive targets
-  const safeFileName = sanitizeFileName(opts.fileName);
+  const drive = getDriveClient();
   const uploadRes = await drive.files.create({
     requestBody: {
       name: safeFileName,
