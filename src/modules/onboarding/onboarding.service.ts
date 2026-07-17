@@ -7,9 +7,8 @@
  *   3.  Idempotency check on jotform_submission_id
  *   4.  Resolve/create Google Drive folder
  *   5.  BOOL_OR aggregate: fetch cumulative prior receipt booleans
- *   6.  Download Jotform files and upload to Drive
- *   6b. Upload a complete submission summary document to Drive
- *   7.  Compute checklist booleans, merge with prior cumulative state
+ *   6.  Download Jotform files and upload approved content to Drive
+ *   7.  Compute cumulative status and upload a normalized text summary
  *   8.  Persist metadata to Postgres (uses mergedChecklist)
  *   9.  Mirror checklist/status/links to Airtable (uses mergedChecklist)
  *   10. Clear contractor_missing_docs email lock (only if Airtable PATCH succeeded)
@@ -27,7 +26,10 @@ import { logger } from '../../common/logger';
 import {
   resolveContractorFolder,
   downloadAndUploadFile,
+  sanitizeFileName,
   uploadBufferToFolder,
+  type DownloadedDriveFile,
+  type TrustedDocumentContentType,
 } from '../storage/googleDrive.service';
 import {
   getContractorAirtableField,
@@ -61,6 +63,8 @@ export interface OnboardingPayload {
   /** Jotform outer envelope */
   formID?: string;
   submissionID?: string;
+  submissionDate?: string;
+  created_at?: string;
   /** Parsed Jotform rawRequest fields */
   q34_contractorRecord?: string;
   q35_backendContractor?: string;
@@ -90,10 +94,44 @@ export interface OnboardingPayload {
 
 export interface OnboardingResult {
   status: 'processed' | 'duplicate';
+  submissionId: string;
   contractorId: string;
+  airtableRecordId: string;
+  submittedAt: string;
+  documents: OnboardingDocumentResult[];
+  overallDocumentStatus: string;
   documentStatus: string;
   processedFiles: string[];
+  processingErrors: string[];
   errors: string[];
+}
+
+export type OnboardingDocumentType =
+  | 'signed_agreement'
+  | 'w9'
+  | 'photo_id'
+  | 'insurance'
+  | 'other_document';
+
+export type OnboardingDocumentResultStatus =
+  | 'uploaded'
+  | 'previously_retained'
+  | 'missing'
+  | 'rejected'
+  | 'optional_not_supplied'
+  | 'accepted_legacy';
+
+export interface OnboardingDocumentResult {
+  documentType: OnboardingDocumentType;
+  label: string;
+  status: OnboardingDocumentResultStatus;
+  requirementSatisfied: boolean;
+  originalFileName?: string;
+  detectedContentType?: TrustedDocumentContentType;
+  storedFileName?: string;
+  driveFileId?: string;
+  driveFileUrl?: string;
+  safeRejectionReason?: string;
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -156,12 +194,25 @@ export function computeDocumentStatus(checklist: ReturnType<typeof computeCheckl
   return allComplete ? 'Submitted - Docs Complete' : 'Submitted - Missing Items';
 }
 
-/** Build a sanitized payload (strip base64 signature) for audit storage. */
+const FILE_FIELD_KEYS = new Set([
+  'q24_fileupload22',
+  'q29_fileupload27',
+  'q30_fileupload28',
+  'q31_fileupload29',
+  'uploadSigned49',
+]);
+const SENSITIVE_PAYLOAD_KEY = /(?:authorization|api.?key|password|secret|token)/i;
+
+/** Build a sanitized payload for audit storage without signatures or source URLs. */
 function buildSanitizedPayload(payload: OnboardingPayload): Record<string, unknown> {
   const sanitized: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(payload)) {
     if (k === 'q20_q20_signature18') {
       sanitized[k] = '[SIGNATURE_REDACTED]';
+    } else if (SENSITIVE_PAYLOAD_KEY.test(k)) {
+      sanitized[k] = '[CREDENTIAL_REDACTED]';
+    } else if (FILE_FIELD_KEYS.has(k) && v) {
+      sanitized[k] = '[FILE_SOURCE_REDACTED]';
     } else {
       sanitized[k] = v;
     }
@@ -175,6 +226,72 @@ function hashPayload(payload: OnboardingPayload): string {
     .createHash('sha256')
     .update(JSON.stringify(payload))
     .digest('hex');
+}
+
+/** Select a stable ISO submission timestamp without trusting malformed input. */
+function resolveSubmissionTimestamp(payload: OnboardingPayload, fallback: string): string {
+  const candidate = payload.submissionDate ?? payload.created_at;
+  if (!candidate) return fallback;
+  const parsed = new Date(candidate);
+  return Number.isNaN(parsed.getTime()) ? fallback : parsed.toISOString();
+}
+
+/** Keep operational rejection text useful without retaining URLs or credentials. */
+function safeProcessingReason(err: unknown): string {
+  const message = err instanceof Error ? err.message : String(err);
+  return (message.split(/\r?\n/, 1)[0] ?? 'Processing failed')
+    .replace(/https?:\/\/[^\s"']+/gi, '[URL_REDACTED]')
+    .replace(/\bBearer\s+[^\s,;]+/gi, 'Bearer [REDACTED]')
+    .replace(/\b(api.?key|token|secret|password)\s*[=:]\s*[^\s,;]+/gi, '$1=[REDACTED]');
+}
+
+function documentStatusLabel(status: OnboardingDocumentResultStatus): string {
+  return status.replace(/_/g, ' ');
+}
+
+/** Render the normalized result as a concise, human-readable Drive summary. */
+export function renderOnboardingSummary(
+  result: OnboardingResult,
+  contractorName: string,
+): string {
+  const lines = [
+    'Contractor Onboarding Submission',
+    '',
+    `Contractor: ${contractorName}`,
+    `Contractor ID: ${result.contractorId}`,
+    `Airtable Record ID: ${result.airtableRecordId}`,
+    `Submission ID: ${result.submissionId}`,
+    `Submitted: ${result.submittedAt}`,
+    '',
+    'Document Results',
+  ];
+
+  for (const document of result.documents) {
+    lines.push('', document.label);
+    lines.push(`Status: ${documentStatusLabel(document.status)}`);
+    if (document.originalFileName) {
+      lines.push(`Original filename: ${document.originalFileName}`);
+    }
+    if (document.detectedContentType) {
+      lines.push(`Detected type: ${document.detectedContentType}`);
+    }
+    if (document.storedFileName) {
+      lines.push(`Stored filename: ${document.storedFileName}`);
+    }
+    if (document.safeRejectionReason) {
+      lines.push(`Reason: ${document.safeRejectionReason}`);
+    }
+  }
+
+  lines.push('', `Overall Status: ${result.overallDocumentStatus}`);
+  lines.push('Processing Notes:');
+  if (result.processingErrors.length === 0) {
+    lines.push('None');
+  } else {
+    for (const error of result.processingErrors) lines.push(`- ${error}`);
+  }
+
+  return `${lines.join('\n')}\n`;
 }
 
 // ── Main service function ──────────────────────────────────────────────────
@@ -197,6 +314,8 @@ export async function processOnboardingSubmission(
   const airtableRecordId = String(payload.q34_contractorRecord ?? '').trim();
   const backendContractorId = String(payload.q35_backendContractor ?? '').trim();
   const submissionId = String(payload.submissionID ?? '').trim();
+  const processedAt = new Date().toISOString();
+  const submittedAt = resolveSubmissionTimestamp(payload, processedAt);
 
   if (!airtableRecordId) {
     throw Object.assign(
@@ -259,9 +378,15 @@ export async function processOnboardingSubmission(
     );
     return {
       status: 'duplicate',
+      submissionId,
       contractorId: backendContractorId,
+      airtableRecordId,
+      submittedAt,
+      documents: [],
+      overallDocumentStatus: existing.document_status,
       documentStatus: existing.document_status,
       processedFiles: [],
+      processingErrors: [],
       errors: [],
     };
   }
@@ -330,6 +455,67 @@ export async function processOnboardingSubmission(
   const jotformApiKey = config.JOTFORM_API_KEY;
   const processedFiles: string[] = [];
   const errors: string[] = [];
+  const documents: OnboardingDocumentResult[] = [];
+  const legacyAgreementSatisfied =
+    isChecked(payload.q20_q20_signature18) && isChecked(payload.q19_q19_checkbox17);
+
+  function recordUploadedDocument(
+    documentType: OnboardingDocumentType,
+    label: string,
+    requestedFileName: string,
+    file: DownloadedDriveFile,
+  ): void {
+    const originalFileName = sanitizeFileName(requestedFileName);
+    documents.push({
+      documentType,
+      label,
+      status: 'uploaded',
+      requirementSatisfied: true,
+      originalFileName: file.originalFileName ?? originalFileName,
+      detectedContentType: file.detectedContentType,
+      storedFileName: file.storedFileName ?? originalFileName,
+      driveFileId: file.id,
+      driveFileUrl: file.webViewLink,
+    });
+  }
+
+  function recordRejectedDocument(
+    documentType: OnboardingDocumentType,
+    label: string,
+    requestedFileName: string,
+    err: unknown,
+    requirementSatisfied: boolean,
+  ): string {
+    const reason = safeProcessingReason(err);
+    documents.push({
+      documentType,
+      label,
+      status: 'rejected',
+      requirementSatisfied,
+      originalFileName: sanitizeFileName(requestedFileName),
+      safeRejectionReason: reason,
+    });
+    return reason;
+  }
+
+  function recordAbsentDocument(
+    documentType: OnboardingDocumentType,
+    label: string,
+    opts: { optional?: boolean; previouslySatisfied?: boolean; acceptedLegacy?: boolean },
+  ): void {
+    let status: OnboardingDocumentResultStatus;
+    if (opts.acceptedLegacy) status = 'accepted_legacy';
+    else if (opts.previouslySatisfied) status = 'previously_retained';
+    else if (opts.optional) status = 'optional_not_supplied';
+    else status = 'missing';
+    documents.push({
+      documentType,
+      label,
+      status,
+      requirementSatisfied:
+        Boolean(opts.optional) || Boolean(opts.previouslySatisfied) || Boolean(opts.acceptedLegacy),
+    });
+  }
 
   let w9FileId: string | null = null;
   let w9FileUrl: string | null = null;
@@ -356,11 +542,28 @@ export async function processOnboardingSubmission(
       signedAgreementFileId = file.id;
       signedAgreementFileUrl = file.webViewLink;
       processedFiles.push('Signed Agreement');
+      recordUploadedDocument(
+        'signed_agreement',
+        'Signed Agreement',
+        `SignedAgreement_${airtableRecordId}.pdf`,
+        file,
+      );
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
+      const msg = recordRejectedDocument(
+        'signed_agreement',
+        'Signed Agreement',
+        `SignedAgreement_${airtableRecordId}.pdf`,
+        err,
+        legacyAgreementSatisfied || (priorChecklist?.signed_agreement_received ?? false),
+      );
       log.error({ err, submissionId }, '[Onboarding] Signed agreement upload failed');
       errors.push(`Signed Agreement: ${msg}`);
     }
+  } else {
+    recordAbsentDocument('signed_agreement', 'Signed Agreement', {
+      previouslySatisfied: priorChecklist?.signed_agreement_received ?? false,
+      acceptedLegacy: legacyAgreementSatisfied,
+    });
   }
 
   // W-9 (required)
@@ -376,11 +579,22 @@ export async function processOnboardingSubmission(
       w9FileId = file.id;
       w9FileUrl = file.webViewLink;
       processedFiles.push('W-9');
+      recordUploadedDocument('w9', 'W-9', `W9_${airtableRecordId}.pdf`, file);
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
+      const msg = recordRejectedDocument(
+        'w9',
+        'W-9',
+        `W9_${airtableRecordId}.pdf`,
+        err,
+        priorChecklist?.w9_received ?? false,
+      );
       log.error({ err, submissionId }, '[Onboarding] W-9 upload failed');
       errors.push(`W-9: ${msg}`);
     }
+  } else {
+    recordAbsentDocument('w9', 'W-9', {
+      previouslySatisfied: priorChecklist?.w9_received ?? false,
+    });
   }
 
   // Photo ID (required)
@@ -396,11 +610,22 @@ export async function processOnboardingSubmission(
       photoIdFileId = file.id;
       photoIdFileUrl = file.webViewLink;
       processedFiles.push('Photo ID');
+      recordUploadedDocument('photo_id', 'Photo ID', `PhotoID_${airtableRecordId}.jpg`, file);
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
+      const msg = recordRejectedDocument(
+        'photo_id',
+        'Photo ID',
+        `PhotoID_${airtableRecordId}.jpg`,
+        err,
+        priorChecklist?.photo_id_received ?? false,
+      );
       log.error({ err, submissionId }, '[Onboarding] Photo ID upload failed');
       errors.push(`Photo ID: ${msg}`);
     }
+  } else {
+    recordAbsentDocument('photo_id', 'Photo ID', {
+      previouslySatisfied: priorChecklist?.photo_id_received ?? false,
+    });
   }
 
   // Proof of Insurance (optional)
@@ -416,11 +641,25 @@ export async function processOnboardingSubmission(
       insuranceFileId = file.id;
       insuranceFileUrl = file.webViewLink;
       processedFiles.push('Proof of Insurance');
+      recordUploadedDocument(
+        'insurance',
+        'Proof of Insurance',
+        `Insurance_${airtableRecordId}.pdf`,
+        file,
+      );
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
+      const msg = recordRejectedDocument(
+        'insurance',
+        'Proof of Insurance',
+        `Insurance_${airtableRecordId}.pdf`,
+        err,
+        true,
+      );
       log.warn({ err, submissionId }, '[Onboarding] Insurance upload failed');
       errors.push(`Insurance: ${msg}`);
     }
+  } else {
+    recordAbsentDocument('insurance', 'Proof of Insurance', { optional: true });
   }
 
   // Other document (optional)
@@ -436,68 +675,35 @@ export async function processOnboardingSubmission(
       otherDocFileId = file.id;
       otherDocFileUrl = file.webViewLink;
       processedFiles.push('Other Document');
+      recordUploadedDocument(
+        'other_document',
+        'Other Document',
+        `OtherDoc_${airtableRecordId}.pdf`,
+        file,
+      );
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
+      const msg = recordRejectedDocument(
+        'other_document',
+        'Other Document',
+        `OtherDoc_${airtableRecordId}.pdf`,
+        err,
+        true,
+      );
       log.warn({ err, submissionId }, '[Onboarding] Other document upload failed');
       errors.push(`Other Document: ${msg}`);
     }
+  } else {
+    recordAbsentDocument('other_document', 'Other Document', { optional: true });
   }
 
   // ── 6b. Upload complete submission summary to Drive ────────────────────
-  // Generates a plain-text summary of the sanitised payload and uploads it
-  // to the contractor's Drive folder.  The submissionId is embedded in the
+  // Generates a plain-text summary of normalized document outcomes and uploads
+  // it to the contractor's Drive folder. The submissionId is embedded in the
   // filename so that reprocessing the same webhook produces the same filename
   // (Drive will create a second copy, but the name makes it identifiable).
   // Failure is non-fatal: logged and appended to errors, but processing continues.
-  try {
-    const summaryDate = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
-    const safeName    = (String(payload.q43_typeA ?? contractor.full_name)).replace(/[/\\:*?"<>|]/g, '-').trim();
-    const summaryFileName = `${safeName} - Onboarding Submission - ${summaryDate} - ${submissionId}.txt`;
-    const summaryLines: string[] = [
-      'Assembly Concierge — Contractor Onboarding Submission',
-      '======================================================',
-      `Submission ID : ${submissionId}`,
-      `Submitted At  : ${new Date().toISOString()}`,
-      `Contractor    : ${contractor.full_name}`,
-      `Backend ID    : ${backendContractorId}`,
-      `Airtable ID   : ${airtableRecordId}`,
-      '',
-      '── Submission Fields ──────────────────────────────────',
-    ];
-    const sanitizedForSummary = buildSanitizedPayload(payload);
-    for (const [key, value] of Object.entries(sanitizedForSummary)) {
-      if (value === undefined || value === null || value === '') continue;
-      // Skip file URL fields — they are long and already stored separately
-      const isFileField = [
-        'q24_fileupload22', 'q29_fileupload27', 'q30_fileupload28',
-        'q31_fileupload29', 'uploadSigned49',
-      ].includes(key);
-      if (isFileField) {
-        summaryLines.push(`${key} : [file uploaded]`);
-      } else {
-        summaryLines.push(`${key} : ${JSON.stringify(value)}`);
-      }
-    }
-    summaryLines.push('');
-    summaryLines.push('── End of Submission ──────────────────────────────────');
-    const summaryBuffer = Buffer.from(summaryLines.join('\n'), 'utf-8');
-    await uploadBufferToFolder({
-      buffer:   summaryBuffer,
-      mimeType: 'text/plain',
-      fileName: summaryFileName,
-      folderId: folder.id,
-    });
-    processedFiles.push('Submission Summary');
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    log.error({ err, submissionId }, '[Onboarding] Submission summary upload failed (non-fatal)');
-    errors.push(`Submission Summary: ${msg}`);
-  }
-
-  // ── 7. Compute checklist and status ──────────────────────────────────────
-  // computeChecklist evaluates only the current payload. mergedChecklist
-  // applies BOOL_OR semantics: a field that was true in any prior submission
-  // (captured in priorChecklist) can never revert to false here.
+  // Status is derived only from successful current uploads and cumulative prior
+  // receipt state; the mere presence of a Jotform upload field is insufficient.
   const checklist = computeChecklist(
     payload,
     w9FileId !== null,
@@ -514,6 +720,40 @@ export async function processOnboardingSubmission(
     contractor_handbook_acknowledged: checklist.contractor_handbook_acknowledged || (priorChecklist?.contractor_handbook_acknowledged ?? false),
   };
   const documentStatus = computeDocumentStatus(mergedChecklist);
+  const normalizedResult: OnboardingResult = {
+    status: 'processed',
+    submissionId,
+    contractorId: backendContractorId,
+    airtableRecordId,
+    submittedAt,
+    documents,
+    overallDocumentStatus: documentStatus,
+    documentStatus,
+    processedFiles,
+    processingErrors: errors,
+    errors,
+  };
+
+  try {
+    const summaryDate = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+    const safeName    = (String(payload.q43_typeA ?? contractor.full_name)).replace(/[/\\:*?"<>|]/g, '-').trim();
+    const summaryFileName = `${safeName} - Onboarding Submission - ${summaryDate} - ${submissionId}.txt`;
+    const summaryBuffer = Buffer.from(
+      renderOnboardingSummary(normalizedResult, contractor.full_name),
+      'utf-8',
+    );
+    await uploadBufferToFolder({
+      buffer:   summaryBuffer,
+      mimeType: 'text/plain',
+      fileName: summaryFileName,
+      folderId: folder.id,
+    });
+    processedFiles.push('Submission Summary');
+  } catch (err) {
+    const msg = safeProcessingReason(err);
+    log.error({ err, submissionId }, '[Onboarding] Submission summary upload failed (non-fatal)');
+    errors.push(`Submission Summary: ${msg}`);
+  }
 
   // ── 8. Persist metadata to Postgres ──────────────────────────────────────
   const payloadHash = hashPayload(payload);
@@ -604,7 +844,7 @@ export async function processOnboardingSubmission(
     airtablePatchSucceeded = true;
   } catch (err) {
     log.error({ err, airtableRecordId }, '[Onboarding] Airtable update failed — metadata saved to Postgres');
-    errors.push(`Airtable sync failed: ${err instanceof Error ? err.message : String(err)}`);
+    errors.push(`Airtable sync failed: ${safeProcessingReason(err)}`);
   }
 
   // ── 10. Clear missing-docs email lock ─────────────────────────────────────
@@ -638,11 +878,5 @@ export async function processOnboardingSubmission(
     '[Onboarding] Submission processed',
   );
 
-  return {
-    status: 'processed',
-    contractorId: backendContractorId,
-    documentStatus,
-    processedFiles,
-    errors,
-  };
+  return normalizedResult;
 }

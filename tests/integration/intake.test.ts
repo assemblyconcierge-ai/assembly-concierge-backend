@@ -119,9 +119,15 @@ describe('POST /webhooks/jotform', () => {
     });
     vi.mocked(processOnboardingSubmission).mockResolvedValueOnce({
       status: 'processed',
+      submissionId: 'onboarding-submission-1',
       contractorId: 'contractor-123',
+      airtableRecordId: 'airtable-record-123',
+      submittedAt: '2026-07-17T12:00:00.000Z',
+      documents: [],
+      overallDocumentStatus: 'Submitted - Docs Complete',
       documentStatus: 'Submitted - Docs Complete',
       processedFiles: [],
+      processingErrors: [],
       errors: [],
     });
 

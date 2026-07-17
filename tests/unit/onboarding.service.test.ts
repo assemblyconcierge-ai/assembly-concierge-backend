@@ -31,6 +31,7 @@ vi.mock('../../src/db/pool', () => ({
 vi.mock('../../src/modules/storage/googleDrive.service', () => ({
   resolveContractorFolder: vi.fn(),
   downloadAndUploadFile: vi.fn(),
+  sanitizeFileName: vi.fn((fileName: string) => fileName),
   uploadBufferToFolder: vi.fn(),
 }));
 vi.mock('../../src/modules/airtable-sync/airtable.contractor.adapter', () => ({
@@ -353,6 +354,14 @@ describe('processOnboardingSubmission', () => {
     expect(result.status).toBe('processed');
     expect(result.errors).toHaveLength(1);
     expect(result.errors[0]).toContain('W-9');
+    expect(result.overallDocumentStatus).toBe('Submitted - Missing Items');
+    expect(result.documents).toContainEqual(
+      expect.objectContaining({
+        documentType: 'w9',
+        status: 'rejected',
+        requirementSatisfied: false,
+      }),
+    );
 
     // Verify Postgres INSERT was called with w9_received = false
     const insertCall = mockQuery.mock.calls.find((c) =>
@@ -444,8 +453,20 @@ describe('processOnboardingSubmission', () => {
   it('processes full happy path with W-9 and Photo ID', async () => {
     setupHappyPath();
     mockDownloadAndUploadFile
-      .mockResolvedValueOnce({ id: 'w9_id', webViewLink: 'https://drive.google.com/w9' })
-      .mockResolvedValueOnce({ id: 'photo_id', webViewLink: 'https://drive.google.com/photo' });
+      .mockResolvedValueOnce({
+        id: 'w9_id',
+        webViewLink: 'drive-w9-link',
+        originalFileName: `W9_${AIRTABLE_RECORD_ID}.pdf`,
+        detectedContentType: 'application/pdf',
+        storedFileName: `W9_${AIRTABLE_RECORD_ID}.pdf`,
+      })
+      .mockResolvedValueOnce({
+        id: 'photo_id',
+        webViewLink: 'drive-photo-link',
+        originalFileName: `PhotoID_${AIRTABLE_RECORD_ID}.jpg`,
+        detectedContentType: 'image/jpeg',
+        storedFileName: `PhotoID_${AIRTABLE_RECORD_ID}.jpg`,
+      });
 
     const payload = {
       ...BASE_PAYLOAD,
@@ -458,11 +479,35 @@ describe('processOnboardingSubmission', () => {
     expect(result.processedFiles).toContain('W-9');
     expect(result.processedFiles).toContain('Photo ID');
     expect(result.errors).toHaveLength(0);
+    expect(result.overallDocumentStatus).toBe('Submitted - Docs Complete');
+    expect(result.documents).toEqual([
+      expect.objectContaining({
+        documentType: 'signed_agreement',
+        status: 'accepted_legacy',
+        requirementSatisfied: true,
+      }),
+      expect.objectContaining({
+        documentType: 'w9',
+        status: 'uploaded',
+        detectedContentType: 'application/pdf',
+        storedFileName: `W9_${AIRTABLE_RECORD_ID}.pdf`,
+        driveFileId: 'w9_id',
+      }),
+      expect.objectContaining({
+        documentType: 'photo_id',
+        status: 'uploaded',
+        detectedContentType: 'image/jpeg',
+        storedFileName: `PhotoID_${AIRTABLE_RECORD_ID}.jpg`,
+        driveFileId: 'photo_id',
+      }),
+      expect.objectContaining({ documentType: 'insurance', status: 'optional_not_supplied' }),
+      expect.objectContaining({ documentType: 'other_document', status: 'optional_not_supplied' }),
+    ]);
 
     const airtableFields = mockUpdateAirtable.mock.calls[0][1] as Record<string, unknown>;
     expect(airtableFields['fld06XS5VPue6uSj8']).toBe(true);   // W-9 Received
     expect(airtableFields['fldqZOgILUTVbqzii']).toBe(true);   // Photo ID Received
-    expect(airtableFields['fldO46UgxkOuEpvay']).toBe('https://drive.google.com/photo');
+    expect(airtableFields['fldO46UgxkOuEpvay']).toBe('drive-photo-link');
     expect(airtableFields['fldauRRFrJoe7FrKQ']).toBe('Submitted - Docs Complete');
   });
 
@@ -558,6 +603,13 @@ describe('processOnboardingSubmission', () => {
     expect(uploadCall.fileName).toContain(SUBMISSION_ID);
     // Buffer must be non-empty and contain the submissionId
     const content = uploadCall.buffer.toString('utf-8');
+    expect(content).toContain('Contractor Onboarding Submission');
+    expect(content).toContain('Document Results');
+    expect(content).toContain('Signed Agreement');
+    expect(content).toContain('Status: accepted legacy');
+    expect(content).toContain('W-9\nStatus: missing');
+    expect(content).toContain('Overall Status: Submitted - Missing Items');
+    expect(content).toContain('Processing Notes:\nNone');
     expect(content).toContain(SUBMISSION_ID);
     expect(content).toContain(AIRTABLE_RECORD_ID);
   });
@@ -587,15 +639,48 @@ describe('processOnboardingSubmission', () => {
     expect(uploadCall.fileName).toContain(SUBMISSION_ID);
   });
 
-  it('summary content redacts signature field', async () => {
+  it('summary and audit payload exclude source URLs, credentials, signatures, and stack traces', async () => {
     setupHappyPath();
-    await processOnboardingSubmission(BASE_PAYLOAD);
+    const sourceCredential = 'source-token-value';
+    const webhookCredential = 'webhook-token-value';
+    const errorCredential = 'error-token-value';
+    const sourceUrl = `https://www.jotform.com/uploads/w9.pdf?token=${sourceCredential}`;
+    mockDownloadAndUploadFile.mockRejectedValueOnce(
+      new Error(
+        `Download failed token=${errorCredential} at ${sourceUrl}\n` +
+          '    at internalDownloader (download.ts:10:2)',
+      ),
+    );
+    await processOnboardingSubmission({
+      ...BASE_PAYLOAD,
+      q24_fileupload22: sourceUrl,
+      webhookToken: webhookCredential,
+      authorization: 'Bearer raw-authorization-value',
+    });
 
     const uploadCall = mockUploadBufferToFolder.mock.calls[0][0] as { buffer: Buffer };
     const content = uploadCall.buffer.toString('utf-8');
-    // Signature value should be redacted, not the raw base64 data
-    expect(content).toContain('[SIGNATURE_REDACTED]');
+    expect(content).toContain('Reason: Download failed token=[REDACTED] at [URL_REDACTED]');
+    expect(content).not.toContain(sourceUrl);
+    expect(content).not.toContain(sourceCredential);
+    expect(content).not.toContain(webhookCredential);
+    expect(content).not.toContain(errorCredential);
+    expect(content).not.toContain('raw-authorization-value');
     expect(content).not.toContain('data:image/png;base64');
+    expect(content).not.toContain('internalDownloader');
+    expect(content).not.toContain('download.ts:10:2');
+
+    const insertCall = mockQuery.mock.calls.find((c) =>
+      String(c[0]).includes('INSERT INTO contractor_onboarding_documents'),
+    );
+    const sanitizedPayload = String((insertCall![1] as unknown[])[4]);
+    expect(sanitizedPayload).toContain('[FILE_SOURCE_REDACTED]');
+    expect(sanitizedPayload).toContain('[SIGNATURE_REDACTED]');
+    expect(sanitizedPayload).toContain('[CREDENTIAL_REDACTED]');
+    expect(sanitizedPayload).not.toContain(sourceUrl);
+    expect(sanitizedPayload).not.toContain(sourceCredential);
+    expect(sanitizedPayload).not.toContain(webhookCredential);
+    expect(sanitizedPayload).not.toContain('raw-authorization-value');
   });
 });
 
@@ -633,6 +718,13 @@ describe('processOnboardingSubmission — cumulative receipt booleans (BOOL_OR)'
     // Payload has no W-9 URL — upload will not run
     const result = await processOnboardingSubmission(BASE_PAYLOAD);
     expect(result.status).toBe('processed');
+    expect(result.documents).toContainEqual(
+      expect.objectContaining({
+        documentType: 'w9',
+        status: 'previously_retained',
+        requirementSatisfied: true,
+      }),
+    );
 
     // Airtable PATCH must have w9_received = true (preserved from prior)
     const airtableFields = mockUpdateAirtable.mock.calls[0][1] as Record<string, unknown>;
@@ -689,6 +781,26 @@ describe('processOnboardingSubmission — cumulative receipt booleans (BOOL_OR)'
     };
     const result = await processOnboardingSubmission(emptyPayload);
     expect(result.status).toBe('processed');
+    expect(result.overallDocumentStatus).toBe('Submitted - Docs Complete');
+    expect(result.documents).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          documentType: 'signed_agreement',
+          status: 'previously_retained',
+          requirementSatisfied: true,
+        }),
+        expect.objectContaining({
+          documentType: 'w9',
+          status: 'previously_retained',
+          requirementSatisfied: true,
+        }),
+        expect.objectContaining({
+          documentType: 'photo_id',
+          status: 'previously_retained',
+          requirementSatisfied: true,
+        }),
+      ]),
+    );
 
     const airtableFields = mockUpdateAirtable.mock.calls[0][1] as Record<string, unknown>;
     expect(airtableFields['fldQH4HCChb5i8HM9']).toBe(true);  // AT.SIGNED_AGREEMENT

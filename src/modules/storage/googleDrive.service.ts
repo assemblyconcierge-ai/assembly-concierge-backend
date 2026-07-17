@@ -56,15 +56,20 @@ const REJECTED_CONTENT_TYPES = ['text/html', 'application/json', 'text/plain'];
 
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 
+export type TrustedDocumentContentType =
+  | 'application/pdf'
+  | 'image/png'
+  | 'image/jpeg';
+
 /** Filename extension for each accepted contractor document Content-Type. */
-const CONTENT_TYPE_EXTENSIONS: Readonly<Record<string, string>> = {
+const CONTENT_TYPE_EXTENSIONS: Readonly<Record<TrustedDocumentContentType, string>> = {
   'application/pdf': '.pdf',
   'image/png': '.png',
   'image/jpeg': '.jpg',
 };
 
 /** Required leading bytes for each accepted contractor document Content-Type. */
-const CONTENT_TYPE_SIGNATURES: Readonly<Record<string, Buffer>> = {
+const CONTENT_TYPE_SIGNATURES: Readonly<Record<TrustedDocumentContentType, Buffer>> = {
   'application/pdf': Buffer.from('%PDF'),
   'image/png': Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
   'image/jpeg': Buffer.from([0xff, 0xd8, 0xff]),
@@ -75,6 +80,12 @@ const CONTENT_TYPE_SIGNATURES: Readonly<Record<string, Buffer>> = {
 export interface DriveFile {
   id: string;
   webViewLink: string;
+}
+
+export interface DownloadedDriveFile extends DriveFile {
+  originalFileName: string;
+  detectedContentType: TrustedDocumentContentType;
+  storedFileName: string;
 }
 
 export interface DriveFolder {
@@ -98,7 +109,7 @@ export function normalizeContentType(contentType: string): string {
 /** Resolve the required filename extension for an approved document Content-Type. */
 export function resolveFileExtension(contentType: string, fileName: string): string {
   const ct = normalizeContentType(contentType);
-  const extension = CONTENT_TYPE_EXTENSIONS[ct];
+  const extension = CONTENT_TYPE_EXTENSIONS[ct as TrustedDocumentContentType];
   if (!extension) {
     throw downloadError(
       fileName,
@@ -108,22 +119,50 @@ export function resolveFileExtension(contentType: string, fileName: string): str
   return extension;
 }
 
-/** Reject a downloaded file whose leading bytes do not match its approved MIME type. */
-function validateFileSignature(
+/** Identify an approved contractor document type solely from leading bytes. */
+function detectContentTypeFromSignature(
   buffer: Buffer,
-  contentType: string,
+): TrustedDocumentContentType | null {
+  for (const [contentType, signature] of Object.entries(CONTENT_TYPE_SIGNATURES)) {
+    if (buffer.subarray(0, signature.length).equals(signature)) {
+      return contentType as TrustedDocumentContentType;
+    }
+  }
+  return null;
+}
+
+/**
+ * Resolve the trusted document type from the declared MIME type and magic bytes.
+ * application/octet-stream is accepted only when an approved signature identifies
+ * the content. Approved declared types must agree with the detected signature.
+ */
+export function resolveTrustedContentType(
+  buffer: Buffer,
+  declaredContentType: string,
   fileName: string,
-): void {
-  const expectedSignature = CONTENT_TYPE_SIGNATURES[contentType];
-  if (
-    !expectedSignature ||
-    !buffer.subarray(0, expectedSignature.length).equals(expectedSignature)
-  ) {
+): TrustedDocumentContentType {
+  const ct = normalizeContentType(declaredContentType);
+  const detectedContentType = detectContentTypeFromSignature(buffer);
+
+  if (ct === 'application/octet-stream') {
+    if (!detectedContentType) {
+      throw downloadError(
+        fileName,
+        'application/octet-stream content does not match an approved contractor document signature',
+      );
+    }
+    return detectedContentType;
+  }
+
+  // Preserve the strict allowlist and its existing safe unsupported-type error.
+  resolveFileExtension(ct, fileName);
+  if (detectedContentType !== ct) {
     throw downloadError(
       fileName,
-      `file signature does not match content-type "${contentType}"`,
+      `file signature does not match content-type "${ct}"`,
     );
   }
+  return ct as TrustedDocumentContentType;
 }
 
 /** Parse and validate a Jotform download URL without making a network request. */
@@ -504,14 +543,14 @@ export async function downloadAndUploadFile(opts: {
   fileName: string;
   folderId: string;
   jotformApiKey?: string;
-}): Promise<DriveFile> {
+}): Promise<DownloadedDriveFile> {
   const safeFileName = sanitizeFileName(opts.fileName);
   const { response, buffer } = await fetchJotformFile(
     opts.sourceUrl,
     safeFileName,
     opts.jotformApiKey,
   );
-  const contentType = normalizeContentType(
+  const declaredContentType = normalizeContentType(
     response.headers.get('content-type') ?? 'application/octet-stream',
   );
 
@@ -520,17 +559,21 @@ export async function downloadAndUploadFile(opts: {
     {
       fileName: safeFileName,
       httpStatus: response.status,
-      contentType,
+      contentType: declaredContentType,
       byteSize: buffer.length,
     },
     '[GoogleDrive] Download response received — validating before upload',
   );
 
   // Guards 2–4: content-type, HTML body, minimum size
-  validateDownloadedBuffer(buffer, contentType, safeFileName);
+  validateDownloadedBuffer(buffer, declaredContentType, safeFileName);
 
-  const extension = resolveFileExtension(contentType, safeFileName);
-  validateFileSignature(buffer, contentType, safeFileName);
+  const trustedContentType = resolveTrustedContentType(
+    buffer,
+    declaredContentType,
+    safeFileName,
+  );
+  const extension = resolveFileExtension(trustedContentType, safeFileName);
   const fileNameWithoutExtension = safeFileName.replace(/\.[^./\\]+$/, '');
   const normalizedFileName = `${fileNameWithoutExtension.slice(0, 255 - extension.length)}${extension}`;
 
@@ -542,7 +585,7 @@ export async function downloadAndUploadFile(opts: {
       parents: [opts.folderId],
     },
     media: {
-      mimeType: contentType,
+      mimeType: trustedContentType,
       body: Readable.from(buffer),
     },
     fields: 'id, webViewLink',
@@ -561,13 +604,20 @@ export async function downloadAndUploadFile(opts: {
     {
       fileId: id,
       fileName: normalizedFileName,
+      contentType: trustedContentType,
       folderId: opts.folderId,
       byteSize: buffer.length,
     },
     '[GoogleDrive] File uploaded successfully',
   );
 
-  return { id, webViewLink };
+  return {
+    id,
+    webViewLink,
+    originalFileName: safeFileName,
+    detectedContentType: trustedContentType,
+    storedFileName: normalizedFileName,
+  };
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
