@@ -33,15 +33,24 @@ import {
   MAX_DOWNLOAD_BYTES,
   MAX_DOWNLOAD_REDIRECTS,
   downloadAndUploadFile,
+  normalizeContentType,
+  resolveFileExtension,
   validateJotformDownloadUrl,
 } from '../../src/modules/storage/googleDrive.service';
 
 const TEST_API_KEY = 'test-jotform-key-not-a-secret';
 const VALID_SOURCE = 'https://www.jotform.com/uploads/test-account/form/submission/W9.pdf';
+const PDF_SIGNATURE = Buffer.from('%PDF-1.7');
+const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+const JPEG_SIGNATURE = Buffer.from([0xff, 0xd8, 0xff]);
 
-function fileResponse(size = 1024, extraHeaders: Record<string, string> = {}): Response {
+function fileResponse(
+  size = 1024,
+  extraHeaders: Record<string, string> = {},
+  signature = PDF_SIGNATURE,
+): Response {
   const body = new Uint8Array(size);
-  body.set(Buffer.from('%PDF-1.7'));
+  body.set(signature);
   return new Response(body, {
     status: 200,
     headers: { 'content-type': 'application/pdf', ...extraHeaders },
@@ -55,10 +64,14 @@ function redirectResponse(location?: string): Response {
   });
 }
 
-function download(sourceUrl = VALID_SOURCE, jotformApiKey = TEST_API_KEY) {
+function download(
+  sourceUrl = VALID_SOURCE,
+  jotformApiKey = TEST_API_KEY,
+  fileName = 'W9_test-contractor.pdf',
+) {
   return downloadAndUploadFile({
     sourceUrl,
-    fileName: 'W9_test-contractor.pdf',
+    fileName,
     folderId: 'drive-folder-id',
     jotformApiKey,
   });
@@ -102,6 +115,82 @@ describe('contractor Jotform file download security', () => {
     expect(mocks.fetch).toHaveBeenCalledOnce();
     expect(mocks.fetch.mock.calls[0][1]).toMatchObject({ redirect: 'manual' });
     expect(mocks.driveCreate).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    [
+      'application/pdf; charset=binary',
+      'contractor-id.png',
+      'contractor-id.pdf',
+      PDF_SIGNATURE,
+    ],
+    ['image/png', 'insurance', 'insurance.png', PNG_SIGNATURE],
+    ['IMAGE/JPEG; charset=binary', 'photo.jpeg', 'photo.jpg', JPEG_SIGNATURE],
+  ])(
+    'accepts a valid %s signature and uploads filename %s as %s',
+    async (contentType, sourceFileName, expectedFileName, signature) => {
+      mocks.fetch.mockResolvedValue(
+        fileResponse(1024, { 'content-type': contentType }, signature),
+      );
+
+      await download(VALID_SOURCE, TEST_API_KEY, sourceFileName);
+
+      expect(mocks.driveCreate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          requestBody: {
+            name: expectedFileName,
+            parents: ['drive-folder-id'],
+          },
+          media: expect.objectContaining({
+            mimeType: normalizeContentType(contentType),
+          }),
+        }),
+      );
+      expect(mocks.logInfo).toHaveBeenCalledWith(
+        expect.objectContaining({ fileName: expectedFileName }),
+        '[GoogleDrive] File uploaded successfully',
+      );
+    },
+  );
+
+  it.each([
+    ['PDF', 'application/pdf'],
+    ['PNG', 'image/png'],
+    ['JPEG', 'image/jpeg'],
+  ])(
+    'rejects a claimed %s with non-%s bytes before Drive upload',
+    async (_label, contentType) => {
+      mocks.fetch.mockResolvedValue(
+        fileResponse(1024, { 'content-type': contentType }, Buffer.from('not-a-file')),
+      );
+
+      await expect(download()).rejects.toThrow(
+        `[GoogleDrive] Download rejected for "W9_test-contractor.pdf": file signature does not match content-type "${contentType}". File was NOT uploaded.`,
+      );
+      expect(mocks.driveCreate).not.toHaveBeenCalled();
+    },
+  );
+
+  it('rejects an unsupported MIME type before Drive upload', async () => {
+    mocks.fetch.mockResolvedValue(
+      fileResponse(1024, { 'content-type': 'application/octet-stream; charset=binary' }),
+    );
+
+    await expect(download()).rejects.toThrow(
+      '[GoogleDrive] Download rejected for "W9_test-contractor.pdf": content-type "application/octet-stream" is not an approved contractor document type. File was NOT uploaded.',
+    );
+    expect(mocks.driveCreate).not.toHaveBeenCalled();
+  });
+
+  it('uses the normalized filename in incomplete-upload errors', async () => {
+    mocks.fetch.mockResolvedValue(
+      fileResponse(1024, { 'content-type': 'image/jpeg' }, JPEG_SIGNATURE),
+    );
+    mocks.driveCreate.mockResolvedValue({ data: { id: 'drive-file-id' } });
+
+    await expect(download(VALID_SOURCE, TEST_API_KEY, 'photo.png')).rejects.toThrow(
+      'uploadFile returned incomplete data for "photo.jpg"',
+    );
   });
 
   it.each([
@@ -295,5 +384,27 @@ describe('contractor Jotform file download security', () => {
     expect(errorMessage).not.toContain(credentialBearingUrl);
     expect(JSON.stringify(mocks.logInfo.mock.calls)).not.toContain(TEST_API_KEY);
     expect(mocks.driveCreate).not.toHaveBeenCalled();
+  });
+});
+
+describe('contractor document MIME helpers', () => {
+  it('normalizes case, whitespace, and Content-Type parameters', () => {
+    expect(normalizeContentType(' Image/JPEG ; charset=binary')).toBe('image/jpeg');
+  });
+
+  it.each([
+    ['application/pdf', '.pdf'],
+    ['image/png', '.png'],
+    ['image/jpeg', '.jpg'],
+  ])('resolves %s to %s', (contentType, extension) => {
+    expect(resolveFileExtension(contentType, 'contractor-document')).toBe(extension);
+  });
+
+  it('safely rejects unapproved normalized MIME types with the filename', () => {
+    expect(() =>
+      resolveFileExtension('APPLICATION/ZIP; charset=binary', 'insurance.pdf'),
+    ).toThrow(
+      '[GoogleDrive] Download rejected for "insurance.pdf": content-type "application/zip" is not an approved contractor document type. File was NOT uploaded.',
+    );
   });
 });

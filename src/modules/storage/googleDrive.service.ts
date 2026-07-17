@@ -56,6 +56,20 @@ const REJECTED_CONTENT_TYPES = ['text/html', 'application/json', 'text/plain'];
 
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 
+/** Filename extension for each accepted contractor document Content-Type. */
+const CONTENT_TYPE_EXTENSIONS: Readonly<Record<string, string>> = {
+  'application/pdf': '.pdf',
+  'image/png': '.png',
+  'image/jpeg': '.jpg',
+};
+
+/** Required leading bytes for each accepted contractor document Content-Type. */
+const CONTENT_TYPE_SIGNATURES: Readonly<Record<string, Buffer>> = {
+  'application/pdf': Buffer.from('%PDF'),
+  'image/png': Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+  'image/jpeg': Buffer.from([0xff, 0xd8, 0xff]),
+};
+
 // ── Types ──────────────────────────────────────────────────────────────────
 
 export interface DriveFile {
@@ -74,6 +88,42 @@ function downloadError(fileName: string, reason: string): SafeDownloadError {
   return new SafeDownloadError(
     `[GoogleDrive] Download rejected for "${fileName}": ${reason}. File was NOT uploaded.`,
   );
+}
+
+/** Remove Content-Type parameters and normalize the media type for comparison. */
+export function normalizeContentType(contentType: string): string {
+  return contentType.toLowerCase().split(';')[0].trim();
+}
+
+/** Resolve the required filename extension for an approved document Content-Type. */
+export function resolveFileExtension(contentType: string, fileName: string): string {
+  const ct = normalizeContentType(contentType);
+  const extension = CONTENT_TYPE_EXTENSIONS[ct];
+  if (!extension) {
+    throw downloadError(
+      fileName,
+      `content-type "${ct}" is not an approved contractor document type`,
+    );
+  }
+  return extension;
+}
+
+/** Reject a downloaded file whose leading bytes do not match its approved MIME type. */
+function validateFileSignature(
+  buffer: Buffer,
+  contentType: string,
+  fileName: string,
+): void {
+  const expectedSignature = CONTENT_TYPE_SIGNATURES[contentType];
+  if (
+    !expectedSignature ||
+    !buffer.subarray(0, expectedSignature.length).equals(expectedSignature)
+  ) {
+    throw downloadError(
+      fileName,
+      `file signature does not match content-type "${contentType}"`,
+    );
+  }
 }
 
 /** Parse and validate a Jotform download URL without making a network request. */
@@ -269,7 +319,7 @@ export function validateDownloadedBuffer(
   contentType: string,
   fileName: string,
 ): void {
-  const ct = contentType.toLowerCase().split(';')[0].trim();
+  const ct = normalizeContentType(contentType);
 
   // 1. Reject known non-file content types
   for (const rejected of REJECTED_CONTENT_TYPES) {
@@ -461,7 +511,9 @@ export async function downloadAndUploadFile(opts: {
     safeFileName,
     opts.jotformApiKey,
   );
-  const contentType = response.headers.get('content-type') ?? 'application/octet-stream';
+  const contentType = normalizeContentType(
+    response.headers.get('content-type') ?? 'application/octet-stream',
+  );
 
   // Safe log: status, content-type, and byte size only — no file contents
   logger.info(
@@ -477,15 +529,20 @@ export async function downloadAndUploadFile(opts: {
   // Guards 2–4: content-type, HTML body, minimum size
   validateDownloadedBuffer(buffer, contentType, safeFileName);
 
+  const extension = resolveFileExtension(contentType, safeFileName);
+  validateFileSignature(buffer, contentType, safeFileName);
+  const fileNameWithoutExtension = safeFileName.replace(/\.[^./\\]+$/, '');
+  const normalizedFileName = `${fileNameWithoutExtension.slice(0, 255 - extension.length)}${extension}`;
+
   // Upload to Drive — supportsAllDrives required for Shared Drive targets
   const drive = getDriveClient();
   const uploadRes = await drive.files.create({
     requestBody: {
-      name: safeFileName,
+      name: normalizedFileName,
       parents: [opts.folderId],
     },
     media: {
-      mimeType: contentType.split(';')[0].trim(),
+      mimeType: contentType,
       body: Readable.from(buffer),
     },
     fields: 'id, webViewLink',
@@ -496,12 +553,17 @@ export async function downloadAndUploadFile(opts: {
   const webViewLink = uploadRes.data.webViewLink;
   if (!id || !webViewLink) {
     throw new Error(
-      `[GoogleDrive] uploadFile returned incomplete data for "${safeFileName}"`,
+      `[GoogleDrive] uploadFile returned incomplete data for "${normalizedFileName}"`,
     );
   }
 
   logger.info(
-    { fileId: id, fileName: safeFileName, folderId: opts.folderId, byteSize: buffer.length },
+    {
+      fileId: id,
+      fileName: normalizedFileName,
+      folderId: opts.folderId,
+      byteSize: buffer.length,
+    },
     '[GoogleDrive] File uploaded successfully',
   );
 
