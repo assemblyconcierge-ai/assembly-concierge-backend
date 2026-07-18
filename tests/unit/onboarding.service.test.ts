@@ -60,7 +60,9 @@ import {
   computeChecklist,
   computeDocumentStatus,
   processOnboardingSubmission,
+  extractResponseFields,
   type OnboardingPayload,
+  type OnboardingResponseFields,
 } from '../../src/modules/onboarding/onboarding.service';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -681,6 +683,309 @@ describe('processOnboardingSubmission', () => {
     expect(sanitizedPayload).not.toContain(sourceCredential);
     expect(sanitizedPayload).not.toContain(webhookCredential);
     expect(sanitizedPayload).not.toContain('raw-authorization-value');
+  });
+});
+
+// ── Onboarding Responses section ────────────────────────────────────────────────────────────────
+
+describe('extractResponseFields', () => {
+  // T-R1: all approved fields render with readable labels
+  it('T-R1: all approved fields render with readable labels', async () => {
+    setupHappyPath();
+    const payload: OnboardingPayload = {
+      ...BASE_PAYLOAD,
+      q5_q5_textbox3: 'Alex',
+      q6_q6_phone4: '+14045550000',
+      q8_q8_email6: 'jane@example.com',
+      q15_q15_checkbox13: 'Yes',
+      q16_q16_checkbox14: 'Yes',
+      q26_q26_dropdown24: 'Zelle',
+      q32_q32_checkbox30: 'Yes',
+    };
+    await processOnboardingSubmission(payload);
+
+    const uploadCall = mockUploadBufferToFolder.mock.calls[0][0] as { buffer: Buffer };
+    const content = uploadCall.buffer.toString('utf-8');
+
+    expect(content).toContain('Onboarding Responses');
+    expect(content).toContain('Legal Name: Jane Doe');
+    expect(content).toContain('Preferred Name: Alex');
+    expect(content).toContain('Phone: +14045550000');
+    expect(content).toContain('Email: jane@example.com');
+    expect(content).toContain('Agreement Acknowledged: Yes');
+    expect(content).toContain('SMS Consent Confirmed: Yes');
+    expect(content).toContain('Transportation Confirmed: Yes');
+    expect(content).toContain('Basic Tools Confirmed: Yes');
+    expect(content).toContain('Job Readiness Confirmed: Yes');
+    expect(content).toContain('Payment Setup Acknowledged: Yes');
+    expect(content).toContain('Preferred Payout Method: Zelle');
+    expect(content).toContain('Contractor Handbook Acknowledged: Yes');
+    expect(content).toContain('Information Accuracy Certified: Yes');
+  });
+
+  // T-R2: each acknowledgment independently renders Yes or No
+  it('T-R2: each acknowledgment independently renders Yes or No', () => {
+    const allYes: OnboardingPayload = {
+      ...BASE_PAYLOAD,
+      q19_q19_checkbox17: 'Yes',
+      q36_iAgree: 'Yes',
+      q14_q14_checkbox12: 'Yes',
+      q15_q15_checkbox13: 'Yes',
+      q16_q16_checkbox14: 'Yes',
+      q25_q25_checkbox23: 'Yes',
+      q39_contractorHandbook39: 'Yes',
+      q32_q32_checkbox30: 'Yes',
+    };
+    const allNo: OnboardingPayload = {
+      ...BASE_PAYLOAD,
+      q19_q19_checkbox17: '',
+      q36_iAgree: '',
+      q14_q14_checkbox12: '',
+      q15_q15_checkbox13: '',
+      q16_q16_checkbox14: '',
+      q25_q25_checkbox23: '',
+      q39_contractorHandbook39: '',
+      q32_q32_checkbox30: '',
+    };
+
+    const yes = extractResponseFields(allYes, 'Jane Doe');
+    expect(yes.agreementAcknowledged).toBe(true);
+    expect(yes.smsConsentConfirmed).toBe(true);
+    expect(yes.transportationConfirmed).toBe(true);
+    expect(yes.basicToolsConfirmed).toBe(true);
+    expect(yes.jobReadinessConfirmed).toBe(true);
+    expect(yes.paymentSetupAcknowledged).toBe(true);
+    expect(yes.handbookAcknowledged).toBe(true);
+    expect(yes.informationAccuracyCertified).toBe(true);
+
+    const no = extractResponseFields(allNo, 'Jane Doe');
+    expect(no.agreementAcknowledged).toBe(false);
+    expect(no.smsConsentConfirmed).toBe(false);
+    expect(no.transportationConfirmed).toBe(false);
+    expect(no.basicToolsConfirmed).toBe(false);
+    expect(no.jobReadinessConfirmed).toBe(false);
+    expect(no.paymentSetupAcknowledged).toBe(false);
+    expect(no.handbookAcknowledged).toBe(false);
+    expect(no.informationAccuracyCertified).toBe(false);
+  });
+
+  // T-R3: phone string input renders correctly
+  it('T-R3: phone string input renders correctly', () => {
+    const payload: OnboardingPayload = { ...BASE_PAYLOAD, q6_q6_phone4: '+14045550000' };
+    const fields = extractResponseFields(payload, 'Jane Doe');
+    expect(fields.phone).toBe('+14045550000');
+  });
+
+  // T-R4: phone object { full: ... } input renders correctly
+  it('T-R4: phone object { full: ... } input renders correctly', () => {
+    const payload: OnboardingPayload = { ...BASE_PAYLOAD, q6_q6_phone4: { full: '+14045550000' } };
+    const fields = extractResponseFields(payload, 'Jane Doe');
+    expect(fields.phone).toBe('+14045550000');
+  });
+
+  // T-R5: blank preferred name is omitted
+  it('T-R5: blank preferred name is omitted', async () => {
+    setupHappyPath();
+    const payload: OnboardingPayload = { ...BASE_PAYLOAD, q5_q5_textbox3: '' };
+    await processOnboardingSubmission(payload);
+
+    const uploadCall = mockUploadBufferToFolder.mock.calls[0][0] as { buffer: Buffer };
+    const content = uploadCall.buffer.toString('utf-8');
+    expect(content).not.toContain('Preferred Name');
+  });
+
+  // T-R6: blank payout method is omitted
+  it('T-R6: blank payout method is omitted', async () => {
+    setupHappyPath();
+    const payload: OnboardingPayload = { ...BASE_PAYLOAD, q26_q26_dropdown24: '' };
+    await processOnboardingSubmission(payload);
+
+    const uploadCall = mockUploadBufferToFolder.mock.calls[0][0] as { buffer: Buffer };
+    const content = uploadCall.buffer.toString('utf-8');
+    expect(content).not.toContain('Preferred Payout Method');
+  });
+
+  // T-R7: legacy signature value absent from summary
+  it('T-R7: legacy signature value is absent from summary', async () => {
+    setupHappyPath();
+    // BASE_PAYLOAD already has q20_q20_signature18: 'data:image/png;base64,abc'
+    await processOnboardingSubmission(BASE_PAYLOAD);
+
+    const uploadCall = mockUploadBufferToFolder.mock.calls[0][0] as { buffer: Buffer };
+    const content = uploadCall.buffer.toString('utf-8');
+    expect(content).not.toContain('data:image/png');
+    expect(content).not.toContain('base64');
+  });
+
+  // T-R8: upload source URLs absent from entire generated Drive summary
+  it('T-R8: upload source URLs are absent from the entire generated Drive summary', async () => {
+    setupHappyPath();
+    const sourceUrl = 'https://www.jotform.com/uploads/w9.pdf';
+    const payload: OnboardingPayload = { ...BASE_PAYLOAD, q24_fileupload22: sourceUrl };
+    // Upload succeeds so the URL is consumed but must not appear in the summary
+    mockDownloadAndUploadFile.mockResolvedValueOnce({
+      id: 'w9_id',
+      webViewLink: 'https://drive.google.com/file/d/w9_id/view',
+    });
+    await processOnboardingSubmission(payload);
+
+    const uploadCall = mockUploadBufferToFolder.mock.calls[0][0] as { buffer: Buffer };
+    const content = uploadCall.buffer.toString('utf-8');
+    // The Jotform source URL must not appear anywhere in the summary
+    expect(content).not.toContain(sourceUrl);
+    expect(content).not.toContain('jotform.com/uploads');
+  });
+
+  // T-R9: token-like values absent from response section
+  it('T-R9: token-like values are absent from response section', async () => {
+    setupHappyPath();
+    const payload: OnboardingPayload = {
+      ...BASE_PAYLOAD,
+      webhookToken: 'secret-token-value',
+      authorization: 'Bearer raw-auth-value',
+    };
+    await processOnboardingSubmission(payload);
+
+    const uploadCall = mockUploadBufferToFolder.mock.calls[0][0] as { buffer: Buffer };
+    const content = uploadCall.buffer.toString('utf-8');
+    expect(content).not.toContain('secret-token-value');
+    expect(content).not.toContain('raw-auth-value');
+  });
+
+  // T-R10: existing document-results formatting preserved
+  it('T-R10: existing document-results formatting is preserved', async () => {
+    setupHappyPath();
+    await processOnboardingSubmission(BASE_PAYLOAD);
+
+    const uploadCall = mockUploadBufferToFolder.mock.calls[0][0] as { buffer: Buffer };
+    const content = uploadCall.buffer.toString('utf-8');
+    expect(content).toContain('Document Results');
+    expect(content).toContain('Signed Agreement');
+    expect(content).toContain('Status: accepted legacy');
+    expect(content).toContain('Overall Status:');
+    expect(content).toContain('Processing Notes:');
+  });
+
+  // T-R11: Airtable update does not include any new field IDs
+  it('T-R11: Airtable update does not include any new field IDs', async () => {
+    setupHappyPath();
+    const payload: OnboardingPayload = {
+      ...BASE_PAYLOAD,
+      q5_q5_textbox3: 'Alex',
+      q6_q6_phone4: '+14045550000',
+      q8_q8_email6: 'jane@example.com',
+      q26_q26_dropdown24: 'Zelle',
+      q32_q32_checkbox30: 'Yes',
+    };
+    await processOnboardingSubmission(payload);
+
+    const airtableFields = mockUpdateAirtable.mock.calls[0][1] as Record<string, unknown>;
+    const usedFieldIds = Object.keys(airtableFields);
+    const allowedFieldIds = new Set([
+      'fld0Is7pUxLh2TZj3', // AT.SUBMITTED_AT
+      'fldQHTr0eSxmhGGOW', // AT.SUBMISSION_ID
+      'fldXR2KV5uq7DYbZ9', // AT.DRIVE_FOLDER
+      'fldQH4HCChb5i8HM9', // AT.SIGNED_AGREEMENT
+      'fld06XS5VPue6uSj8', // AT.W9_RECEIVED
+      'fldZ1q3cYMvYwni8q', // AT.PAYMENT_SETUP
+      'fldd92BZZcGigAshI', // AT.SMS_CONSENT
+      'fldWjj2Ox2reuMG8I', // AT.TOOLS_TRANSPORTATION
+      'fld85axOvjHgJDmiS', // AT.HANDBOOK
+      'fldqZOgILUTVbqzii', // AT.PHOTO_ID_RECEIVED
+      'fldO46UgxkOuEpvay', // AT.PHOTO_ID_FILE_LINK (only when photo upload succeeds)
+      'fldauRRFrJoe7FrKQ', // AT.DOCUMENT_STATUS
+    ]);
+    for (const id of usedFieldIds) {
+      expect(allowedFieldIds).toContain(id);
+    }
+  });
+});
+
+// ── normalizeSingleLine / extractResponseFields edge cases ─────────────────────────────────
+
+describe('extractResponseFields — normalization edge cases', () => {
+  // T-N1: blank submitted legal name falls back to contractor name
+  it('T-N1: blank submitted legal name falls back to contractor name', () => {
+    const payload: OnboardingPayload = { ...BASE_PAYLOAD, q43_typeA: '' };
+    const fields = extractResponseFields(payload, 'Contractor Full Name');
+    expect(fields.legalName).toBe('Contractor Full Name');
+  });
+
+  // T-N2: whitespace-only submitted legal name falls back to contractor name
+  it('T-N2: whitespace-only submitted legal name falls back to contractor name', () => {
+    const payload: OnboardingPayload = { ...BASE_PAYLOAD, q43_typeA: '   ' };
+    const fields = extractResponseFields(payload, 'Contractor Full Name');
+    expect(fields.legalName).toBe('Contractor Full Name');
+  });
+
+  // T-N3: embedded newline in preferred name is collapsed to one line
+  it('T-N3: embedded newline in preferred name is collapsed to one line', () => {
+    const payload: OnboardingPayload = {
+      ...BASE_PAYLOAD,
+      q5_q5_textbox3: `Alex\nFake Label: injected`,
+    };
+    const fields = extractResponseFields(payload, 'Jane Doe');
+    expect(fields.preferredName).toBe('Alex Fake Label: injected');
+    expect(fields.preferredName).not.toContain('\n');
+  });
+
+  // T-N4: embedded newline in payout method is collapsed to one line
+  it('T-N4: embedded newline in payout method is collapsed to one line', () => {
+    const payload: OnboardingPayload = {
+      ...BASE_PAYLOAD,
+      q26_q26_dropdown24: `Zelle\nFake Label: injected`,
+    };
+    const fields = extractResponseFields(payload, 'Jane Doe');
+    expect(fields.preferredPayoutMethod).toBe('Zelle Fake Label: injected');
+    expect(fields.preferredPayoutMethod).not.toContain('\n');
+  });
+
+  // T-N5: embedded newline in phone string cannot inject a separate label
+  it('T-N5: embedded newline in phone string cannot inject a separate label', () => {
+    const payload: OnboardingPayload = {
+      ...BASE_PAYLOAD,
+      q6_q6_phone4: `+14045550000\nFake Label: injected`,
+    };
+    const fields = extractResponseFields(payload, 'Jane Doe');
+    expect(fields.phone).toBe('+14045550000 Fake Label: injected');
+    expect(fields.phone).not.toContain('\n');
+  });
+
+  // T-N6: embedded newline in email cannot inject a separate label
+  it('T-N6: embedded newline in email cannot inject a separate label', () => {
+    const payload: OnboardingPayload = {
+      ...BASE_PAYLOAD,
+      q8_q8_email6: `jane@example.com\nFake Label: injected`,
+    };
+    const fields = extractResponseFields(payload, 'Jane Doe');
+    expect(fields.email).toBe('jane@example.com Fake Label: injected');
+    expect(fields.email).not.toContain('\n');
+  });
+
+  // T-N7: Unicode line separator (U+2028) and paragraph separator (U+2029) are collapsed
+  it('T-N7: Unicode LS and PS are collapsed to a single space', () => {
+    const payload: OnboardingPayload = {
+      ...BASE_PAYLOAD,
+      q5_q5_textbox3: `Alex\u2028Injected\u2029End`,
+    };
+    const fields = extractResponseFields(payload, 'Jane Doe');
+    expect(fields.preferredName).toBe('Alex Injected End');
+    expect(fields.preferredName).not.toContain('\u2028');
+    expect(fields.preferredName).not.toContain('\u2029');
+  });
+
+  // T-N8: phone string behavior unchanged after refactor
+  it('T-N8: phone string behavior is unchanged after refactor', () => {
+    const payload: OnboardingPayload = { ...BASE_PAYLOAD, q6_q6_phone4: '+14045550000' };
+    const fields = extractResponseFields(payload, 'Jane Doe');
+    expect(fields.phone).toBe('+14045550000');
+  });
+
+  // T-N9: phone object { full } behavior unchanged after refactor
+  it('T-N9: phone object { full } behavior is unchanged after refactor', () => {
+    const payload: OnboardingPayload = { ...BASE_PAYLOAD, q6_q6_phone4: { full: '+14045550000' } };
+    const fields = extractResponseFields(payload, 'Jane Doe');
+    expect(fields.phone).toBe('+14045550000');
   });
 });
 

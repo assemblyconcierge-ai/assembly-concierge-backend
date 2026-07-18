@@ -134,6 +134,22 @@ export interface OnboardingDocumentResult {
   safeRejectionReason?: string;
 }
 
+export interface OnboardingResponseFields {
+  legalName: string;
+  preferredName?: string;
+  phone?: string;
+  email?: string;
+  agreementAcknowledged: boolean;
+  smsConsentConfirmed: boolean;
+  transportationConfirmed: boolean;
+  basicToolsConfirmed: boolean;
+  jobReadinessConfirmed: boolean;
+  paymentSetupAcknowledged: boolean;
+  preferredPayoutMethod?: string;
+  handbookAcknowledged: boolean;
+  informationAccuracyCertified: boolean;
+}
+
 // ── Helpers ────────────────────────────────────────────────────────────────
 
 /** Extract the first URL from a Jotform file field (string or string[]). */
@@ -220,6 +236,52 @@ function buildSanitizedPayload(payload: OnboardingPayload): Record<string, unkno
   return sanitized;
 }
 
+/**
+ * Collapse all line-break characters (CR, LF, Unicode LS/PS) and repeated
+ * whitespace to a single space, then trim.  Returns undefined for blank input
+ * so callers can use `|| fallback` or conditional spread cleanly.
+ */
+function normalizeSingleLine(value: unknown): string | undefined {
+  const normalized = String(value ?? '')
+    .replace(/[\r\n\u2028\u2029]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return normalized || undefined;
+}
+
+/** Extract owner-review response fields from a raw Jotform payload. */
+export function extractResponseFields(
+  payload: OnboardingPayload,
+  fallbackName: string,
+): OnboardingResponseFields {
+  const rawPhone = payload.q6_q6_phone4;
+  let phone: string | undefined;
+  if (rawPhone && typeof rawPhone === 'object' && 'full' in rawPhone) {
+    phone = normalizeSingleLine((rawPhone as { full?: string }).full);
+  } else if (typeof rawPhone === 'string') {
+    phone = normalizeSingleLine(rawPhone);
+  }
+
+  const submittedLegalName = normalizeSingleLine(payload.q43_typeA);
+  const fallbackLegalName  = normalizeSingleLine(fallbackName) ?? '';
+
+  return {
+    legalName:            submittedLegalName || fallbackLegalName,
+    preferredName:        normalizeSingleLine(payload.q5_q5_textbox3),
+    phone,
+    email:                normalizeSingleLine(payload.q8_q8_email6),
+    agreementAcknowledged:   isChecked(payload.q19_q19_checkbox17),
+    smsConsentConfirmed:     isChecked(payload.q36_iAgree),
+    transportationConfirmed: isChecked(payload.q14_q14_checkbox12),
+    basicToolsConfirmed:     isChecked(payload.q15_q15_checkbox13),
+    jobReadinessConfirmed:   isChecked(payload.q16_q16_checkbox14),
+    paymentSetupAcknowledged:     isChecked(payload.q25_q25_checkbox23),
+    preferredPayoutMethod:        normalizeSingleLine(payload.q26_q26_dropdown24),
+    handbookAcknowledged:         isChecked(payload.q39_contractorHandbook39),
+    informationAccuracyCertified: isChecked(payload.q32_q32_checkbox30),
+  };
+}
+
 /** SHA-256 hex hash of the JSON-serialised payload for dedup/audit. */
 function hashPayload(payload: OnboardingPayload): string {
   return crypto
@@ -252,16 +314,33 @@ function documentStatusLabel(status: OnboardingDocumentResultStatus): string {
 /** Render the normalized result as a concise, human-readable Drive summary. */
 export function renderOnboardingSummary(
   result: OnboardingResult,
-  contractorName: string,
+  responses: OnboardingResponseFields,
 ): string {
+  const yn = (v: boolean) => (v ? 'Yes' : 'No');
+
   const lines = [
     'Contractor Onboarding Submission',
     '',
-    `Contractor: ${contractorName}`,
+    `Contractor: ${responses.legalName}`,
     `Contractor ID: ${result.contractorId}`,
     `Airtable Record ID: ${result.airtableRecordId}`,
     `Submission ID: ${result.submissionId}`,
     `Submitted: ${result.submittedAt}`,
+    '',
+    'Onboarding Responses',
+    `Legal Name: ${responses.legalName}`,
+    ...(responses.preferredName ? [`Preferred Name: ${responses.preferredName}`] : []),
+    `Phone: ${responses.phone ?? 'Not provided'}`,
+    `Email: ${responses.email ?? 'Not provided'}`,
+    `Agreement Acknowledged: ${yn(responses.agreementAcknowledged)}`,
+    `SMS Consent Confirmed: ${yn(responses.smsConsentConfirmed)}`,
+    `Transportation Confirmed: ${yn(responses.transportationConfirmed)}`,
+    `Basic Tools Confirmed: ${yn(responses.basicToolsConfirmed)}`,
+    `Job Readiness Confirmed: ${yn(responses.jobReadinessConfirmed)}`,
+    `Payment Setup Acknowledged: ${yn(responses.paymentSetupAcknowledged)}`,
+    ...(responses.preferredPayoutMethod ? [`Preferred Payout Method: ${responses.preferredPayoutMethod}`] : []),
+    `Contractor Handbook Acknowledged: ${yn(responses.handbookAcknowledged)}`,
+    `Information Accuracy Certified: ${yn(responses.informationAccuracyCertified)}`,
     '',
     'Document Results',
   ];
@@ -739,7 +818,7 @@ export async function processOnboardingSubmission(
     const safeName    = (String(payload.q43_typeA ?? contractor.full_name)).replace(/[/\\:*?"<>|]/g, '-').trim();
     const summaryFileName = `${safeName} - Onboarding Submission - ${summaryDate} - ${submissionId}.txt`;
     const summaryBuffer = Buffer.from(
-      renderOnboardingSummary(normalizedResult, contractor.full_name),
+      renderOnboardingSummary(normalizedResult, extractResponseFields(payload, contractor.full_name)),
       'utf-8',
     );
     await uploadBufferToFolder({
