@@ -89,6 +89,16 @@ export interface OnboardingPayload {
   q26_q26_dropdown24?: string;           // Payout method
   q39_contractorHandbook39?: string;     // Handbook acknowledgment
   q32_q32_checkbox30?: string;           // Final certification
+  // Additional response fields
+  q7_q7_phone5?: { full?: string } | string;  // Best Phone Number for Dispatch
+  q10_q10_checkbox8?: string;                 // Approved Services Confirmation
+  q21_q21_datetime19?: { day?: string; month?: string; year?: string } | string; // Agreement Signed Date
+  q11_q11_textarea9?: string;                 // Services No Longer Accepted
+  q12_q12_textarea10?: string;                // Service Area or Availability Changes
+  q17_q17_textarea15?: string;                // Tool, Transportation, or Readiness Updates
+  q23_q23_radio21?: string;                   // W-9 Upload Intent
+  q27_q27_textarea25?: string;                // Payment Setup Notes
+  q40_questionsOr?: string;                   // Questions or Comments
   [key: string]: unknown;
 }
 
@@ -138,7 +148,10 @@ export interface OnboardingResponseFields {
   legalName: string;
   preferredName?: string;
   phone?: string;
+  dispatchPhone?: string;
   email?: string;
+  approvedServicesConfirmed: boolean;
+  agreementSignedDate?: string;  // YYYY-MM-DD
   agreementAcknowledged: boolean;
   smsConsentConfirmed: boolean;
   transportationConfirmed: boolean;
@@ -148,6 +161,15 @@ export interface OnboardingResponseFields {
   preferredPayoutMethod?: string;
   handbookAcknowledged: boolean;
   informationAccuracyCertified: boolean;
+}
+
+export interface AdditionalResponseFields {
+  servicesNoLongerAccepted?: string;
+  serviceAreaChanges?: string;
+  toolTransportationUpdates?: string;
+  w9UploadIntent?: string;
+  paymentSetupNotes?: string;
+  questionsOrComments?: string;
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -249,36 +271,176 @@ function normalizeSingleLine(value: unknown): string | undefined {
   return normalized || undefined;
 }
 
+/**
+ * Normalise a free-text textarea value for safe inclusion in the Drive summary.
+ *
+ * - Normalises CRLF / CR / U+2028 / U+2029 to LF so line structure is preserved.
+ * - Trims trailing whitespace from every line.
+ * - Collapses runs of more than two consecutive blank lines to a single blank line.
+ * - Strips leading and trailing blank lines from the result.
+ * - Prevents values from injecting fake section headings or trusted field labels by
+ *   prefixing any line that exactly matches a known summary heading with a zero-width
+ *   space (U+200B), making it visually identical but not matching a regex anchor.
+ * - Returns undefined for values that are blank after normalisation.
+ */
+const SUMMARY_HEADING_RE = /^(?:Contractor Onboarding Submission|Onboarding Responses|Additional Onboarding Responses|Document Results|Overall Status:|Processing Notes:|Signed Agreement|W-9|Photo ID|Proof of Insurance|Other Document)$/;
+
+function safeMultiline(value: unknown): string | undefined {
+  if (value === null || value === undefined) return undefined;
+  const raw = String(value)
+    // Normalise all line-ending variants to LF
+    .replace(/\r\n|\r|\u2028|\u2029/g, '\n')
+    // Trim trailing whitespace from each line
+    .replace(/[^\S\n]+$/gm, '')
+    // Collapse runs of 3+ consecutive blank lines to exactly one blank line
+    .replace(/\n{3,}/g, '\n\n')
+    // Strip leading and trailing blank lines
+    .replace(/^\n+/, '')
+    .replace(/\n+$/, '')
+    .trim();
+  if (!raw) return undefined;
+  // Prefix any line that exactly matches a known summary heading so it cannot
+  // be mistaken for a real section boundary when the summary is parsed.
+  const safeLines = raw.split('\n').map((line) =>
+    SUMMARY_HEADING_RE.test(line) ? `\u200B${line}` : line,
+  );
+  return safeLines.join('\n');
+}
+
+/**
+ * Render a labelled field whose value may span multiple lines.
+ *
+ * The first content line is prefixed with "Label: "; every continuation line
+ * is indented with two spaces.  This prevents any embedded line from being
+ * mistaken for a top-level summary field or section heading when the file is
+ * read back line-by-line.
+ */
+function renderMultilineField(label: string, value: string): string {
+  const contentLines = value.split('\n');
+  const first = `${label}: ${contentLines[0]}`;
+  const rest  = contentLines.slice(1).map((l) => `  ${l}`);
+  return [first, ...rest].join('\n');
+}
+
+/** Normalise a Jotform phone field (object or string) to a single-line string. */
+function normalizePhoneField(raw: unknown): string | undefined {
+  if (!raw) return undefined;
+  if (typeof raw === 'object' && raw !== null && !Array.isArray(raw) && 'full' in raw) {
+    return normalizeSingleLine((raw as { full?: string }).full);
+  }
+  if (typeof raw === 'string') {
+    return normalizeSingleLine(raw);
+  }
+  return undefined;
+}
+
+/**
+ * Determine whether a given year is a leap year.
+ * A year is a leap year if it is divisible by 4, except for century years,
+ * which must be divisible by 400.
+ */
+function isLeapYear(y: number): boolean {
+  return (y % 4 === 0 && y % 100 !== 0) || y % 400 === 0;
+}
+
+/**
+ * Return the maximum valid day for a given month and year.
+ * Months are 1-indexed (1 = January, 12 = December).
+ */
+function daysInMonth(m: number, y: number): number {
+  const days = [0, 31, isLeapYear(y) ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  return days[m] ?? 0;
+}
+
+/**
+ * Strictly validate and normalise a calendar date to YYYY-MM-DD.
+ *
+ * Rejects:
+ *  - month < 1 or > 12
+ *  - day < 1 or > actual days in that month (e.g. Feb 30, Apr 31)
+ *  - Feb 29 in non-leap years
+ *
+ * Does not rely on Date() normalisation (which silently rolls over invalid dates).
+ */
+function normalizeDateField(raw: unknown): string | undefined {
+  let y: number;
+  let m: number;
+  let d: number;
+
+  if (!raw) return undefined;
+
+  if (typeof raw === 'object' && raw !== null && !Array.isArray(raw)) {
+    const obj = raw as { day?: string; month?: string; year?: string };
+    const ys = normalizeSingleLine(obj.year);
+    const ms = normalizeSingleLine(obj.month);
+    const ds = normalizeSingleLine(obj.day);
+    if (!ys || !ms || !ds) return undefined;
+    y = parseInt(ys, 10);
+    m = parseInt(ms, 10);
+    d = parseInt(ds, 10);
+  } else if (typeof raw === 'string') {
+    const s = normalizeSingleLine(raw);
+    if (!s) return undefined;
+    // Accept YYYY-MM-DD or YYYY/MM/DD or similar numeric-only formats
+    const match = s.match(/^(\d{4})[\-\/](\d{1,2})[\-\/](\d{1,2})$/);
+    if (!match) return undefined;
+    y = parseInt(match[1]!, 10);
+    m = parseInt(match[2]!, 10);
+    d = parseInt(match[3]!, 10);
+  } else {
+    return undefined;
+  }
+
+  // Reject out-of-range month or day
+  if (!Number.isInteger(y) || !Number.isInteger(m) || !Number.isInteger(d)) return undefined;
+  if (m < 1 || m > 12) return undefined;
+  if (d < 1 || d > daysInMonth(m, y)) return undefined;
+
+  const yStr  = String(y).padStart(4, '0');
+  const mStr  = String(m).padStart(2, '0');
+  const dStr  = String(d).padStart(2, '0');
+  return `${yStr}-${mStr}-${dStr}`;
+}
+
 /** Extract owner-review response fields from a raw Jotform payload. */
 export function extractResponseFields(
   payload: OnboardingPayload,
   fallbackName: string,
 ): OnboardingResponseFields {
-  const rawPhone = payload.q6_q6_phone4;
-  let phone: string | undefined;
-  if (rawPhone && typeof rawPhone === 'object' && 'full' in rawPhone) {
-    phone = normalizeSingleLine((rawPhone as { full?: string }).full);
-  } else if (typeof rawPhone === 'string') {
-    phone = normalizeSingleLine(rawPhone);
-  }
-
   const submittedLegalName = normalizeSingleLine(payload.q43_typeA);
   const fallbackLegalName  = normalizeSingleLine(fallbackName) ?? '';
 
   return {
     legalName:            submittedLegalName || fallbackLegalName,
     preferredName:        normalizeSingleLine(payload.q5_q5_textbox3),
-    phone,
+    phone:                normalizePhoneField(payload.q6_q6_phone4),
+    dispatchPhone:        normalizePhoneField(payload.q7_q7_phone5),
     email:                normalizeSingleLine(payload.q8_q8_email6),
-    agreementAcknowledged:   isChecked(payload.q19_q19_checkbox17),
-    smsConsentConfirmed:     isChecked(payload.q36_iAgree),
-    transportationConfirmed: isChecked(payload.q14_q14_checkbox12),
-    basicToolsConfirmed:     isChecked(payload.q15_q15_checkbox13),
-    jobReadinessConfirmed:   isChecked(payload.q16_q16_checkbox14),
-    paymentSetupAcknowledged:     isChecked(payload.q25_q25_checkbox23),
-    preferredPayoutMethod:        normalizeSingleLine(payload.q26_q26_dropdown24),
-    handbookAcknowledged:         isChecked(payload.q39_contractorHandbook39),
+    approvedServicesConfirmed:   isChecked(payload.q10_q10_checkbox8),
+    agreementSignedDate:         normalizeDateField(payload.q21_q21_datetime19),
+    agreementAcknowledged:       isChecked(payload.q19_q19_checkbox17),
+    smsConsentConfirmed:         isChecked(payload.q36_iAgree),
+    transportationConfirmed:     isChecked(payload.q14_q14_checkbox12),
+    basicToolsConfirmed:         isChecked(payload.q15_q15_checkbox13),
+    jobReadinessConfirmed:       isChecked(payload.q16_q16_checkbox14),
+    paymentSetupAcknowledged:    isChecked(payload.q25_q25_checkbox23),
+    preferredPayoutMethod:       normalizeSingleLine(payload.q26_q26_dropdown24),
+    handbookAcknowledged:        isChecked(payload.q39_contractorHandbook39),
     informationAccuracyCertified: isChecked(payload.q32_q32_checkbox30),
+  };
+}
+
+/** Extract additional free-text response fields from a raw Jotform payload. */
+export function extractAdditionalResponseFields(
+  payload: OnboardingPayload,
+): AdditionalResponseFields {
+  return {
+    servicesNoLongerAccepted:  safeMultiline(payload.q11_q11_textarea9),
+    serviceAreaChanges:        safeMultiline(payload.q12_q12_textarea10),
+    toolTransportationUpdates: safeMultiline(payload.q17_q17_textarea15),
+    w9UploadIntent:            safeMultiline(payload.q23_q23_radio21),
+    paymentSetupNotes:         safeMultiline(payload.q27_q27_textarea25),
+    questionsOrComments:       safeMultiline(payload.q40_questionsOr),
   };
 }
 
@@ -315,6 +477,7 @@ function documentStatusLabel(status: OnboardingDocumentResultStatus): string {
 export function renderOnboardingSummary(
   result: OnboardingResult,
   responses: OnboardingResponseFields,
+  additional: AdditionalResponseFields = {},
 ): string {
   const yn = (v: boolean) => (v ? 'Yes' : 'No');
 
@@ -331,7 +494,10 @@ export function renderOnboardingSummary(
     `Legal Name: ${responses.legalName}`,
     ...(responses.preferredName ? [`Preferred Name: ${responses.preferredName}`] : []),
     `Phone: ${responses.phone ?? 'Not provided'}`,
+    ...(responses.dispatchPhone ? [`Best Phone for Dispatch: ${responses.dispatchPhone}`] : []),
     `Email: ${responses.email ?? 'Not provided'}`,
+    `Approved Services Confirmed: ${yn(responses.approvedServicesConfirmed)}`,
+    ...(responses.agreementSignedDate ? [`Agreement Signed Date: ${responses.agreementSignedDate}`] : []),
     `Agreement Acknowledged: ${yn(responses.agreementAcknowledged)}`,
     `SMS Consent Confirmed: ${yn(responses.smsConsentConfirmed)}`,
     `Transportation Confirmed: ${yn(responses.transportationConfirmed)}`,
@@ -341,9 +507,35 @@ export function renderOnboardingSummary(
     ...(responses.preferredPayoutMethod ? [`Preferred Payout Method: ${responses.preferredPayoutMethod}`] : []),
     `Contractor Handbook Acknowledged: ${yn(responses.handbookAcknowledged)}`,
     `Information Accuracy Certified: ${yn(responses.informationAccuracyCertified)}`,
-    '',
-    'Document Results',
   ];
+
+  // Additional Onboarding Responses — free-text fields; omit only truly blank values.
+  // renderMultilineField indents continuation lines so no embedded line can be
+  // mistaken for a top-level summary field or section heading.
+  const additionalLines: string[] = [];
+  if (additional.servicesNoLongerAccepted) {
+    additionalLines.push(renderMultilineField('Services No Longer Accepted', additional.servicesNoLongerAccepted));
+  }
+  if (additional.serviceAreaChanges) {
+    additionalLines.push(renderMultilineField('Service Area or Availability Changes', additional.serviceAreaChanges));
+  }
+  if (additional.toolTransportationUpdates) {
+    additionalLines.push(renderMultilineField('Tool, Transportation, or Readiness Updates', additional.toolTransportationUpdates));
+  }
+  if (additional.w9UploadIntent) {
+    additionalLines.push(renderMultilineField('W-9 Upload Intent', additional.w9UploadIntent));
+  }
+  if (additional.paymentSetupNotes) {
+    additionalLines.push(renderMultilineField('Payment Setup Notes', additional.paymentSetupNotes));
+  }
+  if (additional.questionsOrComments) {
+    additionalLines.push(renderMultilineField('Questions or Comments', additional.questionsOrComments));
+  }
+  if (additionalLines.length > 0) {
+    lines.push('', 'Additional Onboarding Responses', ...additionalLines);
+  }
+
+  lines.push('', 'Document Results');
 
   for (const document of result.documents) {
     lines.push('', document.label);
@@ -818,7 +1010,11 @@ export async function processOnboardingSubmission(
     const safeName    = (String(payload.q43_typeA ?? contractor.full_name)).replace(/[/\\:*?"<>|]/g, '-').trim();
     const summaryFileName = `${safeName} - Onboarding Submission - ${summaryDate} - ${submissionId}.txt`;
     const summaryBuffer = Buffer.from(
-      renderOnboardingSummary(normalizedResult, extractResponseFields(payload, contractor.full_name)),
+      renderOnboardingSummary(
+        normalizedResult,
+        extractResponseFields(payload, contractor.full_name),
+        extractAdditionalResponseFields(payload),
+      ),
       'utf-8',
     );
     await uploadBufferToFolder({

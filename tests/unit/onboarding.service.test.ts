@@ -61,8 +61,10 @@ import {
   computeDocumentStatus,
   processOnboardingSubmission,
   extractResponseFields,
+  extractAdditionalResponseFields,
   type OnboardingPayload,
   type OnboardingResponseFields,
+  type AdditionalResponseFields,
 } from '../../src/modules/onboarding/onboarding.service';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -986,6 +988,480 @@ describe('extractResponseFields — normalization edge cases', () => {
     const payload: OnboardingPayload = { ...BASE_PAYLOAD, q6_q6_phone4: { full: '+14045550000' } };
     const fields = extractResponseFields(payload, 'Jane Doe');
     expect(fields.phone).toBe('+14045550000');
+  });
+});
+
+// ── extractAdditionalResponseFields ─────────────────────────────────────────
+
+describe('extractAdditionalResponseFields', () => {
+  // T-A1: all six fields populated
+  it('T-A1: all six additional fields are extracted when populated', () => {
+    const payload: OnboardingPayload = {
+      ...BASE_PAYLOAD,
+      q11_q11_textarea9:  'No longer accepting move-outs',
+      q12_q12_textarea10: 'Dunwoody and Brookhaven only',
+      q17_q17_textarea15: 'No power tools',
+      q23_q23_radio21:    'I am uploading my completed W-9 now',
+      q27_q27_textarea25: 'Will set up ACH this week',
+      q40_questionsOr:    'Do I need a contractor badge?',
+    };
+    const fields = extractAdditionalResponseFields(payload);
+    expect(fields.servicesNoLongerAccepted).toBe('No longer accepting move-outs');
+    expect(fields.serviceAreaChanges).toBe('Dunwoody and Brookhaven only');
+    expect(fields.toolTransportationUpdates).toBe('No power tools');
+    expect(fields.w9UploadIntent).toBe('I am uploading my completed W-9 now');
+    expect(fields.paymentSetupNotes).toBe('Will set up ACH this week');
+    expect(fields.questionsOrComments).toBe('Do I need a contractor badge?');
+  });
+
+  // T-A2: all six fields absent when payload has no values
+  it('T-A2: all six additional fields are undefined when payload fields are absent', () => {
+    const fields = extractAdditionalResponseFields(BASE_PAYLOAD);
+    expect(fields.servicesNoLongerAccepted).toBeUndefined();
+    expect(fields.serviceAreaChanges).toBeUndefined();
+    expect(fields.toolTransportationUpdates).toBeUndefined();
+    expect(fields.w9UploadIntent).toBeUndefined();
+    expect(fields.paymentSetupNotes).toBeUndefined();
+    expect(fields.questionsOrComments).toBeUndefined();
+  });
+
+  // T-A3: blank string fields return undefined (not empty string)
+  it('T-A3: blank string fields return undefined', () => {
+    const payload: OnboardingPayload = {
+      ...BASE_PAYLOAD,
+      q11_q11_textarea9:  '',
+      q12_q12_textarea10: '   ',
+      q17_q17_textarea15: '',
+      q23_q23_radio21:    '',
+      q27_q27_textarea25: '   ',
+      q40_questionsOr:    '',
+    };
+    const fields = extractAdditionalResponseFields(payload);
+    expect(fields.servicesNoLongerAccepted).toBeUndefined();
+    expect(fields.serviceAreaChanges).toBeUndefined();
+    expect(fields.toolTransportationUpdates).toBeUndefined();
+    expect(fields.w9UploadIntent).toBeUndefined();
+    expect(fields.paymentSetupNotes).toBeUndefined();
+    expect(fields.questionsOrComments).toBeUndefined();
+  });
+
+  // T-A4: legitimate multiline paragraph content is preserved across lines
+  it('T-A4: legitimate multiline paragraph content is preserved', () => {
+    const payload: OnboardingPayload = {
+      ...BASE_PAYLOAD,
+      q40_questionsOr: 'First paragraph.\n\nSecond paragraph.',
+    };
+    const fields = extractAdditionalResponseFields(payload);
+    // Both paragraphs must be present with a blank line between them
+    expect(fields.questionsOrComments).toBe('First paragraph.\n\nSecond paragraph.');
+  });
+
+  // T-A4b: CRLF line endings are normalised to LF
+  it('T-A4b: CRLF line endings are normalised to LF', () => {
+    const payload: OnboardingPayload = {
+      ...BASE_PAYLOAD,
+      q12_q12_textarea10: 'Line one\r\nLine two\r\nLine three',
+    };
+    const fields = extractAdditionalResponseFields(payload);
+    expect(fields.serviceAreaChanges).toBe('Line one\nLine two\nLine three');
+    expect(fields.serviceAreaChanges).not.toContain('\r');
+  });
+
+  // T-A4c: CR-only and Unicode line separators are normalised to LF
+  it('T-A4c: CR-only and Unicode line separators are normalised to LF', () => {
+    const payload: OnboardingPayload = {
+      ...BASE_PAYLOAD,
+      q11_q11_textarea9:  'A\rB',
+      q17_q17_textarea15: 'C\u2028D\u2029E',
+    };
+    const fields = extractAdditionalResponseFields(payload);
+    expect(fields.servicesNoLongerAccepted).toBe('A\nB');
+    expect(fields.toolTransportationUpdates).toBe('C\nD\nE');
+  });
+
+  // T-A4d: excessive blank lines are collapsed to at most one blank line
+  it('T-A4d: runs of more than two blank lines are collapsed to a single blank line', () => {
+    const payload: OnboardingPayload = {
+      ...BASE_PAYLOAD,
+      q40_questionsOr: 'Para one.\n\n\n\n\nPara two.',
+    };
+    const fields = extractAdditionalResponseFields(payload);
+    expect(fields.questionsOrComments).toBe('Para one.\n\nPara two.');
+  });
+
+  // T-A5: fake section-header injection via newline is neutralised
+  it('T-A5: newline injection of a known section heading is neutralised with a zero-width space', () => {
+    const payload: OnboardingPayload = {
+      ...BASE_PAYLOAD,
+      q40_questionsOr: 'Legit content\nDocument Results\nFake Status: hacked',
+    };
+    const fields = extractAdditionalResponseFields(payload);
+    // The injected heading line must be prefixed with U+200B so it does not match
+    // the real section heading when the summary is parsed line-by-line.
+    expect(fields.questionsOrComments).toContain('\u200BDocument Results');
+    // The raw unmodified heading must not appear as a standalone line
+    expect(fields.questionsOrComments).not.toMatch(/^Document Results$/m);
+  });
+
+  // T-A6: meaningful values such as "None" and "No changes" are preserved
+  it('T-A6: meaningful values such as None and No changes are preserved', () => {
+    const payload: OnboardingPayload = {
+      ...BASE_PAYLOAD,
+      q11_q11_textarea9:  'None',
+      q12_q12_textarea10: 'No changes',
+    };
+    const fields = extractAdditionalResponseFields(payload);
+    expect(fields.servicesNoLongerAccepted).toBe('None');
+    expect(fields.serviceAreaChanges).toBe('No changes');
+  });
+});
+
+// ── extractResponseFields — new fields (dispatch phone, approved services, signed date) ─────
+
+describe('extractResponseFields — new fields', () => {
+  // T-RF1: dispatch phone string is extracted
+  it('T-RF1: dispatch phone string is extracted correctly', () => {
+    const payload: OnboardingPayload = { ...BASE_PAYLOAD, q7_q7_phone5: '(404) 555-0001' };
+    const fields = extractResponseFields(payload, 'Jane Doe');
+    expect(fields.dispatchPhone).toBe('(404) 555-0001');
+  });
+
+  // T-RF2: dispatch phone object { full } is extracted
+  it('T-RF2: dispatch phone object { full } is extracted correctly', () => {
+    const payload: OnboardingPayload = { ...BASE_PAYLOAD, q7_q7_phone5: { full: '(404) 555-0002' } };
+    const fields = extractResponseFields(payload, 'Jane Doe');
+    expect(fields.dispatchPhone).toBe('(404) 555-0002');
+  });
+
+  // T-RF3: dispatch phone absent returns undefined
+  it('T-RF3: absent dispatch phone returns undefined', () => {
+    const fields = extractResponseFields(BASE_PAYLOAD, 'Jane Doe');
+    expect(fields.dispatchPhone).toBeUndefined();
+  });
+
+  // T-RF4: dispatch phone null-like object { full: undefined } returns undefined
+  it('T-RF4: dispatch phone object with undefined full returns undefined', () => {
+    const payload: OnboardingPayload = { ...BASE_PAYLOAD, q7_q7_phone5: { full: undefined } };
+    const fields = extractResponseFields(payload, 'Jane Doe');
+    expect(fields.dispatchPhone).toBeUndefined();
+  });
+
+  // T-RF5: dispatch phone array does not throw and returns undefined
+  it('T-RF5: dispatch phone array value does not throw and returns undefined', () => {
+    const payload: OnboardingPayload = { ...BASE_PAYLOAD, q7_q7_phone5: ['(404) 555-0003'] as unknown as string };
+    expect(() => extractResponseFields(payload, 'Jane Doe')).not.toThrow();
+    const fields = extractResponseFields(payload, 'Jane Doe');
+    expect(fields.dispatchPhone).toBeUndefined();
+  });
+
+  // T-RF6: approved services confirmed true when checkbox has value
+  it('T-RF6: approvedServicesConfirmed is true when checkbox has a value', () => {
+    const payload: OnboardingPayload = { ...BASE_PAYLOAD, q10_q10_checkbox8: 'I confirm' };
+    const fields = extractResponseFields(payload, 'Jane Doe');
+    expect(fields.approvedServicesConfirmed).toBe(true);
+  });
+
+  // T-RF7: approved services confirmed false when checkbox is absent
+  it('T-RF7: approvedServicesConfirmed is false when checkbox is absent', () => {
+    const fields = extractResponseFields(BASE_PAYLOAD, 'Jane Doe');
+    expect(fields.approvedServicesConfirmed).toBe(false);
+  });
+
+  // T-RF8: agreement signed date parsed from {day,month,year} object
+  it('T-RF8: agreementSignedDate is parsed from {day,month,year} object', () => {
+    const payload: OnboardingPayload = {
+      ...BASE_PAYLOAD,
+      q21_q21_datetime19: { day: '30', month: '06', year: '2026' },
+    };
+    const fields = extractResponseFields(payload, 'Jane Doe');
+    expect(fields.agreementSignedDate).toBe('2026-06-30');
+  });
+
+  // T-RF9: agreement signed date parsed from ISO string
+  it('T-RF9: agreementSignedDate is parsed from an ISO date string', () => {
+    const payload: OnboardingPayload = {
+      ...BASE_PAYLOAD,
+      q21_q21_datetime19: '2026-06-30',
+    };
+    const fields = extractResponseFields(payload, 'Jane Doe');
+    expect(fields.agreementSignedDate).toBe('2026-06-30');
+  });
+
+  // T-RF10: invalid date string returns undefined
+  it('T-RF10: invalid date string returns undefined for agreementSignedDate', () => {
+    const payload: OnboardingPayload = {
+      ...BASE_PAYLOAD,
+      q21_q21_datetime19: 'not-a-date',
+    };
+    const fields = extractResponseFields(payload, 'Jane Doe');
+    expect(fields.agreementSignedDate).toBeUndefined();
+  });
+
+  // T-RF11: partial date object (missing year) returns undefined
+  it('T-RF11: partial date object missing year returns undefined', () => {
+    const payload: OnboardingPayload = {
+      ...BASE_PAYLOAD,
+      q21_q21_datetime19: { day: '30', month: '06' },
+    };
+    const fields = extractResponseFields(payload, 'Jane Doe');
+    expect(fields.agreementSignedDate).toBeUndefined();
+  });
+
+  // T-RF12: absent date field returns undefined
+  it('T-RF12: absent date field returns undefined', () => {
+    const fields = extractResponseFields(BASE_PAYLOAD, 'Jane Doe');
+    expect(fields.agreementSignedDate).toBeUndefined();
+  });
+
+  // T-RF13: February 31 is rejected
+  it('T-RF13: February 31 is rejected as a calendar-invalid date', () => {
+    const payload: OnboardingPayload = {
+      ...BASE_PAYLOAD,
+      q21_q21_datetime19: { day: '31', month: '02', year: '2026' },
+    };
+    const fields = extractResponseFields(payload, 'Jane Doe');
+    expect(fields.agreementSignedDate).toBeUndefined();
+  });
+
+  // T-RF14: February 30 is rejected
+  it('T-RF14: February 30 is rejected as a calendar-invalid date', () => {
+    const payload: OnboardingPayload = {
+      ...BASE_PAYLOAD,
+      q21_q21_datetime19: { day: '30', month: '02', year: '2026' },
+    };
+    const fields = extractResponseFields(payload, 'Jane Doe');
+    expect(fields.agreementSignedDate).toBeUndefined();
+  });
+
+  // T-RF15: April 31 is rejected
+  it('T-RF15: April 31 is rejected as a calendar-invalid date', () => {
+    const payload: OnboardingPayload = {
+      ...BASE_PAYLOAD,
+      q21_q21_datetime19: { day: '31', month: '04', year: '2026' },
+    };
+    const fields = extractResponseFields(payload, 'Jane Doe');
+    expect(fields.agreementSignedDate).toBeUndefined();
+  });
+
+  // T-RF16: month 13 is rejected
+  it('T-RF16: month 13 is rejected as a calendar-invalid date', () => {
+    const payload: OnboardingPayload = {
+      ...BASE_PAYLOAD,
+      q21_q21_datetime19: { day: '01', month: '13', year: '2026' },
+    };
+    const fields = extractResponseFields(payload, 'Jane Doe');
+    expect(fields.agreementSignedDate).toBeUndefined();
+  });
+
+  // T-RF17: day 00 is rejected
+  it('T-RF17: day 00 is rejected as a calendar-invalid date', () => {
+    const payload: OnboardingPayload = {
+      ...BASE_PAYLOAD,
+      q21_q21_datetime19: { day: '00', month: '06', year: '2026' },
+    };
+    const fields = extractResponseFields(payload, 'Jane Doe');
+    expect(fields.agreementSignedDate).toBeUndefined();
+  });
+
+  // T-RF18: valid leap day (Feb 29 in a leap year) is accepted
+  it('T-RF18: Feb 29 in a leap year is accepted', () => {
+    const payload: OnboardingPayload = {
+      ...BASE_PAYLOAD,
+      q21_q21_datetime19: { day: '29', month: '02', year: '2024' },
+    };
+    const fields = extractResponseFields(payload, 'Jane Doe');
+    expect(fields.agreementSignedDate).toBe('2024-02-29');
+  });
+
+  // T-RF19: Feb 29 in a non-leap year is rejected
+  it('T-RF19: Feb 29 in a non-leap year is rejected', () => {
+    const payload: OnboardingPayload = {
+      ...BASE_PAYLOAD,
+      q21_q21_datetime19: { day: '29', month: '02', year: '2026' },
+    };
+    const fields = extractResponseFields(payload, 'Jane Doe');
+    expect(fields.agreementSignedDate).toBeUndefined();
+  });
+
+  // T-RF20: century year that is not a leap year (1900) rejects Feb 29
+  it('T-RF20: Feb 29 in century non-leap year 1900 is rejected', () => {
+    const payload: OnboardingPayload = {
+      ...BASE_PAYLOAD,
+      q21_q21_datetime19: { day: '29', month: '02', year: '1900' },
+    };
+    const fields = extractResponseFields(payload, 'Jane Doe');
+    expect(fields.agreementSignedDate).toBeUndefined();
+  });
+
+  // T-RF21: century year divisible by 400 (2000) accepts Feb 29
+  it('T-RF21: Feb 29 in year 2000 (divisible by 400) is accepted', () => {
+    const payload: OnboardingPayload = {
+      ...BASE_PAYLOAD,
+      q21_q21_datetime19: { day: '29', month: '02', year: '2000' },
+    };
+    const fields = extractResponseFields(payload, 'Jane Doe');
+    expect(fields.agreementSignedDate).toBe('2000-02-29');
+  });
+});
+
+// ── Additional Onboarding Responses section in Drive summary ─────────────────
+
+describe('processOnboardingSubmission — Additional Onboarding Responses in Drive summary', () => {
+  // T-AS1: Additional Onboarding Responses section appears when fields are populated
+  it('T-AS1: Additional Onboarding Responses section appears when fields are populated', async () => {
+    setupHappyPath();
+    const payload: OnboardingPayload = {
+      ...BASE_PAYLOAD,
+      q11_q11_textarea9:  'No longer accepting move-outs',
+      q12_q12_textarea10: 'Dunwoody and Brookhaven only',
+      q17_q17_textarea15: 'No power tools',
+      q23_q23_radio21:    'I am uploading my completed W-9 now',
+      q27_q27_textarea25: 'Will set up ACH this week',
+      q40_questionsOr:    'Do I need a contractor badge?',
+    };
+    await processOnboardingSubmission(payload);
+
+    const content = (mockUploadBufferToFolder.mock.calls[0][0] as { buffer: Buffer }).buffer.toString('utf-8');
+    expect(content).toContain('Additional Onboarding Responses');
+    expect(content).toContain('Services No Longer Accepted: No longer accepting move-outs');
+    expect(content).toContain('Service Area or Availability Changes: Dunwoody and Brookhaven only');
+    expect(content).toContain('Tool, Transportation, or Readiness Updates: No power tools');
+    expect(content).toContain('W-9 Upload Intent: I am uploading my completed W-9 now');
+    expect(content).toContain('Payment Setup Notes: Will set up ACH this week');
+    expect(content).toContain('Questions or Comments: Do I need a contractor badge?');
+  });
+
+  // T-AS2: Additional Onboarding Responses section is absent when all fields are blank
+  it('T-AS2: Additional Onboarding Responses section is absent when all additional fields are blank', async () => {
+    setupHappyPath();
+    await processOnboardingSubmission(BASE_PAYLOAD);
+
+    const content = (mockUploadBufferToFolder.mock.calls[0][0] as { buffer: Buffer }).buffer.toString('utf-8');
+    expect(content).not.toContain('Additional Onboarding Responses');
+  });
+
+  // T-AS3: section appears after Onboarding Responses and before Document Results
+  it('T-AS3: Additional Onboarding Responses section appears after Onboarding Responses and before Document Results', async () => {
+    setupHappyPath();
+    const payload: OnboardingPayload = {
+      ...BASE_PAYLOAD,
+      q40_questionsOr: 'Any questions here',
+    };
+    await processOnboardingSubmission(payload);
+
+    const content = (mockUploadBufferToFolder.mock.calls[0][0] as { buffer: Buffer }).buffer.toString('utf-8');
+    const idxOnboarding  = content.indexOf('Onboarding Responses');
+    const idxAdditional  = content.indexOf('Additional Onboarding Responses');
+    const idxDocResults  = content.indexOf('Document Results');
+    expect(idxAdditional).toBeGreaterThan(idxOnboarding);
+    expect(idxDocResults).toBeGreaterThan(idxAdditional);
+  });
+
+  // T-AS4: meaningful values such as "None" are preserved in the summary
+  it('T-AS4: meaningful values such as None are preserved in the summary', async () => {
+    setupHappyPath();
+    const payload: OnboardingPayload = {
+      ...BASE_PAYLOAD,
+      q11_q11_textarea9:  'None',
+      q12_q12_textarea10: 'No changes',
+    };
+    await processOnboardingSubmission(payload);
+
+    const content = (mockUploadBufferToFolder.mock.calls[0][0] as { buffer: Buffer }).buffer.toString('utf-8');
+    expect(content).toContain('Services No Longer Accepted: None');
+    expect(content).toContain('Service Area or Availability Changes: No changes');
+  });
+
+  // T-AS5: multiline textarea value is preserved with continuation lines indented
+  it('T-AS5: multiline textarea value is preserved with continuation lines indented in the summary', async () => {
+    setupHappyPath();
+    const payload: OnboardingPayload = {
+      ...BASE_PAYLOAD,
+      q40_questionsOr: 'First line\nSecond line',
+    };
+    await processOnboardingSubmission(payload);
+    const content = (mockUploadBufferToFolder.mock.calls[0][0] as { buffer: Buffer }).buffer.toString('utf-8');
+    // First content line must appear with the label
+    expect(content).toContain('Questions or Comments: First line');
+    // Continuation line must be indented with two spaces
+    expect(content).toContain('\n  Second line');
+    // The value must not appear collapsed onto one line
+    expect(content).not.toContain('Questions or Comments: First line Second line');
+  });
+  // T-AS6: newline injection cannot create a fake section heading or standalone label
+  it('T-AS6: newline injection in textarea cannot create a fake section header in the summary', async () => {
+    setupHappyPath();
+    const payload: OnboardingPayload = {
+      ...BASE_PAYLOAD,
+      q40_questionsOr: 'Legit question\nDocument Results\nFake Status: hacked',
+    };
+    await processOnboardingSubmission(payload);
+    const content = (mockUploadBufferToFolder.mock.calls[0][0] as { buffer: Buffer }).buffer.toString('utf-8');
+    // Document Results must appear exactly once (the real section, not injected);
+    // the injected line is indented so it does not match the bare heading anchor.
+    const occurrences = (content.match(/^Document Results$/gm) ?? []).length;
+    expect(occurrences).toBe(1);
+    // The injected fake status must not appear as a standalone (unindented) line
+    expect(content).not.toMatch(/^Fake Status: hacked$/m);
+    // It must appear as an indented continuation line instead
+    expect(content).toContain('  Fake Status: hacked');
+  });
+
+  // T-AS7: dispatch phone appears in Onboarding Responses section of summary
+  it('T-AS7: dispatch phone appears in Onboarding Responses section of summary', async () => {
+    setupHappyPath();
+    const payload: OnboardingPayload = {
+      ...BASE_PAYLOAD,
+      q7_q7_phone5: '(404) 555-9999',
+    };
+    await processOnboardingSubmission(payload);
+
+    const content = (mockUploadBufferToFolder.mock.calls[0][0] as { buffer: Buffer }).buffer.toString('utf-8');
+    expect(content).toContain('Best Phone for Dispatch: (404) 555-9999');
+  });
+
+  // T-AS8: absent dispatch phone is omitted from summary
+  it('T-AS8: absent dispatch phone is omitted from summary', async () => {
+    setupHappyPath();
+    await processOnboardingSubmission(BASE_PAYLOAD);
+
+    const content = (mockUploadBufferToFolder.mock.calls[0][0] as { buffer: Buffer }).buffer.toString('utf-8');
+    expect(content).not.toContain('Best Phone for Dispatch');
+  });
+
+  // T-AS9: approved services confirmed appears in Onboarding Responses section
+  it('T-AS9: Approved Services Confirmed appears in Onboarding Responses section', async () => {
+    setupHappyPath();
+    const payload: OnboardingPayload = {
+      ...BASE_PAYLOAD,
+      q10_q10_checkbox8: 'I confirm',
+    };
+    await processOnboardingSubmission(payload);
+
+    const content = (mockUploadBufferToFolder.mock.calls[0][0] as { buffer: Buffer }).buffer.toString('utf-8');
+    expect(content).toContain('Approved Services Confirmed: Yes');
+  });
+
+  // T-AS10: agreement signed date appears in Onboarding Responses section
+  it('T-AS10: Agreement Signed Date appears in Onboarding Responses section', async () => {
+    setupHappyPath();
+    const payload: OnboardingPayload = {
+      ...BASE_PAYLOAD,
+      q21_q21_datetime19: { day: '30', month: '06', year: '2026' },
+    };
+    await processOnboardingSubmission(payload);
+
+    const content = (mockUploadBufferToFolder.mock.calls[0][0] as { buffer: Buffer }).buffer.toString('utf-8');
+    expect(content).toContain('Agreement Signed Date: 2026-06-30');
+  });
+
+  // T-AS11: absent agreement signed date is omitted from summary
+  it('T-AS11: absent agreement signed date is omitted from summary', async () => {
+    setupHappyPath();
+    await processOnboardingSubmission(BASE_PAYLOAD);
+
+    const content = (mockUploadBufferToFolder.mock.calls[0][0] as { buffer: Buffer }).buffer.toString('utf-8');
+    expect(content).not.toContain('Agreement Signed Date');
   });
 });
 
