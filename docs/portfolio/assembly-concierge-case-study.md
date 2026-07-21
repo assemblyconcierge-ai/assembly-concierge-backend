@@ -59,9 +59,34 @@ activation.
 ### Screening and controlled backend creation
 
 Contractor acquisition starts outside the dispatch system. Applicants move
-through a screening workflow, and approved applicants are advanced to a controlled
-backend creation step. New backend contractor records are inactive by default so
-screening completion alone does not grant dispatch eligibility.
+through a controlled screening workflow before they can advance to onboarding or
+backend contractor creation.
+
+The production screening flow uses contractor-specific one-time links. Each link
+contains a generated token with an expiration timestamp. The public screening
+page remains hidden until a prefill request explicitly confirms that the token is
+valid and available. Malformed, expired, consumed, or otherwise unavailable
+links receive a controlled unavailable state rather than applicant data.
+
+A successful screening submission updates the matching Airtable application,
+records the completed timestamp and screening responses, then clears both the
+token and its expiration value. Reopening the same link is rejected, which
+prevents ordinary replay after completion. The deployed flow was smoke-tested in
+production across valid prefill, invalid-link handling, successful submission,
+token consumption, and replay rejection.
+
+During launch hardening, a Make configuration conflict was found between
+sequential processing and synchronous webhook responses. The submission scenario
+was corrected to execute immediately without sequential mode so the browser can
+receive the intended structured success response. The remaining narrow
+architectural limitation is that Airtable and Make do not provide the same atomic
+single-use guarantee as a database transaction for truly simultaneous requests.
+Moving screening-token validation and atomic consumption into the backend is a
+planned hardening improvement, not a current launch blocker.
+
+Approved applicants are advanced to a controlled backend creation step. New
+backend contractor records are inactive by default, so screening completion alone
+does not grant dispatch eligibility.
 
 ### Onboarding email flow
 
@@ -246,15 +271,18 @@ while keeping sensitive details out of documentation:
 2. Redeploy or restart services as needed so backend credential changes are live.
 3. Verify protected Make-to-backend calls succeed with the rotated credential and
    stale credentials are no longer accepted.
-4. Smoke-test contractor onboarding: create inactive contractor, send onboarding
+4. Smoke-test contractor screening: issue a fresh expiring link, verify valid
+   prefill, submit once, confirm Airtable completion and token clearing, then
+   confirm the same link is rejected on replay.
+5. Smoke-test contractor onboarding: create inactive contractor, send onboarding
    email, handle missing-docs path, send onboarding accepted email, activate, and
    send activated-contractor email.
-5. Smoke-test dispatch: operator approval, availability check, dispatch, SMS
+6. Smoke-test dispatch: operator approval, availability check, dispatch, SMS
    confirm, on-the-way, done/finish, completion photo upload, and Airtable mirror.
-6. Smoke-test completion and billing: approve completion, verify either closed
+7. Smoke-test completion and billing: approve completion, verify either closed
    paid or remainder-payment path, and confirm webhook-driven closure after
    remainder payment.
-7. Review logs, audit events, email events, integration failure records, and
+8. Review logs, audit events, email events, integration failure records, and
    Airtable result fields after each smoke path.
 
 This smoke-test process is designed to validate behavior and observability without
@@ -266,6 +294,9 @@ data, phone numbers, or email addresses.
 The project uses TypeScript checks, Vitest unit and integration tests, focused
 backend launch-hardening reviews, and production smoke tests. The current verified
 result is 616 automated backend tests passed, and the TypeScript build passed.
+The contractor screening flow has also passed a production smoke test covering
+fresh-link prefill, successful submission, synchronous success handling, token
+consumption, and replay rejection.
 
 ## Future Scope-Review Roadmap
 
@@ -281,6 +312,11 @@ while Stripe remains authoritative for money actually collected or refunded.
   canonical lifecycle state.
 - Make is useful for orchestration and operator-friendly routing, but backend
   endpoints must own validation, idempotency, and side effects.
+- Contractor screening links should expire, become unusable after submission,
+  and fail closed when validation is unavailable.
+- Synchronous webhook responses and queueing settings must be evaluated together;
+  a configuration intended to serialize requests can break the browser response
+  contract.
 - Contractor activation needs a dedicated lifecycle, not a profile-edit shortcut.
 - Email, SMS, and Airtable sync should be observable and retryable side effects,
   not hidden dependencies inside the primary transaction.
