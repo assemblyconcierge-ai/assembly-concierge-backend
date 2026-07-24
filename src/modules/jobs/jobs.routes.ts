@@ -391,6 +391,15 @@ jobsRouter.post(
         req.correlationId,
         assignmentId,
       );
+
+      // The transaction has committed; clear the authoritative Airtable assignment link.
+      enqueueAirtableSync({ jobId: result.jobId, correlationId: req.correlationId }).catch((err) => {
+        logger.warn(
+          { err, jobId: result.jobId },
+          '[cancel-assignment] Airtable sync enqueue failed',
+        );
+      });
+
       res.json(result);
     } catch (err: any) {
       if (err?.statusCode === 404) {

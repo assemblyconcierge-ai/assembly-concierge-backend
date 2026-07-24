@@ -237,6 +237,7 @@ export interface AirtableJobRecord {
   contractorEnRouteAt?: string;   // ISO 8601 timestamp set when contractor texts OTW
   customerOtwTextSentAt?: string; // ISO 8601 timestamp set when customer OTW SMS sends
   customerOtwTextStatus?: string; // sent | failed | skipped
+  assignedContractorAirtableRecordId?: string; // Airtable Contractors record ID, never backend UUID
   // Financial split fields
   basePriceCents?: number;
   rushFeeAmountCents?: number;          // = rushAmountCents
@@ -409,8 +410,9 @@ export async function syncJobToAirtable(record: AirtableJobRecord): Promise<stri
   // Dispatch status — always set at intake (defaults to Pending Dispatch)
   fields['Dispatch Status'] = mapDispatchStatus(record.dispatchStatus);
 
-  // Assigned Contractor — intentionally left blank at intake (filled by dispatcher)
-  // fields['Assigned Contractor'] = '';  // omitted — do not send empty values to Airtable
+  if (record.assignedContractorAirtableRecordId) {
+    fields['Assigned Contractors'] = [record.assignedContractorAirtableRecordId];
+  }
 
   const response = await fetch(url, {
     method: 'POST',
@@ -499,6 +501,8 @@ export async function updateAirtableStatus(
     completionPhotos?: Array<{ url: string; filename: string }>;
     completionReviewStatus?: string;
   },
+  // string links the current contractor; null clears a stale link; undefined leaves it untouched
+  assignedContractorAirtableRecordId?: string | null,
 ): Promise<void> {
   const now = new Date().toISOString();
   const fields: Record<string, unknown> = {
@@ -523,6 +527,12 @@ export async function updateAirtableStatus(
 
   if (dispatchStatus !== undefined) {
     fields['Dispatch Status'] = mapDispatchStatus(dispatchStatus);
+  }
+
+  if (assignedContractorAirtableRecordId !== undefined) {
+    fields['Assigned Contractors'] = assignedContractorAirtableRecordId
+      ? [assignedContractorAirtableRecordId]
+      : [];
   }
 
   if (completionReportedAt) {

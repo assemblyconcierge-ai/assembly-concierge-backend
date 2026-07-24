@@ -205,7 +205,7 @@ export async function enqueueAirtableSync(params: {
 }
 
 /** Core sync logic — fetch job + customer data and push to Airtable */
-async function processSyncJob(jobId: string, correlationId: string): Promise<void> {
+export async function processSyncJob(jobId: string, correlationId: string): Promise<void> {
   const log = logger.child({ correlationId, jobId, worker: 'airtable-sync' });
   try {
     const row = await queryOne<{
@@ -258,6 +258,10 @@ async function processSyncJob(jobId: string, correlationId: string): Promise<voi
       customer_otw_text_status: string | null;
       // Most recent dispatch status (null if no dispatch exists yet)
       dispatch_status: string | null;
+      // Authoritative current assignment (accepted > pending > completed)
+      current_assignment_id: string | null;
+      current_assignment_status: string | null;
+      assigned_contractor_airtable_record_id: string | null;
       // Photo stats (Phase 1.5-C)
       photo_count: string;            // COUNT returns text from pg driver
       last_photo_uploaded_at: Date | null;
@@ -285,6 +289,9 @@ async function processSyncJob(jobId: string, correlationId: string): Promise<voi
          p.provider_payment_intent_id AS stripe_intent_id,
          s.raw_payload_json,
          d.dispatch_status,
+         current_assignment.current_assignment_id,
+         current_assignment.current_assignment_status,
+         current_assignment.assigned_contractor_airtable_record_id,
          COALESCE(ph.photo_count, 0) AS photo_count,
          ph.last_photo_uploaded_at
        FROM jobs j
@@ -304,6 +311,25 @@ async function processSyncJob(jobId: string, correlationId: string): Promise<voi
          WHERE job_id = j.id
          ORDER BY created_at DESC LIMIT 1
        ) d ON TRUE
+       LEFT JOIN LATERAL (
+         SELECT
+           ca.id AS current_assignment_id,
+           ca.status AS current_assignment_status,
+           assigned_contractor.airtable_record_id AS assigned_contractor_airtable_record_id
+         FROM contractor_assignments ca
+         JOIN contractors assigned_contractor ON assigned_contractor.id = ca.contractor_id
+         WHERE ca.job_id = j.id
+           AND ca.status IN ('accepted', 'pending', 'completed')
+         ORDER BY
+           CASE ca.status
+             WHEN 'accepted' THEN 1
+             WHEN 'pending' THEN 2
+             WHEN 'completed' THEN 3
+           END,
+           ca.assigned_at DESC,
+           ca.id DESC
+         LIMIT 1
+       ) current_assignment ON TRUE
        LEFT JOIN LATERAL (
          SELECT COUNT(*) AS photo_count, MAX(confirmed_at) AS last_photo_uploaded_at
          FROM uploaded_media
@@ -452,6 +478,8 @@ async function processSyncJob(jobId: string, correlationId: string): Promise<voi
         ? row.customer_otw_text_sent_at.toISOString()
         : undefined,
       customerOtwTextStatus: row.customer_otw_text_status ?? undefined,
+      assignedContractorAirtableRecordId:
+        row.assigned_contractor_airtable_record_id ?? undefined,
       dispatchStatus: 'pending',   // always "Pending Dispatch" at intake
       rushType: row.rush_type ?? undefined,
       // Financial split fields (from jobs table columns added by migration 005)
@@ -503,6 +531,8 @@ async function processSyncJob(jobId: string, correlationId: string): Promise<voi
         },
         // Completion photo stats (Phase 2B) — always included so Airtable reflects latest completion photos
         completionPhotoStats,
+        // null explicitly clears a stale Airtable linked-record value
+        row.assigned_contractor_airtable_record_id,
       );
       log.info({ airtableRecordId: row.airtable_record_id }, 'Airtable record updated');
     } else {
