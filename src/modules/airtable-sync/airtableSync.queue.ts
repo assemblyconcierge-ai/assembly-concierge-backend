@@ -13,7 +13,12 @@ import { DateTime } from 'luxon';
 import { logger } from '../../common/logger';
 import { config } from '../../common/config';
 import { query, queryOne } from '../../db/pool';
-import { syncJobToAirtable, updateAirtableStatus, logIntegrationFailure } from './airtable.adapter';
+import {
+  logIntegrationFailure,
+  syncJobToAirtable,
+  updateAirtableAssignedContractor,
+  updateAirtableStatus,
+} from './airtable.adapter';
 import { generatePresignedDownloadUrl } from '../storage/s3.service';
 
 let Queue: any = null;
@@ -531,10 +536,16 @@ export async function processSyncJob(jobId: string, correlationId: string): Prom
         },
         // Completion photo stats (Phase 2B) — always included so Airtable reflects latest completion photos
         completionPhotoStats,
-        // null explicitly clears a stale Airtable linked-record value
+      );
+      log.info({ airtableRecordId: row.airtable_record_id }, 'Airtable core record updated');
+
+      // Keep the optional linked-record write separate so it cannot block the
+      // core status, payment, attachment, or photo refresh.
+      await updateAirtableAssignedContractor(
+        row.airtable_record_id,
         row.assigned_contractor_airtable_record_id,
       );
-      log.info({ airtableRecordId: row.airtable_record_id }, 'Airtable record updated');
+      log.info({ airtableRecordId: row.airtable_record_id }, 'Airtable assignment link updated');
     } else {
       // Create new record
       const airtableId = await syncJobToAirtable(record);
@@ -543,7 +554,17 @@ export async function processSyncJob(jobId: string, correlationId: string): Prom
           'UPDATE jobs SET airtable_record_id = $2, updated_at = NOW() WHERE id = $1',
           [jobId, airtableId],
         );
-        log.info({ airtableId }, 'Airtable record created');
+        log.info({ airtableId }, 'Airtable core record created');
+
+        // A new record is already blank when no usable assignment exists.
+        // Persist its Airtable ID before attempting this isolated second PATCH.
+        if (row.assigned_contractor_airtable_record_id) {
+          await updateAirtableAssignedContractor(
+            airtableId,
+            row.assigned_contractor_airtable_record_id,
+          );
+          log.info({ airtableId }, 'Airtable assignment link updated');
+        }
       }
     }
   } catch (err) {

@@ -23,6 +23,7 @@ vi.mock('../../../src/db/pool', () => ({
 
 vi.mock('../../../src/modules/airtable-sync/airtable.adapter', () => ({
   syncJobToAirtable: vi.fn(),
+  updateAirtableAssignedContractor: vi.fn(),
   updateAirtableStatus: vi.fn(),
   logIntegrationFailure: vi.fn(),
 }));
@@ -33,9 +34,12 @@ vi.mock('../../../src/modules/storage/s3.service', () => ({
 
 import { query, queryOne } from '../../../src/db/pool';
 import {
+  logIntegrationFailure,
   syncJobToAirtable,
+  updateAirtableAssignedContractor,
   updateAirtableStatus,
 } from '../../../src/modules/airtable-sync/airtable.adapter';
+import { generatePresignedDownloadUrl } from '../../../src/modules/storage/s3.service';
 import { processSyncJob } from '../../../src/modules/airtable-sync/airtableSync.queue';
 
 const CONTRACTOR_BACKEND_UUID = '11111111-1111-4111-8111-111111111111';
@@ -99,15 +103,18 @@ function makeJobRow(overrides: Record<string, unknown> = {}) {
 async function syncExisting(overrides: Record<string, unknown>): Promise<unknown> {
   vi.mocked(queryOne).mockResolvedValueOnce(makeJobRow(overrides) as any);
   await processSyncJob('job-uuid', 'corr-1');
-  return vi.mocked(updateAirtableStatus).mock.calls[0][15];
+  return vi.mocked(updateAirtableAssignedContractor).mock.calls[0][1];
 }
 
-describe('Airtable assignment selection and queue mapping', () => {
+describe('Airtable assignment selection and isolated queue mapping', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(query).mockResolvedValue([]);
     vi.mocked(syncJobToAirtable).mockResolvedValue('recJOB');
     vi.mocked(updateAirtableStatus).mockResolvedValue(undefined);
+    vi.mocked(updateAirtableAssignedContractor).mockResolvedValue(undefined);
+    vi.mocked(logIntegrationFailure).mockResolvedValue(undefined);
+    vi.mocked(generatePresignedDownloadUrl).mockResolvedValue('https://signed.example/photo.jpg');
   });
 
   it('uses deterministic accepted, pending, completed precedence in the sync SQL', async () => {
@@ -169,7 +176,56 @@ describe('Airtable assignment selection and queue mapping', () => {
     expect(linkValue).toBeNull();
   });
 
-  it('passes the Airtable contractor record ID through the create path', async () => {
+  it('runs the core update before the isolated assignment PATCH', async () => {
+    await syncExisting({});
+
+    expect(vi.mocked(updateAirtableStatus).mock.invocationCallOrder[0])
+      .toBeLessThan(vi.mocked(updateAirtableAssignedContractor).mock.invocationCallOrder[0]);
+  });
+
+  it('preserves status, payment, photo, attachment, and completion fields in the core update', async () => {
+    vi.mocked(queryOne).mockResolvedValueOnce(makeJobRow({
+      status: 'completion_reported',
+      stripe_intent_id: 'pi_123',
+      completion_reported_at: new Date('2026-07-24T14:00:00.000Z'),
+      completed_at: new Date('2026-07-24T15:00:00.000Z'),
+      photo_count: '2',
+      last_photo_uploaded_at: new Date('2026-07-24T13:30:00.000Z'),
+      operator_photo_token: 'review-token',
+    }) as any);
+    vi.mocked(query).mockResolvedValueOnce([{
+      storage_key: 'completion/photo.jpg',
+      original_filename: 'finished.jpg',
+      mime_type: 'image/jpeg',
+    }] as any);
+
+    await processSyncJob('job-uuid', 'corr-1');
+
+    const args = vi.mocked(updateAirtableStatus).mock.calls[0];
+    expect(args[1]).toBe('completion_reported');
+    expect(args[2]).toBe(10_000);
+    expect(args[3]).toBe('pi_123');
+    expect(args[6]).toBe('2026-07-24T14:00:00.000Z');
+    expect(args[7]).toBe(7_500);
+    expect(args[13]).toEqual({
+      photoCount: 2,
+      photosUploaded: true,
+      lastPhotoUploadedAt: '2026-07-24T13:30:00.000Z',
+      operatorPhotoLink: 'https://api.example.com/public/photos/review/review-token',
+    });
+    expect(args[14]).toEqual(expect.objectContaining({
+      completionPhotoCount: 1,
+      completionPhotosUploaded: true,
+      completionEvidenceLink: 'https://api.example.com/admin/jobs/job-uuid/completion-photos',
+      completionPhotos: [{
+        url: 'https://signed.example/photo.jpg',
+        filename: 'finished.jpg',
+      }],
+      completionReviewStatus: 'Completion Photos Received',
+    }));
+  });
+
+  it('persists a newly created Airtable record ID before assignment mirroring', async () => {
     vi.mocked(queryOne).mockResolvedValueOnce(makeJobRow({
       airtable_record_id: null,
       current_assignment_status: 'pending',
@@ -178,12 +234,23 @@ describe('Airtable assignment selection and queue mapping', () => {
 
     await processSyncJob('job-uuid', 'corr-1');
 
+    const updateCallIndex = vi.mocked(query).mock.calls.findIndex(
+      ([sql]) => String(sql).includes('UPDATE jobs SET airtable_record_id'),
+    );
+    expect(updateCallIndex).toBeGreaterThanOrEqual(0);
+    expect(vi.mocked(query).mock.invocationCallOrder[updateCallIndex])
+      .toBeLessThan(vi.mocked(updateAirtableAssignedContractor).mock.invocationCallOrder[0]);
+    expect(updateAirtableAssignedContractor).toHaveBeenCalledWith(
+      'recJOB',
+      'recCREATECONTRACTOR',
+    );
+
     const record = vi.mocked(syncJobToAirtable).mock.calls[0][0];
     expect(record.assignedContractorAirtableRecordId).toBe('recCREATECONTRACTOR');
     expect(record.assignedContractorAirtableRecordId).not.toBe(CONTRACTOR_BACKEND_UUID);
   });
 
-  it('leaves the assignment field undefined on create when there is no assignment', async () => {
+  it('does not perform an assignment write when a new record has no usable assignment', async () => {
     vi.mocked(queryOne).mockResolvedValueOnce(makeJobRow({
       airtable_record_id: null,
       current_assignment_id: null,
@@ -193,7 +260,31 @@ describe('Airtable assignment selection and queue mapping', () => {
 
     await processSyncJob('job-uuid', 'corr-1');
 
+    expect(updateAirtableAssignedContractor).not.toHaveBeenCalled();
     const record = vi.mocked(syncJobToAirtable).mock.calls[0][0];
     expect(record.assignedContractorAirtableRecordId).toBeUndefined();
+  });
+
+  it('surfaces an assignment 422 only after a successful core update', async () => {
+    vi.mocked(queryOne)
+      .mockResolvedValueOnce(makeJobRow({}) as any)
+      .mockResolvedValueOnce({
+        airtable_record_id: 'recJOB',
+        status: 'assigned',
+        updated_at: new Date('2026-07-24T13:00:00.000Z'),
+      } as any);
+    vi.mocked(updateAirtableAssignedContractor).mockRejectedValueOnce(
+      new Error('Airtable update error 422: UNKNOWN_FIELD_NAME'),
+    );
+
+    await expect(processSyncJob('job-uuid', 'corr-1')).rejects.toThrow('UNKNOWN_FIELD_NAME');
+
+    expect(updateAirtableStatus).toHaveBeenCalled();
+    expect(vi.mocked(updateAirtableStatus).mock.invocationCallOrder[0])
+      .toBeLessThan(vi.mocked(updateAirtableAssignedContractor).mock.invocationCallOrder[0]);
+    expect(logIntegrationFailure).toHaveBeenCalledWith(expect.objectContaining({
+      operationName: 'sync_job',
+      errorMessage: expect.stringContaining('UNKNOWN_FIELD_NAME'),
+    }));
   });
 });

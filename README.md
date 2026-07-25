@@ -1426,6 +1426,13 @@ Auth for all endpoints: `requireAdmin` — pass either `X-Admin-Token: <token>` 
 
 Airtable is the operator's UI — not the source of truth. Every field is either input-only or a mirror of backend state.
 
+The canonical operational Jobs table is `Backend Intake Sandbox V2`. PostgreSQL
+selects the authoritative current assignment and the backend mirrors it through
+V2 `Assigned Contractor` (`fld3r2KDFT37ObiKj`). Airtable automatically maintains
+the reverse `Contractors.Backend Intake Sandbox V2` relationship
+(`fldcNKFynVL7k1jqo`). The legacy `Jobs.Assigned Contractors` / `Contractors.Jobs 2`
+relationship is not used by the backend.
+
 | Field | Owned By | Purpose |
 |-------|----------|---------|
 | `Dispatch Approved` | Operator input | Human approval to initiate dispatch |
@@ -1433,6 +1440,7 @@ Airtable is the operator's UI — not the source of truth. Every field is either
 | `Backend Job ID` | Backend mirror | UUID for Make.com to reference |
 | `Backend Job Status` | Backend mirror | Actual DB status value |
 | `Dispatch Status` | Backend mirror | Dispatch outcome (Accepted, etc.) |
+| `Assigned Contractor` | Backend mirror | Current PostgreSQL assignment, with completed assignment retained for history |
 | `Dispatch Sent` | Backend mirror | Whether SMS was sent |
 | `Status` | Airtable/mirror | Operational field used in Make filters |
 | `Dispatch Payment Eligible` | Formula | `OR(deposit_paid, paid_in_full)` helper for automation trigger |

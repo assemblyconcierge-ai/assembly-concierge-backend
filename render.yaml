@@ -29,7 +29,7 @@ services:
       - key: AIRTABLE_BASE_ID
         sync: false
       - key: AIRTABLE_TABLE_JOBS
-        value: Jobs
+        value: Backend Intake Sandbox V2
 
 databases:
   - name: assembly-concierge-db

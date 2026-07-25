@@ -15,7 +15,7 @@
  *   Payment ID            — text
  *   Job                   — linked record to Backend Intake Sandbox V2
  *   Payment Type          — single select: "deposit" | "remainder" | "full"
- *   Payment Status        — single select: "pending" | "checkout_created" | "paid" | "failed" | "expired" | "cancelled"
+ *   Payment Status        — single select: "pending" | "checkout_created" | "paid" | "failed" | "expired" | "cancelled" | "refunded"
  *   Amount Due            — currency (dollars, not cents)
  *   Amount Paid           — currency (dollars, not cents)
  *   Currency              — text (e.g. "usd")
@@ -34,11 +34,9 @@ import { logger } from '../../common/logger';
 
 // ── Payment Status Single Select allowlist ───────────────────────────────────
 // Must match the exact option labels in the Airtable Payments table.
-// Confirmed Airtable options: pending | checkout_created | paid | failed | expired | cancelled
-// NOTE: Airtable does not have a "refunded" option. Refunded payments are left at
-// their last status ("paid") and the refund is visible via Stripe. If you want
-// Airtable to reflect refunds, add "refunded" as a Payment Status option in Airtable
-// and the mapping below will activate automatically.
+// Confirmed Airtable options: pending | checkout_created | paid | failed | expired | cancelled | refunded
+// Refund mirroring is intentionally not implemented in this adapter yet. Keep the
+// mapping omitted until refund behavior is designed and tested as a separate change.
 const PAYMENT_STATUS_MAP: Record<string, string> = {
   pending:          'pending',
   checkout_created: 'checkout_created',
@@ -48,8 +46,8 @@ const PAYMENT_STATUS_MAP: Record<string, string> = {
   failed:           'failed',
   expired:          'expired',
   cancelled:        'cancelled',
-  // Refunded: no Airtable option exists yet — falls through to fallback (checkout_created).
-  // Add "refunded" to Airtable Payment Status options to enable this mapping.
+  // Refunded behavior is intentionally unchanged in this patch and falls through
+  // to the existing fallback until a dedicated refund-mirroring change is made.
   // refunded:      'refunded',
 };
 const PAYMENT_STATUS_FALLBACK = 'checkout_created';

@@ -1,7 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  AIRTABLE_V2_ASSIGNED_CONTRACTOR_FIELD_ID,
   AirtableJobRecord,
   syncJobToAirtable,
+  updateAirtableAssignedContractor,
   updateAirtableStatus,
 } from '../../../src/modules/airtable-sync/airtable.adapter';
 
@@ -9,7 +11,7 @@ vi.mock('../../../src/common/config', () => ({
   config: {
     AIRTABLE_API_KEY: 'test-api-key',
     AIRTABLE_BASE_ID: 'appTESTBASEID',
-    AIRTABLE_TABLE_JOBS: 'Jobs',
+    AIRTABLE_TABLE_JOBS: 'Backend Intake Sandbox V2',
     NODE_ENV: 'test',
   },
 }));
@@ -26,8 +28,9 @@ vi.mock('../../../src/db/pool', () => ({
 const fetchMock = vi.fn();
 vi.stubGlobal('fetch', fetchMock);
 
+const BACKEND_JOB_UUID = '11111111-1111-4111-8111-111111111111';
 const BASE_RECORD: AirtableJobRecord = {
-  jobId: 'job-backend-uuid',
+  jobId: BACKEND_JOB_UUID,
   jobKey: 'AC-2026-TEST',
   customerName: 'Customer',
   customerEmail: 'customer@example.com',
@@ -41,32 +44,11 @@ const BASE_RECORD: AirtableJobRecord = {
   createdAt: '2026-07-24T12:00:00.000Z',
 };
 
-function requestFields(): Record<string, unknown> {
-  return JSON.parse(fetchMock.mock.calls[0][1].body as string).fields;
+function requestFields(callIndex = 0): Record<string, unknown> {
+  return JSON.parse(fetchMock.mock.calls[callIndex][1].body as string).fields;
 }
 
-async function updateAssignmentLink(value: string | null | undefined): Promise<void> {
-  await updateAirtableStatus(
-    'recJOB',
-    'assigned',
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    value,
-  );
-}
-
-describe('Airtable assigned contractor linked-record payload', () => {
+describe('Airtable V2 assigned contractor linked-record payload', () => {
   beforeEach(() => {
     vi.resetAllMocks();
     fetchMock.mockResolvedValue({
@@ -76,39 +58,45 @@ describe('Airtable assigned contractor linked-record payload', () => {
     });
   });
 
-  it('writes Assigned Contractors as an Airtable record ID array on create', async () => {
+  it('excludes assignment from the core create payload', async () => {
     await syncJobToAirtable({
       ...BASE_RECORD,
       assignedContractorAirtableRecordId: 'recCONTRACTOR',
     });
 
     expect(fetchMock.mock.calls[0][1].method).toBe('POST');
-    expect(requestFields()['Assigned Contractors']).toEqual(['recCONTRACTOR']);
-    expect(requestFields()['Assigned Contractors']).not.toContain(BASE_RECORD.jobId);
-  });
-
-  it('omits Assigned Contractors on create when there is no usable assignment', async () => {
-    await syncJobToAirtable(BASE_RECORD);
-
+    expect(requestFields()).not.toHaveProperty(AIRTABLE_V2_ASSIGNED_CONTRACTOR_FIELD_ID);
+    expect(requestFields()).not.toHaveProperty('Assigned Contractor');
     expect(requestFields()).not.toHaveProperty('Assigned Contractors');
   });
 
-  it('writes Assigned Contractors as an Airtable record ID array on update', async () => {
-    await updateAssignmentLink('recNEWCONTRACTOR');
+  it('excludes assignment from the core update payload', async () => {
+    await updateAirtableStatus('recJOB', 'assigned');
 
     expect(fetchMock.mock.calls[0][1].method).toBe('PATCH');
-    expect(requestFields()['Assigned Contractors']).toEqual(['recNEWCONTRACTOR']);
-  });
-
-  it('clears Assigned Contractors on update when no usable assignment exists', async () => {
-    await updateAssignmentLink(null);
-
-    expect(requestFields()['Assigned Contractors']).toEqual([]);
-  });
-
-  it('leaves Assigned Contractors untouched when assignment mirroring is omitted', async () => {
-    await updateAssignmentLink(undefined);
-
+    expect(requestFields()).not.toHaveProperty(AIRTABLE_V2_ASSIGNED_CONTRACTOR_FIELD_ID);
+    expect(requestFields()).not.toHaveProperty('Assigned Contractor');
     expect(requestFields()).not.toHaveProperty('Assigned Contractors');
+  });
+
+  it('PATCHes exactly the V2 assignment field ID with an Airtable record ID', async () => {
+    await updateAirtableAssignedContractor('recJOB', 'recCONTRACTOR');
+
+    expect(fetchMock.mock.calls[0][1].method).toBe('PATCH');
+    expect(requestFields()).toEqual({
+      fld3r2KDFT37ObiKj: ['recCONTRACTOR'],
+    });
+    expect(Object.keys(requestFields())).toEqual([AIRTABLE_V2_ASSIGNED_CONTRACTOR_FIELD_ID]);
+    expect(requestFields()[AIRTABLE_V2_ASSIGNED_CONTRACTOR_FIELD_ID]).not.toContain(
+      BACKEND_JOB_UUID,
+    );
+  });
+
+  it('clears the V2 assignment link with an empty array', async () => {
+    await updateAirtableAssignedContractor('recJOB', null);
+
+    expect(requestFields()).toEqual({
+      fld3r2KDFT37ObiKj: [],
+    });
   });
 });

@@ -13,7 +13,7 @@ vi.mock('../../../src/common/config', () => ({
   config: {
     AIRTABLE_API_KEY: 'test-api-key',
     AIRTABLE_BASE_ID: 'appTESTBASEID',
-    AIRTABLE_TABLE_JOBS: 'Jobs',
+    AIRTABLE_TABLE_JOBS: 'Backend Intake Sandbox V2',
     NODE_ENV: 'test',
   },
 }));

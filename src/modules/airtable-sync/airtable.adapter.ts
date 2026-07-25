@@ -15,6 +15,9 @@ import { logger } from '../../common/logger';
 import { query } from '../../db/pool';
 import { v4 as uuidv4 } from 'uuid';
 
+/** Canonical linked-record field on the operational Backend Intake Sandbox V2 table. */
+export const AIRTABLE_V2_ASSIGNED_CONTRACTOR_FIELD_ID = 'fld3r2KDFT37ObiKj';
+
 // ── Single Select Mapping Tables ─────────────────────────────────────────────
 //
 // Keys are internal backend values (database enums / service_type codes).
@@ -410,10 +413,6 @@ export async function syncJobToAirtable(record: AirtableJobRecord): Promise<stri
   // Dispatch status — always set at intake (defaults to Pending Dispatch)
   fields['Dispatch Status'] = mapDispatchStatus(record.dispatchStatus);
 
-  if (record.assignedContractorAirtableRecordId) {
-    fields['Assigned Contractors'] = [record.assignedContractorAirtableRecordId];
-  }
-
   const response = await fetch(url, {
     method: 'POST',
     headers: {
@@ -456,6 +455,21 @@ export async function updateAirtableRecord(
     const body = await response.text();
     throw new Error(`Airtable update error ${response.status}: ${body}`);
   }
+}
+
+/**
+ * Mirror the authoritative PostgreSQL assignment separately from the core job payload.
+ * Airtable linked-record fields accept Airtable record IDs only, never backend UUIDs.
+ */
+export async function updateAirtableAssignedContractor(
+  recordId: string,
+  contractorAirtableRecordId: string | null,
+): Promise<void> {
+  await updateAirtableRecord(recordId, {
+    [AIRTABLE_V2_ASSIGNED_CONTRACTOR_FIELD_ID]: contractorAirtableRecordId
+      ? [contractorAirtableRecordId]
+      : [],
+  });
 }
 
 /** Convenience wrapper: update lifecycle status and optional financial fields.
@@ -501,8 +515,6 @@ export async function updateAirtableStatus(
     completionPhotos?: Array<{ url: string; filename: string }>;
     completionReviewStatus?: string;
   },
-  // string links the current contractor; null clears a stale link; undefined leaves it untouched
-  assignedContractorAirtableRecordId?: string | null,
 ): Promise<void> {
   const now = new Date().toISOString();
   const fields: Record<string, unknown> = {
@@ -527,12 +539,6 @@ export async function updateAirtableStatus(
 
   if (dispatchStatus !== undefined) {
     fields['Dispatch Status'] = mapDispatchStatus(dispatchStatus);
-  }
-
-  if (assignedContractorAirtableRecordId !== undefined) {
-    fields['Assigned Contractors'] = assignedContractorAirtableRecordId
-      ? [assignedContractorAirtableRecordId]
-      : [];
   }
 
   if (completionReportedAt) {
