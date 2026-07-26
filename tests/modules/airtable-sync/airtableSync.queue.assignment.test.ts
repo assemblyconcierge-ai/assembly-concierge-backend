@@ -193,11 +193,20 @@ describe('Airtable assignment selection and isolated queue mapping', () => {
       last_photo_uploaded_at: new Date('2026-07-24T13:30:00.000Z'),
       operator_photo_token: 'review-token',
     }) as any);
-    vi.mocked(query).mockResolvedValueOnce([{
-      storage_key: 'completion/photo.jpg',
-      original_filename: 'finished.jpg',
-      mime_type: 'image/jpeg',
-    }] as any);
+    vi.mocked(query).mockResolvedValueOnce([
+      {
+        storage_key:
+          'jobs/AC-2026-TEST/completion/completion-job-uuid-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa-1.jpg',
+        original_filename: 'image.jpg',
+        mime_type: 'image/jpeg',
+      },
+      {
+        storage_key:
+          'jobs/AC-2026-TEST/completion/completion-job-uuid-bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb-2.jpg',
+        original_filename: 'image.jpg',
+        mime_type: 'image/jpeg',
+      },
+    ] as any);
 
     await processSyncJob('job-uuid', 'corr-1');
 
@@ -214,15 +223,43 @@ describe('Airtable assignment selection and isolated queue mapping', () => {
       operatorPhotoLink: 'https://api.example.com/public/photos/review/review-token',
     });
     expect(args[14]).toEqual(expect.objectContaining({
-      completionPhotoCount: 1,
+      completionPhotoCount: 2,
       completionPhotosUploaded: true,
       completionEvidenceLink: 'https://api.example.com/admin/jobs/job-uuid/completion-photos',
-      completionPhotos: [{
-        url: 'https://signed.example/photo.jpg',
-        filename: 'finished.jpg',
-      }],
+      completionPhotos: [
+        {
+          url: 'https://signed.example/photo.jpg',
+          filename:
+            'completion-job-uuid-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa-1.jpg',
+        },
+        {
+          url: 'https://signed.example/photo.jpg',
+          filename:
+            'completion-job-uuid-bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb-2.jpg',
+        },
+      ],
       completionReviewStatus: 'Completion Photos Received',
     }));
+  });
+
+  it('retains original_filename for a legacy completion-photo storage key', async () => {
+    vi.mocked(queryOne).mockResolvedValueOnce(makeJobRow({
+      status: 'completion_reported',
+    }) as any);
+    vi.mocked(query).mockResolvedValueOnce([{
+      storage_key: 'jobs/AC-2026-TEST/completion/legacy-object-key.jpg',
+      original_filename: 'finished-assembly.jpg',
+      mime_type: 'image/jpeg',
+    }] as any);
+
+    await processSyncJob('job-uuid', 'corr-1');
+
+    const completionPhotoStats =
+      vi.mocked(updateAirtableStatus).mock.calls[0][14];
+    expect(completionPhotoStats?.completionPhotos).toEqual([{
+      url: 'https://signed.example/photo.jpg',
+      filename: 'finished-assembly.jpg',
+    }]);
   });
 
   it('persists a newly created Airtable record ID before assignment mirroring', async () => {

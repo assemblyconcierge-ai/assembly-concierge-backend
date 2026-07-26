@@ -25,6 +25,29 @@ let Queue: any = null;
 let Worker: any = null;
 let airtableQueue: any = null;
 
+const GENERATED_COMPLETION_PHOTO_SUFFIX_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}-[1-9]\d*\.(?:jpg|png|webp|heic|heif)$/i;
+
+function getCompletionPhotoAirtableFilename(
+  storageKey: string,
+  originalFilename: string | null,
+  jobId: string,
+): string {
+  const objectFilename = storageKey.split('/').pop();
+  const generatedPrefix = `completion-${jobId}-`;
+  if (
+    objectFilename?.startsWith(generatedPrefix)
+    && GENERATED_COMPLETION_PHOTO_SUFFIX_RE.test(
+      objectFilename.slice(generatedPrefix.length),
+    )
+  ) {
+    return objectFilename;
+  }
+
+  const ext = storageKey.split('.').pop() ?? 'jpg';
+  return originalFilename ?? `completion-photo.${ext}`;
+}
+
 /** True when BullMQ+Redis is active; false when falling back to in-process */
 export let redisQueueActive = false;
 
@@ -385,8 +408,14 @@ export async function processSyncJob(jobId: string, correlationId: string): Prom
       for (const cr of completionRows) {
         try {
           const presignedUrl = await generatePresignedDownloadUrl(cr.storage_key, 3600);
-          const ext = cr.storage_key.split('.').pop() ?? 'jpg';
-          const filename = cr.original_filename ?? `completion-photo.${ext}`;
+          // New completion uploads use their unique server-generated object name.
+          // Legacy keys retain original_filename so later full-array syncs do not
+          // unexpectedly rename their existing Airtable attachments.
+          const filename = getCompletionPhotoAirtableFilename(
+            cr.storage_key,
+            cr.original_filename,
+            jobId,
+          );
           completionPhotos.push({ url: presignedUrl, filename });
         } catch (urlErr) {
           log.warn({ urlErr, storageKey: cr.storage_key }, '[AirtableSync] Failed to generate presigned URL for completion photo — skipping');

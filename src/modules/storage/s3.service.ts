@@ -1,4 +1,9 @@
-import { S3Client, PutObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3';
+import {
+  DeleteObjectCommand,
+  GetObjectCommand,
+  PutObjectCommand,
+  S3Client,
+} from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { config } from '../../common/config';
 import { logger } from '../../common/logger';
@@ -80,5 +85,23 @@ export async function generatePresignedDownloadUrl(
   } catch (err) {
     logger.error({ err, storageKey }, 'Failed to generate presigned download URL');
     throw new Error('Failed to generate download URL');
+  }
+}
+
+/** Delete a private storage object by key. Used for best-effort upload rollback. */
+export async function deleteStorageObject(storageKey: string): Promise<void> {
+  if (!config.STORAGE_BUCKET) {
+    throw new Error('STORAGE_BUCKET is not configured.');
+  }
+
+  const client = getClient();
+  try {
+    await client.send(new DeleteObjectCommand({
+      Bucket: config.STORAGE_BUCKET,
+      Key: storageKey,
+    }));
+  } catch (err) {
+    logger.error({ err, storageKey }, 'Failed to delete storage object');
+    throw new Error('Failed to delete storage object');
   }
 }
