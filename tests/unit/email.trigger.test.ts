@@ -56,7 +56,9 @@ const {
 vi.mock('../../src/db/pool', () => ({
   query:           mockQuery,
   queryOne:        mockQueryOne,
-  withTransaction: vi.fn(),
+  withTransaction: vi.fn(async (fn: (client: { query: typeof mockQuery }) => unknown) =>
+    fn({ query: mockQuery }),
+  ),
 }));
 vi.mock('../../src/modules/email/email.service', () => ({
   sendCustomerCompletionEmail:              mockSendCustomerCompletionEmail,

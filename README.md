@@ -472,6 +472,19 @@ if remaining_balance_cents = 0:
 
 Rejects any source state other than `completion_reported`. Returns `409 CONFLICT` for invalid transitions.
 
+The optional JSON request body accepts completion-approval audit metadata:
+
+- `completionOverrideUsed` (boolean): explicitly uses the existing completion-photo override.
+- `completionOverrideReason` (string): the override reason; required and non-empty when
+  `completionOverrideUsed` is `true`.
+- `completionApprovedBy` (non-empty string): the identifiable Airtable/operator value.
+- `completionApprovedAt` (ISO timestamp): the Airtable approval timestamp.
+- `adminOverrideReason` (string): legacy alias that retains its existing override behavior.
+
+The normalized values are stored in the `job.completion_approved` audit event. The legacy
+`adminOverrideReason` contract remains supported; this metadata does not add another validation
+bypass.
+
 ### Existing Stripe webhook already handles the rest
 
 `checkout.session.completed` on a remainder payment already handled `awaiting_remainder_payment → closed_paid` correctly. No changes needed.

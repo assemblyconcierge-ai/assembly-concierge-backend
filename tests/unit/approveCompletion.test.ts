@@ -13,6 +13,15 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import request from 'supertest';
 import express, { Request, Response, NextFunction } from 'express';
 
+const { transactionClient, transactionQuery, mockWithTransaction } = vi.hoisted(() => {
+  const transactionQuery = vi.fn();
+  const transactionClient = { query: transactionQuery };
+  const mockWithTransaction = vi.fn(async (fn: (client: typeof transactionClient) => unknown) =>
+    fn(transactionClient),
+  );
+  return { transactionClient, transactionQuery, mockWithTransaction };
+});
+
 // ── Module mocks ──────────────────────────────────────────────────────────────
 vi.mock('../../src/modules/jobs/job.repository', () => ({
   getJobById: vi.fn(),
@@ -25,6 +34,7 @@ vi.mock('../../src/modules/jobs/job.repository', () => ({
 vi.mock('../../src/db/pool', () => ({
   query: vi.fn(),
   queryOne: vi.fn(),
+  withTransaction: mockWithTransaction,
 }));
 
 vi.mock('../../src/modules/payments/payment.service', () => ({
@@ -72,7 +82,7 @@ vi.mock('../../src/common/config', () => ({
 }));
 
 import { getJobById, updateJobStatus } from '../../src/modules/jobs/job.repository';
-import { query } from '../../src/db/pool';
+import { query, withTransaction } from '../../src/db/pool';
 import { getPaymentsByJobId } from '../../src/modules/payments/payment.service';
 import { recordAuditEvent } from '../../src/modules/audit/audit.service';
 import { enqueueAirtableSync } from '../../src/modules/airtable-sync/airtableSync.queue';
@@ -108,6 +118,7 @@ beforeEach(() => {
   vi.mocked(enqueueAirtableSync).mockResolvedValue(undefined as any);
   vi.mocked(updateJobStatus).mockResolvedValue(undefined as any);
   vi.mocked(query).mockResolvedValue([]);
+  transactionQuery.mockResolvedValue({ rows: [] });
 });
 
 // ── Status gate ───────────────────────────────────────────────────────────────
@@ -172,7 +183,6 @@ describe('approve-completion photo guard', () => {
     vi.mocked(getJobById).mockResolvedValueOnce(JOB_COMPLETION_REPORTED as any);
     vi.mocked(query).mockResolvedValueOnce([{ count: '2' }] as any); // photo count
     vi.mocked(getPaymentsByJobId).mockResolvedValueOnce([]);
-    vi.mocked(query).mockResolvedValueOnce([] as any); // closed_paid UPDATE
     const app = buildApp();
     const res = await request(app)
       .post('/jobs/job-1/approve-completion')
@@ -185,7 +195,6 @@ describe('approve-completion photo guard', () => {
     vi.mocked(getJobById).mockResolvedValueOnce(JOB_COMPLETION_REPORTED as any);
     vi.mocked(query).mockResolvedValueOnce([{ count: '0' }] as any); // photo count
     vi.mocked(getPaymentsByJobId).mockResolvedValueOnce([]);
-    vi.mocked(query).mockResolvedValueOnce([] as any); // closed_paid UPDATE
     const app = buildApp();
     const res = await request(app)
       .post('/jobs/job-1/approve-completion')
@@ -198,7 +207,6 @@ describe('approve-completion photo guard', () => {
     vi.mocked(getJobById).mockResolvedValueOnce(JOB_COMPLETION_REPORTED as any);
     vi.mocked(query).mockResolvedValueOnce([{ count: '0' }] as any);
     vi.mocked(getPaymentsByJobId).mockResolvedValueOnce([]);
-    vi.mocked(query).mockResolvedValueOnce([] as any);
     const app = buildApp();
     await request(app)
       .post('/jobs/job-1/approve-completion')
@@ -216,7 +224,6 @@ describe('approve-completion photo guard', () => {
     vi.mocked(getJobById).mockResolvedValueOnce(JOB_COMPLETION_REPORTED as any);
     vi.mocked(query).mockResolvedValueOnce([{ count: '3' }] as any);
     vi.mocked(getPaymentsByJobId).mockResolvedValueOnce([]);
-    vi.mocked(query).mockResolvedValueOnce([] as any);
     const app = buildApp();
     await request(app)
       .post('/jobs/job-1/approve-completion')
@@ -240,5 +247,178 @@ describe('approve-completion photo guard', () => {
     const countCall = vi.mocked(query).mock.calls[0];
     expect(countCall[0]).toContain("photo_type = 'completion'");
     expect(countCall[0]).toContain('confirmed_at IS NOT NULL');
+  });
+});
+
+describe('approve-completion audit metadata', () => {
+  it('persists normal approval metadata without an override on closed_paid', async () => {
+    vi.mocked(getJobById).mockResolvedValueOnce(JOB_COMPLETION_REPORTED as any);
+    vi.mocked(query).mockResolvedValueOnce([{ count: '1' }] as any);
+    vi.mocked(getPaymentsByJobId).mockResolvedValueOnce([]);
+
+    const res = await request(buildApp())
+      .post('/jobs/job-1/approve-completion')
+      .send({});
+
+    expect(res.status).toBe(200);
+    expect(recordAuditEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        payload: expect.objectContaining({
+          path: 'closed_paid',
+          completionOverrideUsed: false,
+          completionOverrideReason: null,
+          completionApprovedBy: null,
+          completionApprovedAt: null,
+        }),
+        client: transactionClient,
+      }),
+    );
+  });
+
+  it('persists an explicit override, operator, and approval timestamp', async () => {
+    vi.mocked(getJobById).mockResolvedValueOnce(JOB_COMPLETION_REPORTED as any);
+    vi.mocked(query).mockResolvedValueOnce([{ count: '0' }] as any);
+    vi.mocked(getPaymentsByJobId).mockResolvedValueOnce([]);
+
+    const res = await request(buildApp())
+      .post('/jobs/job-1/approve-completion')
+      .send({
+        completionOverrideUsed: true,
+        completionOverrideReason: '  Customer confirmed completion  ',
+        completionApprovedBy: '  operator@example.com  ',
+        completionApprovedAt: '2026-07-28T14:30:00-04:00',
+      });
+
+    expect(res.status).toBe(200);
+    expect(recordAuditEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        payload: expect.objectContaining({
+          completionOverrideUsed: true,
+          completionOverrideReason: 'Customer confirmed completion',
+          completionApprovedBy: 'operator@example.com',
+          completionApprovedAt: '2026-07-28T14:30:00-04:00',
+          adminOverrideReason: 'Customer confirmed completion',
+        }),
+      }),
+    );
+  });
+
+  it('rejects completionOverrideUsed=true without an effective reason', async () => {
+    vi.mocked(getJobById).mockResolvedValueOnce(JOB_COMPLETION_REPORTED as any);
+
+    const res = await request(buildApp())
+      .post('/jobs/job-1/approve-completion')
+      .send({ completionOverrideUsed: true, completionOverrideReason: '   ' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('VALIDATION_ERROR');
+    expect(query).not.toHaveBeenCalled();
+    expect(recordAuditEvent).not.toHaveBeenCalled();
+  });
+
+  it('does not treat completionOverrideReason alone as a new bypass path', async () => {
+    vi.mocked(getJobById).mockResolvedValueOnce(JOB_COMPLETION_REPORTED as any);
+    vi.mocked(query).mockResolvedValueOnce([{ count: '0' }] as any);
+
+    const res = await request(buildApp())
+      .post('/jobs/job-1/approve-completion')
+      .send({ completionOverrideReason: 'Reason without override flag' });
+
+    expect(res.status).toBe(422);
+    expect(res.body.error).toBe('COMPLETION_PHOTOS_REQUIRED');
+  });
+
+  it.each([
+    [{ completionOverrideUsed: 'yes' }, 'completionOverrideUsed'],
+    [{ completionOverrideReason: 123 }, 'completionOverrideReason'],
+    [{ completionApprovedBy: '   ' }, 'completionApprovedBy'],
+    [{ completionApprovedAt: 'not-a-timestamp' }, 'completionApprovedAt'],
+  ])('rejects invalid metadata %j', async (body, field) => {
+    vi.mocked(getJobById).mockResolvedValueOnce(JOB_COMPLETION_REPORTED as any);
+
+    const res = await request(buildApp())
+      .post('/jobs/job-1/approve-completion')
+      .send(body);
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('VALIDATION_ERROR');
+    expect(res.body.details.fieldErrors[field]).toBeDefined();
+  });
+
+  it('persists metadata on the awaiting_remainder_payment branch', async () => {
+    vi.mocked(getJobById).mockResolvedValueOnce({
+      ...JOB_COMPLETION_REPORTED,
+      remainder_amount_cents: 15000,
+    } as any);
+    vi.mocked(query).mockResolvedValueOnce([{ count: '1' }] as any);
+    vi.mocked(getPaymentsByJobId).mockResolvedValueOnce([] as any);
+
+    const res = await request(buildApp())
+      .post('/jobs/job-1/approve-completion')
+      .send({
+        completionApprovedBy: 'airtable-operator',
+        completionApprovedAt: '2026-07-28T18:30:00Z',
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe('awaiting_remainder_payment');
+    expect(updateJobStatus).toHaveBeenCalledWith(
+      'job-1',
+      'awaiting_remainder_payment',
+      transactionClient,
+    );
+    expect(recordAuditEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        payload: expect.objectContaining({
+          path: 'awaiting_remainder_payment',
+          completionApprovedBy: 'airtable-operator',
+          completionApprovedAt: '2026-07-28T18:30:00Z',
+        }),
+        client: transactionClient,
+      }),
+    );
+  });
+
+  it('keeps legacy adminOverrideReason behavior and audit compatibility', async () => {
+    vi.mocked(getJobById).mockResolvedValueOnce(JOB_COMPLETION_REPORTED as any);
+    vi.mocked(query).mockResolvedValueOnce([{ count: '0' }] as any);
+    vi.mocked(getPaymentsByJobId).mockResolvedValueOnce([]);
+
+    const res = await request(buildApp())
+      .post('/jobs/job-1/approve-completion')
+      .send({ adminOverrideReason: '  Legacy override  ' });
+
+    expect(res.status).toBe(200);
+    expect(recordAuditEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        payload: expect.objectContaining({
+          completionOverrideUsed: true,
+          completionOverrideReason: 'Legacy override',
+          adminOverrideReason: 'Legacy override',
+        }),
+      }),
+    );
+  });
+
+  it('does not enqueue Airtable sync when the atomic audit insert fails', async () => {
+    vi.mocked(getJobById).mockResolvedValueOnce(JOB_COMPLETION_REPORTED as any);
+    vi.mocked(query).mockResolvedValueOnce([{ count: '1' }] as any);
+    vi.mocked(getPaymentsByJobId).mockResolvedValueOnce([]);
+    vi.mocked(recordAuditEvent).mockRejectedValueOnce(new Error('audit insert failed'));
+
+    const res = await request(buildApp())
+      .post('/jobs/job-1/approve-completion')
+      .send({});
+
+    expect(res.status).toBe(500);
+    expect(withTransaction).toHaveBeenCalledOnce();
+    expect(transactionQuery).toHaveBeenCalledWith(
+      expect.stringContaining('UPDATE jobs SET status'),
+      ['job-1', 'closed_paid'],
+    );
+    expect(recordAuditEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ client: transactionClient }),
+    );
+    expect(enqueueAirtableSync).not.toHaveBeenCalled();
   });
 });

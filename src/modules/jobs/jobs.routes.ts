@@ -7,7 +7,7 @@ import {
   searchJobs,
   updateJobStatus,
 } from './job.repository';
-import { queryOne, query } from '../../db/pool';
+import { queryOne, query, withTransaction } from '../../db/pool';
 import { getPaymentsByJobId, createJobCheckoutSession } from '../payments/payment.service';
 import { getAuditEvents } from '../audit/audit.service';
 import { calculatePricing } from '../pricing/pricing.service';
@@ -449,6 +449,17 @@ jobsRouter.post(
 //
 // Valid source state: completion_reported only
 // (contractor must send DONE or FINISH before operator can approve)
+const completionApprovalRequestSchema = z
+  .object({
+    completionOverrideUsed: z.boolean().optional(),
+    completionOverrideReason: z.string().optional(),
+    completionApprovedBy: z.string().trim().min(1).optional(),
+    completionApprovedAt: z.string().trim().datetime({ offset: true }).optional(),
+    // Legacy callers continue to be handled with the pre-existing permissive behavior.
+    adminOverrideReason: z.unknown().optional(),
+  })
+  .passthrough();
+
 jobsRouter.post(
   '/:jobId/approve-completion',
   requireAdmin,
@@ -469,14 +480,55 @@ jobsRouter.post(
         return;
       }
 
-      // Completion photo guard: require at least one confirmed completion photo,
-      // or a non-empty adminOverrideReason to bypass.
-      const adminOverrideReason: string | undefined =
-        typeof req.body?.adminOverrideReason === 'string' &&
-        req.body.adminOverrideReason.trim().length > 0
-          ? req.body.adminOverrideReason.trim()
-          : undefined;
+      const parsedApprovalRequest = completionApprovalRequestSchema.safeParse(req.body ?? {});
+      if (!parsedApprovalRequest.success) {
+        res.status(400).json({
+          error: 'VALIDATION_ERROR',
+          message: 'Invalid completion approval metadata',
+          details: parsedApprovalRequest.error.flatten(),
+        });
+        return;
+      }
 
+      const completionOverrideReason =
+        parsedApprovalRequest.data.completionOverrideReason?.trim() || undefined;
+      const legacyAdminOverrideReason =
+        typeof parsedApprovalRequest.data.adminOverrideReason === 'string' &&
+        parsedApprovalRequest.data.adminOverrideReason.trim().length > 0
+          ? parsedApprovalRequest.data.adminOverrideReason.trim()
+          : undefined;
+      const effectiveOverrideReason = completionOverrideReason ?? legacyAdminOverrideReason;
+
+      if (
+        parsedApprovalRequest.data.completionOverrideUsed === true &&
+        !effectiveOverrideReason
+      ) {
+        res.status(400).json({
+          error: 'VALIDATION_ERROR',
+          message:
+            'completionOverrideUsed requires a non-empty completionOverrideReason or adminOverrideReason',
+        });
+        return;
+      }
+
+      // Preserve the existing legacy bypass. A new reason alone does not create
+      // another override path; the explicit flag is required for the new contract.
+      const completionOverrideUsed =
+        parsedApprovalRequest.data.completionOverrideUsed === true ||
+        legacyAdminOverrideReason !== undefined;
+      const adminOverrideReason = completionOverrideUsed
+        ? effectiveOverrideReason
+        : undefined;
+      const completionApprovalAuditMetadata = {
+        completionOverrideUsed,
+        completionOverrideReason: effectiveOverrideReason ?? null,
+        completionApprovedBy: parsedApprovalRequest.data.completionApprovedBy ?? null,
+        completionApprovedAt: parsedApprovalRequest.data.completionApprovedAt ?? null,
+        ...(adminOverrideReason ? { adminOverrideReason } : {}),
+      };
+
+      // Completion photo guard: require at least one confirmed completion photo,
+      // or the existing effective admin override to bypass.
       const photoCountResult = await query<{ count: string }>(
         `SELECT COUNT(*) AS count
            FROM uploaded_media
@@ -506,18 +558,21 @@ jobsRouter.post(
       if (remainderCents > 0) {
         // ── Path A: remainder owed ────────────────────────────────────────────
         assertTransition(job.status, 'awaiting_remainder_payment');
-        await updateJobStatus(job.id, 'awaiting_remainder_payment');
-        await recordAuditEvent({
-          aggregateType: 'job',
-          aggregateId: job.id,
-          eventType: 'job.completion_approved',
-          actorType: 'admin',
-          payload: {
-            remainderCents,
-            path: 'awaiting_remainder_payment',
-            ...(adminOverrideReason ? { adminOverrideReason } : {}),
-          },
-          correlationId: req.correlationId,
+        await withTransaction(async (client) => {
+          await updateJobStatus(job.id, 'awaiting_remainder_payment', client);
+          await recordAuditEvent({
+            aggregateType: 'job',
+            aggregateId: job.id,
+            eventType: 'job.completion_approved',
+            actorType: 'admin',
+            payload: {
+              remainderCents,
+              path: 'awaiting_remainder_payment',
+              ...completionApprovalAuditMetadata,
+            },
+            correlationId: req.correlationId,
+            client,
+          });
         });
         await enqueueAirtableSync({ jobId: job.id, correlationId: req.correlationId });
 
@@ -578,21 +633,24 @@ jobsRouter.post(
       } else {
         // ── Path B: no remainder owed (paid in full at deposit) ───────────────
         assertTransition(job.status, 'closed_paid');
-        await query(
-          'UPDATE jobs SET status = $2, completed_at = NOW(), updated_at = NOW() WHERE id = $1',
-          [job.id, 'closed_paid'],
-        );
-        await recordAuditEvent({
-          aggregateType: 'job',
-          aggregateId: job.id,
-          eventType: 'job.completion_approved',
-          actorType: 'admin',
-          payload: {
-            remainderCents: 0,
-            path: 'closed_paid',
-            ...(adminOverrideReason ? { adminOverrideReason } : {}),
-          },
-          correlationId: req.correlationId,
+        await withTransaction(async (client) => {
+          await client.query(
+            'UPDATE jobs SET status = $2, completed_at = NOW(), updated_at = NOW() WHERE id = $1',
+            [job.id, 'closed_paid'],
+          );
+          await recordAuditEvent({
+            aggregateType: 'job',
+            aggregateId: job.id,
+            eventType: 'job.completion_approved',
+            actorType: 'admin',
+            payload: {
+              remainderCents: 0,
+              path: 'closed_paid',
+              ...completionApprovalAuditMetadata,
+            },
+            correlationId: req.correlationId,
+            client,
+          });
         });
         await enqueueAirtableSync({ jobId: job.id, correlationId: req.correlationId });
 
