@@ -7,10 +7,11 @@ fitness equipment assembly. The system covers the full lifecycle from customer
 booking and payment through contractor dispatch, completion review, remainder
 billing, and operator monitoring.
 
-The platform is in launch-hardening: the core workflows are implemented, while
-deployment-specific automation and credential state require separate operational
-verification. Operational configuration outside this repository must be verified
-in Make and Render.
+The platform is in launch-hardening. Core workflows are implemented and the
+backend is deployed on Render, while external operational configuration in Make,
+Airtable, Jotform, and Stripe requires separate verification from repository code.
+This case study distinguishes implemented code, automated-test evidence,
+production smoke tests, deployed behavior, and remaining launch-validation work.
 
 ## Problem
 
@@ -24,6 +25,8 @@ system that could:
 - Prevent unvetted contractors from receiving dispatches.
 - Provide auditable admin actions, retryable integrations, and visible failure
   states before launch.
+- Prevent repeated operator actions from creating duplicate dispatch or assignment
+  records.
 
 ## Architecture
 
@@ -53,6 +56,21 @@ operator-facing result fields, and route failures into visible recovery paths.
 commands such as confirm, decline, on-the-way, and done. Email flows cover
 contractor onboarding, document corrections, onboarding acceptance, and final
 activation.
+
+## Customer Booking and Interface Hardening
+
+The booking interface received targeted launch-polish changes rather than a
+redesign. Address examples were restyled so placeholder text no longer appeared
+to be customer-entered data. Quote-selection cards were corrected so only the
+currently selected option remains highlighted instead of leaving prior choices
+visually active.
+
+Customer photo collection is capped at 12 files. Related copy, selectors, and form
+presentation were adjusted while preserving the existing booking, pricing,
+validation, upload, payment, API, and submission behavior.
+
+The backend also rejects passed same-day appointment windows so customers cannot
+submit a booking for a time window that has already elapsed.
 
 ## Contractor Operations Lifecycle
 
@@ -97,29 +115,29 @@ contractor-specific identifiers and should not be logged or broadly shared; it i
 not described as cryptographically private or single-use. Sending the email does
 not activate the contractor.
 
-### Missing-docs email flow
+### Resubmission and missing-documents recovery
 
-If submitted onboarding materials are incomplete or need correction, the operator
-can trigger a missing-docs email. The backend records the email event, supports
-idempotent repeat handling, and allows an intentional resend when needed. This
-keeps correction requests trackable without changing contractor activation state.
+Onboarding resubmissions preserve prior progress. The backend aggregates earlier
+submission state before computing the current checklist, so a previously received
+agreement, tax form, identification document, or insurance document is not reset
+to missing merely because a later correction submission omits it.
 
-### Onboarding accepted email flow
+After a successful Airtable update, the prior missing-documents email reservation
+is cleared so another standard follow-up can be sent if the revised submission is
+still incomplete. The current implementation accepts loss of the deleted email
+reservation as a launch tradeoff; a future history redesign can preserve multiple
+correction cycles without reusing the same reservation record.
+
+### Onboarding accepted and contractor activation
 
 Once onboarding materials are reviewed and accepted, the operator can send an
-onboarding accepted email. This confirms document acceptance only; it is still
-separate from final contractor activation and dispatch eligibility.
-
-### Contractor activation flow
+onboarding accepted email. This confirms document acceptance only; it is separate
+from final contractor activation and dispatch eligibility.
 
 Activation is handled by a dedicated admin-protected backend flow. It verifies
-readiness requirements before setting a contractor active. The guarded operational
-workflow is `POST /contractors/:id/activate`. The admin maintenance route
-`PATCH /contractors/:id` can directly update `isActive`, so normal operational
-activation should use the guarded activation endpoint. Dispatch independently
+readiness requirements before setting a contractor active. Normal operational
+activation uses the guarded activation endpoint, and dispatch independently
 rejects inactive contractors.
-
-### Activated-contractor email flow
 
 After activation, the operator can send an activated-contractor email. The backend
 guards this flow so the email can only be sent to an active contractor with an
@@ -132,27 +150,27 @@ is available for operator recovery.
 Contractor onboarding submissions arrive through Jotform. The backend stores the
 signed agreement, W-9, photo ID, insurance document, and generated submission
 summary in Google Drive. PostgreSQL tracks canonical onboarding and document
-status, while Airtable mirrors document status for operator review. Newly created
-contractors remain inactive by default and should advance through the guarded
-activation workflow before becoming dispatch-eligible.
+status, while Airtable mirrors document status for operator review.
 
-Jotform document downloads are restricted to the exact approved hosts
-`jotform.com`, `www.jotform.com`, and `files.jotform.com`. Downloads must use HTTPS
-on the default HTTPS port. Every redirect target is revalidated, and downloads are
-limited to three redirects, a 15-second total timeout, and 10 MiB. Safe download
-errors avoid exposing authenticated URLs or credential values.
+Jotform document downloads are restricted to the exact approved Jotform hosts.
+Downloads must use HTTPS on the default HTTPS port. Every redirect target is
+revalidated, and downloads are limited by redirect count, total timeout, and file
+size. Safe download errors avoid exposing authenticated URLs or credential values.
 
 Before Google Drive upload, the backend derives the filename extension from the
-validated MIME type: PDF files use `.pdf`, PNG files use `.png`, and JPEG files use
-`.jpg`. It also verifies the corresponding PDF, PNG, or JPEG magic bytes.
+validated MIME type and verifies matching PDF, PNG, or JPEG magic bytes.
 Unsupported MIME types and MIME/signature mismatches are rejected before any Drive
-upload.
+upload. Submission summaries were also expanded to retain relevant onboarding
+responses in the generated Drive record.
 
 The onboarding webhook token was rotated without documenting its value, and the
 Quo webhook uses request-signature verification. A production contractor
 onboarding smoke test succeeded, and a separate negative SSRF test also succeeded.
 No token values, personal data, file identifiers, folder identifiers, or signed
 URLs are recorded here.
+
+A dormant Jotform intake route that was not part of the active production flow was
+disabled in production to reduce unnecessary attack surface.
 
 ## Make, Airtable, and Backend Orchestration
 
@@ -165,46 +183,36 @@ The integration is designed around clear ownership:
 - The backend validates state transitions, writes audit events, sends messages,
   and queues Airtable syncs after successful transactions.
 
-Backend capabilities intended for Make orchestration include:
+Backend capabilities intended for Make orchestration include contractor lifecycle
+emails, guarded activation, availability prechecks, dispatch approval, dispatch,
+cancel assignment, cancel job, completion approval, payment recovery, and
+integration retry flows.
 
-- Contractor onboarding email trigger.
-- Missing-docs email trigger.
-- Onboarding accepted email trigger.
-- Contractor activation request.
-- Activated-contractor email trigger.
-- Contractor availability precheck.
-- Dispatch approval and dispatch routing.
-- Cancel assignment and re-dispatch routing.
-- Cancel job with double-confirmation.
-- Completion approval and remainder-payment handling.
-- Recovery or retry flows for failed integration work.
+Recent Make hardening corrected six operator scenarios:
 
-The intended Make-side variable name is `AC_ADMIN_JWT_SECRET`; the backend reads
-its protected-admin credential from `ADMIN_JWT_SECRET`. This repository does not
-verify deployed Make variable configuration, deployed Render credential state, or
-credential-rotation status. Operational configuration outside this repository must
-be verified in Make and Render. No credential values are stored in this
-documentation.
+- Completion Approval: corrected override-field mappings and module routing.
+- Manual Sync: added an explicit visible failure route.
+- Cancel Job: distinguishes the exact committed-pending checkout-expiry marker
+  from generic errors.
+- Dispatch Trigger: supports legitimate redispatch after inactive history, clears
+  stale fields, and suppresses only the exact duplicate-dispatch marker.
+- Owner Alert: includes the event type in the alert body while retaining customer
+  email; broader alert expansion remains parked.
+- Cancel Assignment: removed an incorrect backend-sync timestamp write.
 
-## Admin-Protected Backend Capabilities
+These Make changes were structurally reviewed and saved. They are not represented
+as fully production smoke-tested unless a separate run was documented.
 
-Admin-protected backend routes are described in portfolio-safe categories rather
-than as secret-bearing operational instructions:
+Airtable operator work also included current-assignment mirroring, isolated V2
+assignment sync behavior, availability result fields, completion override fields,
+scheduled start and end timestamps, cancellation and re-dispatch reset behavior,
+and operator-focused dashboard pages. Historical completed and cancelled views are
+treated as read-only, while payment closeout remains intentionally controlled.
 
-- Contractor management: create inactive contractors, update profile fields,
-  activate contractors, and trigger contractor lifecycle emails.
-- Job workflow control: approve dispatch, dispatch to a contractor, cancel an
-  assignment, cancel a job, and approve completion.
-- Payment recovery: create or recover payment links for eligible jobs.
-- Integration recovery: inspect failed integration work and retry safe recovery
-  actions.
-- Configuration and operator support: read or update operational settings needed
-  for pricing, service areas, or launch validation.
+The protected Make credential and Render credential are managed separately from
+this repository. No credential values are stored in this documentation.
 
-These routes are intended for Make scenarios and operator/admin use only. They
-are not customer-facing APIs.
-
-## Dispatch Flow
+## Dispatch Flow and Duplicate Protection
 
 Dispatch begins only after payment and operator approval gates are satisfied. The
 operator selects a contractor in Airtable, Make checks backend readiness and
@@ -217,16 +225,33 @@ records an en-route timestamp and can notify the customer. A done or finish
 response marks completion as reported and opens the contractor completion-photo
 path.
 
-The backend enforces important launch guards: inactive contractors cannot receive
-dispatches, schedule conflicts are checked before dispatch, and state transitions
-are validated in the backend rather than trusted from Airtable fields alone.
+Launch hardening added transactional duplicate-dispatch protection. The backend
+locks the job row before evaluating dispatch eligibility, checks for an active
+dispatch or active assignment while holding that lock, and uses a consistent lock
+order across the job, contractor, and child records. A committed winner causes a
+second attempt to return a marker-specific HTTP 409 response without creating a
+second dispatch or assignment. Generic conflicts remain distinguishable from a
+true duplicate.
 
-## Completion Approval and Remainder Payment
+Legitimate redispatch remains allowed when only cancelled or otherwise inactive
+historical assignments exist. SMS delivery remains outside the database
+transaction and occurs only after the dispatch state commits.
 
-Completion is not automatic when a contractor texts that the job is done. The
-operator reviews the job and completion signal. Completion photos are normally
-required before approval, but an authorized admin may proceed without them by
-supplying an `adminOverrideReason`.
+This patch passed the TypeScript build, 24 focused dispatch tests, and the full
+748-test backend suite. It was merged into `main` and deployed on Render. Real
+PostgreSQL concurrency execution remains a separate launch-validation gate.
+
+## Completion Photos, Approval, and Remainder Payment
+
+Contractor completion-photo uploads were hardened with upload-count and validation
+limits before operator approval. Completion is not automatic when a contractor
+texts that the job is done. The operator reviews the completion signal and photos.
+An authorized admin may proceed without the normal photo requirement only by
+supplying an override reason.
+
+Completion approval now persists audit metadata for whether an override was used,
+the reason, the approving operator, and the approval timestamp. Airtable mirrors
+those fields for operator review.
 
 After approval, the backend chooses the correct financial path:
 
@@ -236,75 +261,72 @@ After approval, the backend chooses the correct financial path:
 - When the remainder payment succeeds, the Stripe webhook closes the job as paid.
 
 Remainder-checkout failures are logged for recovery or manual retry. Because link
-creation is asynchronous, the job can temporarily be in
-`awaiting_remainder_payment` before a payment link exists. This keeps contractor
-completion, operator approval, customer billing, and final job closure as separate,
-auditable steps while making the temporary state/link divergence explicit.
+creation is asynchronous, the job can temporarily be awaiting remainder payment
+before a payment link exists. This keeps contractor completion, operator approval,
+customer billing, and final job closure as separate, auditable steps.
+
+## Security Hardening
+
+Recent backend hardening includes:
+
+- stricter webhook and admin-route protections;
+- Quo request-signature verification;
+- disabled dormant production intake routes;
+- passed same-day booking-window rejection;
+- exact-host, HTTPS, redirect, timeout, and size controls for contractor files;
+- MIME-derived filenames and magic-byte validation;
+- inactive-by-default contractor creation and guarded activation;
+- private object storage with scoped presigned upload and review flows;
+- transaction-bound duplicate-dispatch prevention;
+- safer distinction between committed duplicate outcomes and unrelated conflicts;
+- observable audit, email, integration-failure, and retry records.
 
 ## Alerting and Failure Monitoring
 
 The backend contains recoverable side-effect patterns for Airtable syncs, selected
 email and SMS sends, and payment-link creation. These paths log or record failures
-so canonical state changes are not silently discarded. Make-operated follow-up
-behavior remains part of the external configuration that must be verified in Make.
+so canonical state changes are not silently discarded.
 
 Failure-monitoring patterns include:
 
-- `integration_failures` records for failed asynchronous work.
-- Retry paths for recoverable Airtable or backend-side integration failures.
-- Deployed Make scenarios are expected to write result and error summaries back to
-  Airtable without exposing private credentials; that behavior must be verified in
-  Make.
-- A confirmed webhook alert path for final Airtable synchronization failure after
-  retries are exhausted. Broader webhook alert coverage is not claimed here.
-- Audit events for important admin actions such as contractor activation,
-  activation-email sends, dispatch decisions, cancellation, and completion
+- `integration_failures` records for failed asynchronous work;
+- retry paths for recoverable Airtable or backend-side failures;
+- operator-visible success and error summaries written through Make;
+- a confirmed webhook alert path for final Airtable synchronization failure after
+  retries are exhausted;
+- audit events for important admin actions such as contractor activation,
+  lifecycle-email sends, dispatch decisions, cancellation, and completion
   approval.
 
-## Launch Hardening and Smoke-Test Process
+Broader alert coverage, durable payment-webhook processing, and some downstream
+recovery paths remain launch-hardening concerns rather than completed claims.
 
-Launch hardening focuses on proving the system with real operational sequencing
-while keeping sensitive details out of documentation:
-
-1. Verify protected admin credentials separately in Make and Render, and rotate
-   them when required without exposing their values.
-2. Redeploy or restart services as needed so backend credential changes are live.
-3. Verify protected Make-to-backend calls succeed with the rotated credential and
-   stale credentials are no longer accepted.
-4. Smoke-test contractor screening: issue a fresh expiring link, verify valid
-   prefill, submit once, confirm Airtable completion and token clearing, then
-   confirm the same link is rejected on replay.
-5. Smoke-test contractor onboarding: create inactive contractor, send onboarding
-   email, handle missing-docs path, send onboarding accepted email, activate, and
-   send activated-contractor email.
-6. Smoke-test dispatch: operator approval, availability check, dispatch, SMS
-   confirm, on-the-way, done/finish, completion photo upload, and Airtable mirror.
-7. Smoke-test completion and billing: approve completion, verify either closed
-   paid or remainder-payment path, and confirm webhook-driven closure after
-   remainder payment.
-8. Review logs, audit events, email events, integration failure records, and
-   Airtable result fields after each smoke path.
-
-This smoke-test process is designed to validate behavior and observability without
-publishing webhook URLs, private record IDs, tokens, customer data, contractor
-data, phone numbers, or email addresses.
-
-## Validation Approach
+## Validation Status
 
 The project uses TypeScript checks, Vitest unit and integration tests, focused
-backend launch-hardening reviews, and production smoke tests. The current verified
-result is 616 automated backend tests passed, and the TypeScript build passed.
-The contractor screening flow has also passed a production smoke test covering
-fresh-link prefill, successful submission, synchronous success handling, token
-consumption, and replay rejection.
+backend reviews, production smoke tests, and external Make/Airtable inspection.
 
-## Future Scope-Review Roadmap
+Current evidence:
 
-A customer-selected job-size mismatch correction workflow is future work and is
-not implemented. The design should keep PostgreSQL as the system of record and
-preserve the original and corrected service, price, correction reason, approval,
-payment adjustment, and audit history. Airtable should mirror operational status,
-while Stripe remains authoritative for money actually collected or refunded.
+- 748 automated backend tests passed.
+- TypeScript build passed for the latest dispatch hardening patch.
+- Contractor screening passed a production smoke test covering valid prefill,
+  successful submission, token consumption, and replay rejection.
+- Contractor onboarding passed a production smoke test, including document
+  handling, and a separate negative SSRF test.
+- The transactional duplicate-dispatch patch was merged and deployed live.
+- Six Make operator scenarios were corrected and structurally reviewed; full
+  scenario execution is not claimed here without separate run evidence.
+
+Still pending or separately tracked:
+
+- real PostgreSQL concurrency execution for the duplicate-dispatch race;
+- narrow production smoke testing of duplicate-dispatch behavior after deployment;
+- durable recovery for selected payment and downstream synchronization failures;
+- broader owner-alert coverage;
+- final validation of all external Make, Airtable, Stripe, and Render settings;
+- completion-override persistence and audit behavior under production use;
+- contractor cancellation compensation and expanded-scope payment workflows.
 
 ## Engineering Takeaways
 
@@ -314,11 +336,12 @@ while Stripe remains authoritative for money actually collected or refunded.
   endpoints must own validation, idempotency, and side effects.
 - Contractor screening links should expire, become unusable after submission,
   and fail closed when validation is unavailable.
-- Synchronous webhook responses and queueing settings must be evaluated together;
-  a configuration intended to serialize requests can break the browser response
-  contract.
+- Synchronous webhook responses and queueing settings must be evaluated together.
 - Contractor activation needs a dedicated lifecycle, not a profile-edit shortcut.
-- Email, SMS, and Airtable sync should be observable and retryable side effects,
-  not hidden dependencies inside the primary transaction.
+- Email, SMS, payment creation, and Airtable sync should be observable and
+  recoverable side effects rather than hidden dependencies inside primary
+  transactions.
+- Concurrency protections should be enforced where canonical state is written,
+  not inferred from operator-interface state.
 - Launch readiness is a workflow discipline: rotate credentials, smoke-test the
   complete operator path, verify monitoring, and avoid documenting secrets.
