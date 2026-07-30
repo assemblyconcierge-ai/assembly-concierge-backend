@@ -16,7 +16,12 @@ import { recordAuditEvent } from '../audit/audit.service';
 import { enqueueAirtableSync } from '../airtable-sync/airtableSync.queue';
 import { requireAdmin } from '../../common/middleware/auth';
 import { logger } from '../../common/logger';
-import { dispatchJobToContractor, cancelContractorAssignment, cancelJob } from '../dispatch/dispatch.service';
+import {
+  DuplicateDispatchError,
+  dispatchJobToContractor,
+  cancelContractorAssignment,
+  cancelJob,
+} from '../dispatch/dispatch.service';
 import { checkContractorAvailability } from '../dispatch/dispatchConflict';
 import { sendSms } from '../sms/quo.adapter';
 import { sendCustomerCompletionEmail } from '../email/email.service';
@@ -363,6 +368,14 @@ jobsRouter.post(
     } catch (err: any) {
       if (err?.statusCode === 404) {
         res.status(404).json({ error: 'NOT_FOUND', message: err.message });
+        return;
+      }
+      if (err instanceof DuplicateDispatchError) {
+        res.status(409).json({
+          error: 'DUPLICATE_DISPATCH',
+          detail: 'DUPLICATE_DISPATCH',
+          message: 'DUPLICATE_DISPATCH: a dispatch has already been committed for this job.',
+        });
         return;
       }
       if (err?.statusCode === 409) {

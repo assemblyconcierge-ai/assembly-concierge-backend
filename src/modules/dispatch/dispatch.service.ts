@@ -6,8 +6,8 @@
  */
 
 import { v4 as uuidv4 } from 'uuid';
-import { queryOne, withTransaction, query } from '../../db/pool';
-import { getJobById, updateJobStatus } from '../jobs/job.repository';
+import { queryOne, withTransaction } from '../../db/pool';
+import { JobRow, updateJobStatus } from '../jobs/job.repository';
 import { assertTransition } from '../jobs/job.stateMachine';
 import { recordAuditEvent } from '../audit/audit.service';
 import { enqueueAirtableSync } from '../airtable-sync/airtableSync.queue';
@@ -36,6 +36,25 @@ export interface DispatchResult {
   jobId: string;
   smsSent: boolean;
 }
+
+export class DuplicateDispatchError extends Error {
+  readonly statusCode = 409;
+  readonly errorCode = 'DUPLICATE_DISPATCH';
+
+  constructor() {
+    super('DUPLICATE_DISPATCH: a dispatch has already been committed for this job.');
+    this.name = 'DuplicateDispatchError';
+  }
+}
+
+interface DispatchWinnerRow {
+  has_active_dispatch: boolean;
+  has_active_assignment: boolean;
+}
+
+type LockedDispatchJob = Omit<JobRow, 'appointment_date'> & {
+  appointment_date: string | null;
+};
 
 /** Format cents as a dollar string, no trailing .00 for whole numbers */
 function formatDollars(cents: number): string {
@@ -67,86 +86,105 @@ export async function dispatchJobToContractor(
 ): Promise<DispatchResult> {
   const log = logger.child({ correlationId, jobId, contractorId, service: 'dispatch' });
 
-  // ── Validate job ──────────────────────────────────────────────────────────
-  const job = await getJobById(jobId);
-  if (!job) {
-    throw Object.assign(new Error('Job not found'), { statusCode: 404 });
-  }
-  if (job.status !== 'ready_for_dispatch') {
-    throw Object.assign(
-      new Error(`Job must be at ready_for_dispatch to dispatch (current: ${job.status})`),
-      { statusCode: 409 },
-    );
-  }
-
-  // ── Validate contractor ───────────────────────────────────────────────────
-  const contractor = await queryOne<ContractorRow>(
-    'SELECT id, full_name, phone_e164, is_active FROM contractors WHERE id = $1',
-    [contractorId],
-  );
-  if (!contractor) {
-    throw Object.assign(new Error('Contractor not found'), { statusCode: 404 });
-  }
-  if (!contractor.is_active) {
-    throw Object.assign(new Error('Contractor is not active'), { statusCode: 409 });
-  }
-
-  // ── Fetch service type display name ───────────────────────────────────────
-  const serviceType = await queryOne<ServiceTypeRow>(
-    'SELECT display_name, code FROM service_types WHERE id = $1',
-    [job.service_type_id],
-  );
-  const serviceTypeName = serviceType?.display_name ?? serviceType?.code ?? 'Assembly';
-  const city = job.city_detected ?? 'Unknown City';
-
-  const dispatchId = uuidv4();
-  const assignmentId = uuidv4();
-  const now = new Date().toISOString();
-  // Generate contractor packet token — inert until assignment status = accepted.
-  // MUST NOT be logged or included in audit payloads.
-  const contractorPacketToken = generateContractorPacketToken();
-
   // ── DB transaction ────────────────────────────────────────────────────────
-  await withTransaction(async (client) => {
-    // 0a. Lock contractor row to prevent concurrent dispatches
-    await client.query(
-      'SELECT id FROM contractors WHERE id = $1 FOR UPDATE',
-      [contractor.id],
+  const committed = await withTransaction(async (client) => {
+    // Lock order for dispatch mutations: job -> contractor -> child rows.
+    const jobRes = await client.query<LockedDispatchJob>(
+      `SELECT j.*, j.appointment_date::text AS appointment_date
+         FROM jobs j
+        WHERE j.id = $1
+        FOR UPDATE`,
+      [jobId],
     );
+    if (jobRes.rowCount === 0) {
+      throw Object.assign(new Error('Job not found'), { statusCode: 404 });
+    }
+    const job = jobRes.rows[0];
 
-    // 0b. Resolve current job schedule (re-read inside transaction for consistency)
-    const scheduleRow = await client.query<{
-      id: string;
-      scheduled_start_at: Date | null;
-      scheduled_end_at: Date | null;
-      timezone: string | null;
-      appointment_date: string | null;
-      appointment_window: string | null;
-    }>(
-      `SELECT id, scheduled_start_at, scheduled_end_at, timezone,
-              appointment_date::text, appointment_window
-         FROM jobs WHERE id = $1`,
+    const winnerRes = await client.query<DispatchWinnerRow>(
+      `SELECT
+         EXISTS (
+           SELECT 1
+             FROM dispatches d
+            WHERE d.job_id = $1
+               AND d.status IN ('sent', 'accepted', 'assigned')
+               AND (
+                 NOT EXISTS (
+                   SELECT 1
+                     FROM contractor_assignments linked_ca
+                    WHERE linked_ca.dispatch_id = d.id
+                 )
+                 OR EXISTS (
+                   SELECT 1
+                     FROM contractor_assignments active_linked_ca
+                    WHERE active_linked_ca.dispatch_id = d.id
+                      AND active_linked_ca.status IN ('pending', 'accepted')
+                 )
+               )
+         ) AS has_active_dispatch,
+         EXISTS (
+           SELECT 1
+             FROM contractor_assignments active_ca
+            WHERE active_ca.job_id = $1
+              AND active_ca.status IN ('pending', 'accepted')
+         ) AS has_active_assignment`,
       [job.id],
     );
-    if (scheduleRow.rowCount === 0) {
+    const winner = winnerRes.rows[0];
+
+    // Preserve the existing generic stale-status contract for cancelled jobs.
+    if (job.status === 'cancelled') {
       throw Object.assign(
-        new Error('Job not found while resolving schedule.'),
-        { statusCode: 404 },
+        new Error(`Job must be at ready_for_dispatch to dispatch (current: ${job.status})`),
+        { statusCode: 409 },
       );
     }
-    const sr = scheduleRow.rows[0];
+
+    if (winner?.has_active_dispatch || winner?.has_active_assignment) {
+      throw new DuplicateDispatchError();
+    }
+
+    if (job.status !== 'ready_for_dispatch') {
+      throw Object.assign(
+        new Error(`Job must be at ready_for_dispatch to dispatch (current: ${job.status})`),
+        { statusCode: 409 },
+      );
+    }
+
+    const contractorRes = await client.query<ContractorRow>(
+      `SELECT id, full_name, phone_e164, is_active
+         FROM contractors
+        WHERE id = $1
+        FOR UPDATE`,
+      [contractorId],
+    );
+    if (contractorRes.rowCount === 0) {
+      throw Object.assign(new Error('Contractor not found'), { statusCode: 404 });
+    }
+    const contractor = contractorRes.rows[0];
+    if (!contractor.is_active) {
+      throw Object.assign(new Error('Contractor is not active'), { statusCode: 409 });
+    }
+
+    const serviceTypeRes = await client.query<ServiceTypeRow>(
+      'SELECT display_name, code FROM service_types WHERE id = $1',
+      [job.service_type_id],
+    );
+    const serviceType = serviceTypeRes.rows[0];
+    const serviceTypeName = serviceType?.display_name ?? serviceType?.code ?? 'Assembly';
+    const city = job.city_detected ?? 'Unknown City';
 
     let currentScheduledStart: Date;
     let currentScheduledEnd: Date;
-    const tz = sr.timezone ?? 'America/New_York';
+    const tz = job.timezone ?? 'America/New_York';
 
-    if (sr.scheduled_start_at && sr.scheduled_end_at) {
+    if (job.scheduled_start_at && job.scheduled_end_at) {
       // Already computed — use stored values
-      currentScheduledStart = sr.scheduled_start_at;
-      currentScheduledEnd   = sr.scheduled_end_at;
+      currentScheduledStart = job.scheduled_start_at;
+      currentScheduledEnd   = job.scheduled_end_at;
     } else {
       // Derive from appointment fields
-      if (!sr.appointment_date || !sr.appointment_window) {
+      if (!job.appointment_date || !job.appointment_window) {
         throw Object.assign(
           new Error('Dispatch cannot proceed without a valid appointment schedule.'),
           { statusCode: 409, errorCode: 'SCHEDULE_PARSE_FAILED' },
@@ -154,7 +192,7 @@ export async function dispatchJobToContractor(
       }
       let parsed: { scheduledStartAt: Date; scheduledEndAt: Date };
       try {
-        parsed = parseSchedule(sr.appointment_date, sr.appointment_window, tz);
+        parsed = parseSchedule(job.appointment_date, job.appointment_window, tz);
       } catch {
         throw Object.assign(
           new Error('Dispatch cannot proceed without a valid appointment schedule.'),
@@ -184,8 +222,8 @@ export async function dispatchJobToContractor(
         scheduled_start_at: currentScheduledStart,
         scheduled_end_at: currentScheduledEnd,
         timezone: tz,
-        appointment_date: sr.appointment_date,
-        appointment_window: sr.appointment_window,
+        appointment_date: job.appointment_date,
+        appointment_window: job.appointment_window,
       },
       client,
     );
@@ -201,14 +239,17 @@ export async function dispatchJobToContractor(
         },
       );
     }
-    // 1. Transition job: ready_for_dispatch → dispatch_in_progress
-    assertTransition(job.status, 'dispatch_in_progress');
-    await client.query(
-      'UPDATE jobs SET status = $2, updated_at = NOW() WHERE id = $1',
-      [job.id, 'dispatch_in_progress'],
-    );
 
-    // 2. Create dispatches row
+    const dispatchId = uuidv4();
+    const assignmentId = uuidv4();
+    const now = new Date().toISOString();
+    // Generate contractor packet token — inert until assignment status = accepted.
+    // MUST NOT be logged or included in audit payloads.
+    const contractorPacketToken = generateContractorPacketToken();
+
+    assertTransition(job.status, 'dispatch_in_progress');
+
+    // 1. Create dispatches row
     await client.query(
       `INSERT INTO dispatches
          (id, job_id, status, sent_at, assigned_contractor_id, created_at, updated_at)
@@ -216,12 +257,18 @@ export async function dispatchJobToContractor(
       [dispatchId, job.id, now, contractor.id],
     );
 
-    // 3. Create contractor_assignments row (token is inert until status = accepted)
+    // 2. Create contractor_assignments row (token is inert until status = accepted)
     await client.query(
       `INSERT INTO contractor_assignments
          (id, job_id, contractor_id, dispatch_id, payout_amount_cents, status, assigned_at, contractor_packet_token)
        VALUES ($1, $2, $3, $4, $5, 'pending', $6, $7)`,
       [assignmentId, job.id, contractor.id, dispatchId, job.contractor_total_payout_cents, now, contractorPacketToken],
+    );
+
+    // 3. Transition job: ready_for_dispatch → dispatch_in_progress
+    await client.query(
+      'UPDATE jobs SET status = $2, updated_at = NOW() WHERE id = $1',
+      [job.id, 'dispatch_in_progress'],
     );
 
     // 4. Audit event
@@ -243,7 +290,25 @@ export async function dispatchJobToContractor(
       correlationId,
       client,
     });
+
+    return {
+      job,
+      contractor,
+      serviceTypeName,
+      city,
+      dispatchId,
+      assignmentId,
+    };
   });
+
+  const {
+    job,
+    contractor,
+    serviceTypeName,
+    city,
+    dispatchId,
+    assignmentId,
+  } = committed;
 
   log.info(
     { dispatchId, assignmentId, contractorPhone: contractor.phone_e164 },
