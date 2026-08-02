@@ -25,6 +25,7 @@ const REQUIRED_TABLES = [
   'payments',
   'payment_events',
   'audit_events',
+  'contractor_missing_document_submissions',
 ];
 
 const REQUIRED_COLUMNS: Array<{ table: string; column: string }> = [
@@ -37,12 +38,16 @@ const REQUIRED_COLUMNS: Array<{ table: string; column: string }> = [
   { table: 'jobs',               column: 'total_amount_cents' },
   { table: 'jobs',               column: 'status' },
   { table: 'jobs',               column: 'city_detected' },
+  { table: 'contractor_missing_document_submissions', column: 'document_results' },
+  { table: 'contractor_missing_document_submissions', column: 'airtable_synced_at' },
+  { table: 'contractor_missing_document_submissions', column: 'notification_status' },
 ];
 
 const REQUIRED_INDEXES = [
   'intake_submissions_idempotency_idx',
   'customers_email_idx',
   'jobs_job_key_idx',
+  'contractor_missing_docs_contractor_idx',
 ];
 
 // ---------------------------------------------------------------------------

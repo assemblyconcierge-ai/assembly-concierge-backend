@@ -12,7 +12,7 @@ import {
   sendContractorMissingDocsEmail,
   sendContractorOnboardingAcceptedEmail,
   sendContractorActivatedEmail,
-  buildJotformPrefillUrl,
+  buildMissingDocumentsPrefillUrl,
 } from '../email/email.service';
 import { getContractorAirtableField } from '../airtable-sync/airtable.contractor.adapter';
 import { config } from '../../common/config';
@@ -522,7 +522,7 @@ adminRouter.post(
 
       // ── 4. Build personalised Jotform prefill URL ─────────────────────────
       // NOTE: Do not log this URL — it contains contractor identifiers.
-      const onboardingFormUrl = buildJotformPrefillUrl({
+      const onboardingFormUrl = buildMissingDocumentsPrefillUrl({
         airtableRecordId:    contractor.airtable_record_id,
         backendContractorId: contractor.id,
         legalFullName:       contractor.full_name,

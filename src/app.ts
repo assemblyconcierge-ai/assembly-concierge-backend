@@ -15,6 +15,7 @@ import { contractorPacketRouter } from './modules/public-booking/contractorPacke
 import { contractorCompletionRouter } from './modules/public-booking/contractorCompletion.routes';
 import { adminRouter } from './modules/admin/admin.routes';
 import { onboardingRouter } from './modules/onboarding/onboarding.routes';
+import { missingDocumentsRouter } from './modules/onboarding/missingDocuments.routes';
 import { schemaResetRouter } from './modules/admin/schemaReset.routes';
 import { testJobsRouter } from './modules/admin/testJobs.routes';
 import { config } from './common/config';
@@ -189,6 +190,7 @@ export function createApp(): express.Application {
   // ─── Contractor onboarding webhook (Jotform direct) ──────────────────
   // Secured by query token; does not require schema guard (has its own DB access).
   app.use('/', onboardingRouter);
+  app.use('/', missingDocumentsRouter);
 
   // ─── Intake webhooks (schema guard applied) ───────────────────────────────
   app.use('/', schemaGuard, intakeRouter);

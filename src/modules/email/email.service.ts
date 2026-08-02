@@ -46,6 +46,8 @@ export type EmailEventType = (typeof EMAIL_EVENT_TYPES)[keyof typeof EMAIL_EVENT
 // ── Jotform URL builder ───────────────────────────────────────────────────────
 
 export interface JotformPrefillParams {
+  /** Optional form override; defaults to the onboarding form. */
+  formId?: string | null;
   /** Airtable record ID — contractorRecord */
   airtableRecordId?: string | null;
   /** Backend contractor UUID — backendContractor */
@@ -93,7 +95,7 @@ export function normalizePhoneForJotform(phone: string): string {
  * identifiers (Airtable record ID, backend UUID) in the query string.
  */
 export function buildJotformPrefillUrl(params: JotformPrefillParams): string {
-  const formId = config.JOTFORM_ONBOARDING_FORM_ID;
+  const formId = params.formId || config.JOTFORM_ONBOARDING_FORM_ID;
   const base = `https://form.jotform.com/${formId}`;
 
   const parts: string[] = [];
@@ -124,6 +126,17 @@ export function buildJotformPrefillUrl(params: JotformPrefillParams): string {
   add('q8_email6', params.email);
 
   return parts.length > 0 ? `${base}?${parts.join('&')}` : base;
+}
+
+/** Dedicated missing-documents form when configured, onboarding form otherwise. */
+export function buildMissingDocumentsPrefillUrl(
+  params: Omit<JotformPrefillParams, 'formId'>,
+): string {
+  const missingDocumentsFormId = config.JOTFORM_MISSING_DOCS_FORM_ID?.trim();
+  return buildJotformPrefillUrl({
+    ...params,
+    formId: missingDocumentsFormId || config.JOTFORM_ONBOARDING_FORM_ID,
+  });
 }
 
 // ── Email templates ───────────────────────────────────────────────────────────
@@ -385,6 +398,71 @@ export function renderContractorMissingDocsEmail(params: {
   </table>
 </body>
 </html>`;
+}
+
+export interface MissingDocumentsOperatorNotificationParams {
+  contractorName: string;
+  contractorId: string;
+  airtableRecordId: string;
+  submissionId: string;
+  submittedAt: string;
+  receivedDocuments: string[];
+  failedDocuments: string[];
+  contractorMessage?: string | null;
+  idempotencyKey: string;
+}
+
+export function renderMissingDocumentsOperatorNotification(
+  params: MissingDocumentsOperatorNotificationParams,
+): string {
+  const esc = (value: string) => value
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  const list = (values: string[], empty: string) =>
+    values.length > 0 ? `<ul>${values.map((value) => `<li>${esc(value)}</li>`).join('')}</ul>` : `<p>${empty}</p>`;
+
+  return `<!DOCTYPE html><html lang="en"><body>
+    <h2>Missing documents received - manual review required</h2>
+    <p><strong>Contractor:</strong> ${esc(params.contractorName)}</p>
+    <p><strong>Backend contractor ID:</strong> ${esc(params.contractorId)}</p>
+    <p><strong>Airtable record ID:</strong> ${esc(params.airtableRecordId)}</p>
+    <p><strong>Jotform submission ID:</strong> ${esc(params.submissionId)}</p>
+    <p><strong>Submitted at:</strong> ${esc(params.submittedAt)}</p>
+    <h3>Successfully received</h3>${list(params.receivedDocuments, 'No document uploads succeeded.')}
+    <h3>Failed</h3>${list(params.failedDocuments, 'No document upload failures.')}
+    ${params.contractorMessage ? `<h3>Contractor note</h3><p>${esc(params.contractorMessage).replace(/\n/g, '<br />')}</p>` : ''}
+    <p><strong>These documents have not been accepted.</strong> Manual review is still required.</p>
+  </body></html>`;
+}
+
+/**
+ * Dispatches the operator notification. Durable reservation/completion state
+ * belongs to contractor_missing_document_submissions, not email_events.
+ */
+export async function sendMissingDocumentsOperatorNotification(
+  params: MissingDocumentsOperatorNotificationParams,
+): Promise<{ mode: 'sent' | 'logged'; providerMessageId?: string }> {
+  const recipient = config.MISSING_DOCS_NOTIFICATION_EMAIL;
+  if (!recipient) throw new Error('MISSING_DOCS_NOTIFICATION_EMAIL is not configured');
+
+  const html = renderMissingDocumentsOperatorNotification(params);
+  if (config.EMAIL_SEND_MODE === 'log_only') {
+    logger.info(
+      { mode: 'log_only', submissionId: params.submissionId },
+      '[email] missing-documents operator notification generated, not sent',
+    );
+    return { mode: 'logged' };
+  }
+  if (!config.RESEND_API_KEY) throw new Error('RESEND_API_KEY is not configured');
+
+  const result = await sendViaResend(config.RESEND_API_KEY, {
+    from: config.CUSTOMER_EMAIL_FROM,
+    replyTo: config.CUSTOMER_EMAIL_REPLY_TO,
+    to: recipient,
+    subject: `Missing documents received - ${params.contractorName}`,
+    html,
+    idempotencyKey: params.idempotencyKey,
+  });
+  return { mode: 'sent', providerMessageId: result.id };
 }
 
 /**

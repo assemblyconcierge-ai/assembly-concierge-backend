@@ -30,6 +30,7 @@ const {
   mockSendContractorOnboardingAcceptedEmail,
   mockSendContractorActivatedEmail,
   mockBuildJotformPrefillUrl,
+  mockBuildMissingDocumentsPrefillUrl,
   mockGetContractorAirtableField,
   mockRequireAdmin,
   mockRecordAuditEvent,
@@ -45,6 +46,7 @@ const {
   mockSendContractorOnboardingAcceptedEmail: vi.fn().mockResolvedValue({ eventId: 'evt-4', mode: 'log_only', alreadySent: false }),
   mockSendContractorActivatedEmail:          vi.fn().mockResolvedValue({ eventId: 'evt-5', mode: 'log_only', alreadySent: false }),
   mockBuildJotformPrefillUrl:                vi.fn().mockReturnValue('https://form.jotform.com/261801729818060?contractorRecord=recABC123'),
+  mockBuildMissingDocumentsPrefillUrl:        vi.fn().mockReturnValue('https://form.jotform.com/261801729818060?contractorRecord=recABC123'),
   mockGetContractorAirtableField:            vi.fn().mockResolvedValue(null),
   mockRequireAdmin:                          vi.fn((_req: any, _res: any, next: any) => next()),
   mockRecordAuditEvent:             vi.fn().mockResolvedValue(undefined),
@@ -67,6 +69,7 @@ vi.mock('../../src/modules/email/email.service', () => ({
   sendContractorOnboardingAcceptedEmail:    mockSendContractorOnboardingAcceptedEmail,
   sendContractorActivatedEmail:             mockSendContractorActivatedEmail,
   buildJotformPrefillUrl:                   mockBuildJotformPrefillUrl,
+  buildMissingDocumentsPrefillUrl:           mockBuildMissingDocumentsPrefillUrl,
 }));
 vi.mock('../../src/modules/airtable-sync/airtable.contractor.adapter', () => ({
   getContractorAirtableField: mockGetContractorAirtableField,
@@ -437,7 +440,7 @@ describe('POST /admin/contractors/:id/send-missing-docs-email', () => {
     expect(res.body.eventId).toBe('evt-3');
     expect(res.body.status).toMatch(/^(sent|logged)$/);
     // buildJotformPrefillUrl should have been called with contractor data
-    expect(mockBuildJotformPrefillUrl).toHaveBeenCalledWith(
+    expect(mockBuildMissingDocumentsPrefillUrl).toHaveBeenCalledWith(
       expect.objectContaining({
         airtableRecordId:    'recABC123',
         backendContractorId: 'ctr-uuid-1',

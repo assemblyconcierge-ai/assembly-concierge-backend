@@ -34,6 +34,7 @@ vi.mock('../../src/common/config', () => ({
   config: {
     APP_BASE_URL: 'https://app.assemblyconcierge.com',
     JOTFORM_ONBOARDING_FORM_ID: '261801729818060',
+    JOTFORM_MISSING_DOCS_FORM_ID: undefined,
     EMAIL_SEND_MODE: 'log_only',
     RESEND_API_KEY: '',
     CUSTOMER_EMAIL_FROM: 'Assembly Concierge <noreply@assemblyconcierge.com>',
@@ -47,17 +48,20 @@ vi.mock('../../src/common/logger', () => ({
 
 import {
   buildJotformPrefillUrl,
+  buildMissingDocumentsPrefillUrl,
   normalizePhoneForJotform,
   renderCustomerCompletionEmail,
   renderContractorOnboardingEmail,
   renderContractorMissingDocsEmail,
   renderContractorOnboardingAcceptedEmail,
   renderContractorActivatedEmail,
+  renderMissingDocumentsOperatorNotification,
   sendCustomerCompletionEmail,
   sendContractorOnboardingEmail,
   sendContractorMissingDocsEmail,
   sendContractorOnboardingAcceptedEmail,
   sendContractorActivatedEmail,
+  sendMissingDocumentsOperatorNotification,
 } from '../../src/modules/email/email.service';
 
 import {
@@ -227,6 +231,69 @@ describe('buildJotformPrefillUrl', () => {
     // & must be percent-encoded so it does not break the query string
     expect(url).toContain('%26');
     expect(url).not.toContain('& Sons');
+  });
+
+  it('uses the dedicated missing-documents form when configured', () => {
+    Object.assign(config, { JOTFORM_MISSING_DOCS_FORM_ID: 'missing-docs-999' });
+    const url = buildMissingDocumentsPrefillUrl({
+      backendContractorId: 'ctr-001',
+      airtableRecordId: 'rec-001',
+      legalFullName: 'Jane Contractor',
+      email: 'jane@example.com',
+      phoneE164: '+14045551234',
+    });
+    expect(url).toContain('https://form.jotform.com/missing-docs-999?');
+    expect(url).toContain('contractorRecord=rec-001');
+    expect(url).toContain('backendContractor=ctr-001');
+  });
+
+  it('falls back to the onboarding form when a missing-documents form is not configured', () => {
+    Object.assign(config, { JOTFORM_MISSING_DOCS_FORM_ID: undefined });
+    const url = buildMissingDocumentsPrefillUrl({ backendContractorId: 'ctr-001' });
+    expect(url).toContain('https://form.jotform.com/261801729818060?');
+  });
+});
+
+describe('missing-documents operator notification', () => {
+  const params = {
+    contractorName: 'Jane <Contractor>',
+    contractorId: 'ctr-001',
+    airtableRecordId: 'rec-001',
+    submissionId: 'sub-001',
+    submittedAt: '2026-08-01T12:00:00.000Z',
+    receivedDocuments: ['W-9'],
+    failedDocuments: ['Photo ID: invalid file signature'],
+    contractorMessage: 'Please review',
+    idempotencyKey: 'missing-docs-row-001',
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    Object.assign(config, {
+      EMAIL_SEND_MODE: 'log_only',
+      RESEND_API_KEY: '',
+      MISSING_DOCS_NOTIFICATION_EMAIL: 'operator@example.com',
+    });
+  });
+
+  it('states that manual review is required and documents are not accepted', () => {
+    const html = renderMissingDocumentsOperatorNotification(params);
+    expect(html).toContain('manual review required');
+    expect(html).toContain('These documents have not been accepted');
+    expect(html).toContain('W-9');
+    expect(html).toContain('Photo ID: invalid file signature');
+    expect(html).not.toContain('Jane <Contractor>');
+  });
+
+  it('uses the configured recipient and stable submission idempotency key in send mode', async () => {
+    Object.assign(config, { EMAIL_SEND_MODE: 'send', RESEND_API_KEY: 'test-key' });
+    vi.mocked(sendViaResend).mockResolvedValueOnce({ id: 'resend-operator-1' });
+    const result = await sendMissingDocumentsOperatorNotification(params);
+    expect(result).toEqual({ mode: 'sent', providerMessageId: 'resend-operator-1' });
+    expect(sendViaResend).toHaveBeenCalledWith('test-key', expect.objectContaining({
+      to: 'operator@example.com',
+      idempotencyKey: 'missing-docs-row-001',
+    }));
   });
 });
 
