@@ -23,9 +23,30 @@ import { logger } from '../../common/logger';
 // ── Guardrail: fields that must never be written by the onboarding service ──
 
 const FORBIDDEN_FIELD_IDS = new Set([
+  'fldTHFlf5RuluUjLK', // Onboarding Documents Accepted
+  'fldj3x3BnSQt9IpKv', // Contractor Active
+  'fldPHh2SUD6F6XLEA', // Activation Requested
+  'fldgmMKvhbrzRQ2MK', // Contractor Status
+  'fldi1iftUdPGspZzH', // Dispatch Eligible (formula)
   // Activation / dispatch fields — never touch
   'fldXXXXXXXXXXXXXX', // placeholder — add real IDs if known
 ]);
+
+/** Exact write surface allowed for the dedicated missing-documents flow. */
+export const MISSING_DOCUMENTS_ALLOWED_FIELD_IDS = new Set([
+  'fld0Is7pUxLh2TZj3',
+  'fldQHTr0eSxmhGGOW',
+  'fldXR2KV5uq7DYbZ9',
+  'fldQH4HCChb5i8HM9',
+  'fld06XS5VPue6uSj8',
+  'fldqZOgILUTVbqzii',
+  'fldO46UgxkOuEpvay',
+  'fldauRRFrJoe7FrKQ',
+  'fldhp1o95RqRv3Oy0', // Missing Docs Review Status
+]);
+
+const ONBOARDING_DOCUMENT_STATUS_FIELD_ID = 'fldauRRFrJoe7FrKQ';
+const MISSING_DOCS_REVIEW_STATUS_FIELD_ID = 'fldhp1o95RqRv3Oy0';
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -128,4 +149,67 @@ export async function updateContractorAirtableFields(
     { recordId, fieldCount: Object.keys(safeFields).length },
     '[AirtableContractor] Record updated',
   );
+}
+
+/**
+ * Read only the two status fields needed to make the missing-documents PATCH
+ * non-regressive. A filtered list request is used because it supports fields[]
+ * projection while still selecting the exact Airtable record ID.
+ */
+export async function getContractorMissingDocumentsStatuses(
+  recordId: string,
+): Promise<{
+  onboardingDocumentStatus: string | null;
+  missingDocsReviewStatus: string | null;
+}> {
+  if (!config.AIRTABLE_API_KEY || !config.AIRTABLE_BASE_ID) {
+    throw new Error('Airtable is not configured for missing-documents processing');
+  }
+
+  const escapedRecordId = recordId.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  const url = new URL(getBaseUrl());
+  url.searchParams.set('filterByFormula', `RECORD_ID()="${escapedRecordId}"`);
+  url.searchParams.append('fields[]', ONBOARDING_DOCUMENT_STATUS_FIELD_ID);
+  url.searchParams.append('fields[]', MISSING_DOCS_REVIEW_STATUS_FIELD_ID);
+  url.searchParams.set('maxRecords', '1');
+  url.searchParams.set('returnFieldsByFieldId', 'true');
+
+  const response = await fetch(url, { method: 'GET', headers: getHeaders() });
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(`Airtable GET contractor statuses error ${response.status}: ${body}`);
+  }
+
+  const data = (await response.json()) as {
+    records?: Array<{ id: string; fields?: Record<string, unknown> }>;
+  };
+  const record = data.records?.find((candidate) => candidate.id === recordId);
+  if (!record) throw new Error(`Airtable contractor record not found: ${recordId}`);
+
+  const fields = record.fields ?? {};
+  const readString = (fieldId: string): string | null => {
+    const value = fields[fieldId];
+    return value === undefined || value === null ? null : String(value);
+  };
+  return {
+    onboardingDocumentStatus: readString(ONBOARDING_DOCUMENT_STATUS_FIELD_ID),
+    missingDocsReviewStatus: readString(MISSING_DOCS_REVIEW_STATUS_FIELD_ID),
+  };
+}
+
+/** Fail-closed write adapter for the dedicated missing-documents flow. */
+export async function updateContractorMissingDocumentsFields(
+  recordId: string,
+  fields: Record<string, unknown>,
+): Promise<void> {
+  const disallowed = Object.keys(fields).filter(
+    (fieldId) => !MISSING_DOCUMENTS_ALLOWED_FIELD_IDS.has(fieldId),
+  );
+  if (disallowed.length > 0) {
+    throw new Error(`Missing-documents Airtable update contains disallowed fields: ${disallowed.join(', ')}`);
+  }
+  if (!config.AIRTABLE_API_KEY || !config.AIRTABLE_BASE_ID) {
+    throw new Error('Airtable is not configured for missing-documents processing');
+  }
+  await updateContractorAirtableFields(recordId, fields);
 }

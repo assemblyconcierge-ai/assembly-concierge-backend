@@ -33,9 +33,11 @@ const envSchema = z.object({
   // 'log_only' (default): generate payload, log event, do NOT call Resend.
   // 'send': call Resend, record provider_message_id and sent_at.
   EMAIL_SEND_MODE: z.enum(['log_only', 'send']).default('log_only'),
+  MISSING_DOCS_NOTIFICATION_EMAIL: z.string().email().optional(),
 
   // Jotform
   JOTFORM_ONBOARDING_FORM_ID: z.string().default('261801729818060'),
+  JOTFORM_MISSING_DOCS_FORM_ID: z.string().optional(),
 
   // SMS
   SMS_PROVIDER_API_KEY: z.string().optional(),
