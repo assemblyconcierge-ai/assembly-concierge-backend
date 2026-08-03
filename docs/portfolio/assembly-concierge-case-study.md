@@ -119,6 +119,35 @@ guarded admin-protected endpoint, and dispatch independently rejects inactive
 contractors. Activated-contractor email sends are recorded, repeated requests return
 an already-handled result, and an intentional resend path is available for recovery.
 
+### Missing-document correction workflow
+
+A dedicated Jotform correction form now supports targeted contractor document
+resubmission without forcing the contractor to repeat the full onboarding process.
+The form carries both the Airtable contractor-record identifier and canonical backend
+contractor identifier, allowing the webhook to reconcile the submission with the
+existing contractor lifecycle rather than create a duplicate record.
+
+The webhook accepts the production Jotform field aliases for signed agreements, W-9s,
+proof documents, other requested files, and contractor messages while preserving
+legacy aliases for compatibility. Uploaded files are downloaded through the same
+restricted Jotform-host and file-validation controls used by onboarding. The backend
+normalizes actual file content before naming and storage, so a Jotform upload labeled
+as a PDF but containing JPEG bytes is validated, assigned a `.jpg` extension, and
+stored with the correct MIME type instead of trusting the incoming filename.
+
+A production smoke test confirmed the complete correction path: multipart webhook
+parsing, contractor resolution, reuse of the existing Google Drive folder, W-9 alias
+extraction, successful authenticated download, JPEG signature detection, corrected
+filename generation, Drive upload, document-metadata persistence, Airtable
+synchronization, and operator notification. The Resend provider record showed the
+operator email delivered to `assemblyconcierge@gmail.com`, and the message was
+confirmed visible in the mailbox.
+
+Document receipt remains intentionally separate from operator acceptance and
+activation. Airtable can show all required files as received while the contractor
+remains in `Owner Review Needed` and `Awaiting Review`; dispatch eligibility is not
+granted until the review and activation gates are completed.
+
 ## Contractor Document Security
 
 Contractor onboarding submissions arrive through Jotform. The backend stores the
@@ -339,12 +368,19 @@ Current evidence:
   successful submission, token consumption, and replay rejection;
 - contractor onboarding passed a production smoke test, including document handling,
   and a separate negative SSRF test;
+- the missing-document correction patch passed its focused 162-test set and a broader
+  399-test regression run, was merged into `main`, and deployed successfully on Render;
+- the missing-document production smoke test passed through Jotform parsing, validated
+  file download, MIME/signature correction, Google Drive storage, PostgreSQL metadata,
+  Airtable synchronization, and confirmed operator-email delivery;
 - the transactional duplicate-dispatch patch was merged and deployed live; and
 - six Make scenarios were corrected, saved, and structurally verified, with zero
   post-change runtime executions claimed.
 
 Still pending or separately tracked:
 
+- operator acceptance and activation of the contractor used for the missing-document
+  smoke test;
 - real PostgreSQL concurrency execution for the duplicate-dispatch race;
 - narrow production smoke testing of duplicate-dispatch behavior after deployment;
 - runtime validation of all six hardened Make scenarios;
