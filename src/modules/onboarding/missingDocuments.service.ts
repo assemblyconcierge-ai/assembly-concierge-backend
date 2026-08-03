@@ -67,16 +67,21 @@ export interface MissingDocumentsPayload {
   q34_contractorRecord?: string;
   q35_backendContractor?: string;
   signedContractorAgreement?: string | string[];
+  signedContractor?: string | string[];
   uploadSigned49?: string | string[];
   w9?: string | string[];
+  completedW9?: string | string[];
   q24_fileupload22?: string | string[];
   photoId?: string | string[];
   q29_fileupload27?: string | string[];
   insurance?: string | string[];
+  proofOf?: string | string[];
   q30_fileupload28?: string | string[];
   otherDocument?: string | string[];
+  otherRequested?: string | string[];
   q31_fileupload29?: string | string[];
   contractorMessage?: string;
+  messageOr?: string;
   correctionNote?: string;
   q40_questionsOr?: string;
   [key: string]: unknown;
@@ -130,6 +135,13 @@ function submittedAt(payload: MissingDocumentsPayload): string {
   return new Date().toISOString();
 }
 
+function normalizeStoredTimestamp(value: string | Date): string {
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? String(value) : value.toISOString();
+  }
+  return value;
+}
+
 function documentResultsFromRow(row: MissingDocumentsSubmissionRow): MissingDocumentResult[] {
   const stored = typeof row.document_results === 'string'
     ? JSON.parse(row.document_results) as Record<string, MissingDocumentResult>
@@ -164,13 +176,50 @@ const DOCUMENTS: Array<{
   type: MissingDocumentType;
   label: string;
   prefix: string;
-  field: (payload: MissingDocumentsPayload) => string | string[] | undefined;
+  fields: Array<{
+    alias: string;
+    value: (payload: MissingDocumentsPayload) => string | string[] | undefined;
+  }>;
 }> = [
-  { type: 'signed_agreement', label: 'Signed Contractor Agreement', prefix: 'SignedAgreement', field: (p) => p.signedContractorAgreement ?? p.uploadSigned49 },
-  { type: 'w9', label: 'W-9', prefix: 'W9', field: (p) => p.w9 ?? p.q24_fileupload22 },
-  { type: 'photo_id', label: 'Photo ID', prefix: 'PhotoID', field: (p) => p.photoId ?? p.q29_fileupload27 },
-  { type: 'insurance', label: 'Insurance', prefix: 'Insurance', field: (p) => p.insurance ?? p.q30_fileupload28 },
-  { type: 'other_document', label: 'Other Document', prefix: 'OtherDocument', field: (p) => p.otherDocument ?? p.q31_fileupload29 },
+  {
+    type: 'signed_agreement', label: 'Signed Contractor Agreement', prefix: 'SignedAgreement',
+    fields: [
+      { alias: 'signedContractorAgreement', value: (p) => p.signedContractorAgreement },
+      { alias: 'signedContractor', value: (p) => p.signedContractor },
+      { alias: 'uploadSigned49', value: (p) => p.uploadSigned49 },
+    ],
+  },
+  {
+    type: 'w9', label: 'W-9', prefix: 'W9',
+    fields: [
+      { alias: 'w9', value: (p) => p.w9 },
+      { alias: 'completedW9', value: (p) => p.completedW9 },
+      { alias: 'q24_fileupload22', value: (p) => p.q24_fileupload22 },
+    ],
+  },
+  {
+    type: 'photo_id', label: 'Photo ID', prefix: 'PhotoID',
+    fields: [
+      { alias: 'photoId', value: (p) => p.photoId },
+      { alias: 'q29_fileupload27', value: (p) => p.q29_fileupload27 },
+    ],
+  },
+  {
+    type: 'insurance', label: 'Insurance', prefix: 'Insurance',
+    fields: [
+      { alias: 'insurance', value: (p) => p.insurance },
+      { alias: 'proofOf', value: (p) => p.proofOf },
+      { alias: 'q30_fileupload28', value: (p) => p.q30_fileupload28 },
+    ],
+  },
+  {
+    type: 'other_document', label: 'Other Document', prefix: 'OtherDocument',
+    fields: [
+      { alias: 'otherDocument', value: (p) => p.otherDocument },
+      { alias: 'otherRequested', value: (p) => p.otherRequested },
+      { alias: 'q31_fileupload29', value: (p) => p.q31_fileupload29 },
+    ],
+  },
 ];
 
 async function processFiles(params: {
@@ -202,7 +251,10 @@ async function processFiles(params: {
     const results: Record<string, MissingDocumentResult> = {};
     const safeSubmissionId = sanitizeFileName(params.row.jotform_submission_id).replace(/\s+/g, '-');
     for (const document of DOCUMENTS) {
-      const sourceUrl = extractFileUrl(document.field(params.payload));
+      const extracted = document.fields
+        .map((field) => ({ alias: field.alias, sourceUrl: extractFileUrl(field.value(params.payload)) }))
+        .find((field) => field.sourceUrl !== null);
+      const sourceUrl = extracted?.sourceUrl ?? null;
       if (!sourceUrl) {
         results[document.type] = {
           documentType: document.type,
@@ -211,6 +263,15 @@ async function processFiles(params: {
         };
         continue;
       }
+
+      logger.info(
+        {
+          submissionId: params.row.jotform_submission_id,
+          documentType: document.type,
+          sourceField: extracted?.alias,
+        },
+        '[MissingDocuments] Document upload field extracted',
+      );
 
       const requestedName = `${document.prefix}_${params.row.airtable_record_id}_${safeSubmissionId}.pdf`;
       try {
@@ -246,6 +307,18 @@ async function processFiles(params: {
       documentResults: results,
     });
     if (!updated) throw new Error('Failed to persist missing-document upload results');
+    logger.info(
+      {
+        submissionId: params.row.jotform_submission_id,
+        uploadedDocumentTypes: Object.values(results)
+          .filter((result) => result.status === 'uploaded')
+          .map((result) => result.documentType),
+        rejectedDocumentTypes: Object.values(results)
+          .filter((result) => result.status === 'rejected')
+          .map((result) => result.documentType),
+      },
+      '[MissingDocuments] Document processing metadata persisted',
+    );
     return updated;
   } catch (error) {
     await markMissingDocumentsFilesFailed(params.row.id, safeError(error));
@@ -263,7 +336,7 @@ function buildAirtableFields(
   const documents = documentResultsFromRow(row);
   const byType = new Map(documents.map((doc) => [doc.documentType, doc]));
   const fields: Record<string, unknown> = {
-    [AT.SUBMITTED_AT]: row.submitted_at,
+    [AT.SUBMITTED_AT]: normalizeStoredTimestamp(row.submitted_at),
     [AT.SUBMISSION_ID]: row.jotform_submission_id,
     [AT.DRIVE_FOLDER]: row.drive_folder_url,
   };
@@ -311,7 +384,12 @@ export async function processMissingDocumentsSubmission(
     throw clientError('Backend contractor and Airtable record identity do not match', 409, 'CONTRACTOR_IDENTITY_MISMATCH');
   }
 
-  const message = firstString(payload.contractorMessage, payload.correctionNote, payload.q40_questionsOr);
+  const message = firstString(
+    payload.contractorMessage,
+    payload.messageOr,
+    payload.correctionNote,
+    payload.q40_questionsOr,
+  );
   const reserved = await reserveMissingDocumentsSubmission({
     contractorId,
     airtableRecordId,
@@ -345,6 +423,10 @@ export async function processMissingDocumentsSubmission(
       const synced = await markMissingDocumentsAirtableSynced(row.id);
       if (!synced) throw new Error('Failed to persist successful Airtable sync state');
       row = synced;
+      logger.info(
+        { submissionId, airtableRecordId },
+        '[MissingDocuments] Airtable synchronization completed',
+      );
     } catch (error) {
       const reason = safeError(error);
       const failed = await markMissingDocumentsAirtableFailed(row.id, reason);
@@ -368,7 +450,7 @@ export async function processMissingDocumentsSubmission(
         contractorId,
         airtableRecordId,
         submissionId,
-        submittedAt: row.submitted_at,
+        submittedAt: normalizeStoredTimestamp(row.submitted_at),
         receivedDocuments: documents.filter((doc) => doc.status === 'uploaded').map((doc) => doc.label),
         failedDocuments: documents.filter((doc) => doc.status === 'rejected').map((doc) => `${doc.label}: ${doc.error}`),
         contractorMessage: row.contractor_message,
@@ -381,6 +463,10 @@ export async function processMissingDocumentsSubmission(
       });
       if (!completed) throw new Error('Failed to persist operator notification completion');
       row = completed;
+      logger.info(
+        { submissionId, notificationStatus: notification.mode },
+        '[MissingDocuments] Operator notification completed',
+      );
     } catch (error) {
       const reason = safeError(error);
       const failed = await markMissingDocumentsNotificationFailed(row.id, reason);

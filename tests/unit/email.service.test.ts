@@ -285,6 +285,38 @@ describe('missing-documents operator notification', () => {
     expect(html).not.toContain('Jane <Contractor>');
   });
 
+  it('renders PostgreSQL Date values as ISO strings and defensively formats other value types', () => {
+    const html = renderMissingDocumentsOperatorNotification({
+      ...params,
+      contractorName: 42,
+      contractorId: true,
+      airtableRecordId: null,
+      submissionId: ['sub-001', 'retry'],
+      submittedAt: new Date('2026-08-02T04:32:35.000Z'),
+      receivedDocuments: [{ type: 'W-9' }],
+      failedDocuments: [false],
+      contractorMessage: { note: '<review>' },
+    } as any);
+
+    expect(html).toContain('2026-08-02T04:32:35.000Z');
+    expect(html).toContain('42');
+    expect(html).toContain('true');
+    expect(html).toContain('sub-001, retry');
+    expect(html).toContain('{&quot;type&quot;:&quot;W-9&quot;}');
+    expect(html).toContain('{&quot;note&quot;:&quot;&lt;review&gt;&quot;}');
+  });
+
+  it('reaches the email adapter with a Date timestamp without throwing', async () => {
+    Object.assign(config, { EMAIL_SEND_MODE: 'send', RESEND_API_KEY: 'test-key' });
+    vi.mocked(sendViaResend).mockResolvedValueOnce({ id: 'resend-date-1' });
+
+    await expect(sendMissingDocumentsOperatorNotification({
+      ...params,
+      submittedAt: new Date('2026-08-02T04:32:35.000Z'),
+    })).resolves.toEqual({ mode: 'sent', providerMessageId: 'resend-date-1' });
+    expect(sendViaResend).toHaveBeenCalledTimes(1);
+  });
+
   it('uses the configured recipient and stable submission idempotency key in send mode', async () => {
     Object.assign(config, { EMAIL_SEND_MODE: 'send', RESEND_API_KEY: 'test-key' });
     vi.mocked(sendViaResend).mockResolvedValueOnce({ id: 'resend-operator-1' });

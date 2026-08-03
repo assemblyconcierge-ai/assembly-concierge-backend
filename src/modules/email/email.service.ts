@@ -405,7 +405,7 @@ export interface MissingDocumentsOperatorNotificationParams {
   contractorId: string;
   airtableRecordId: string;
   submissionId: string;
-  submittedAt: string;
+  submittedAt: string | Date;
   receivedDocuments: string[];
   failedDocuments: string[];
   contractorMessage?: string | null;
@@ -415,7 +415,22 @@ export interface MissingDocumentsOperatorNotificationParams {
 export function renderMissingDocumentsOperatorNotification(
   params: MissingDocumentsOperatorNotificationParams,
 ): string {
-  const esc = (value: string) => value
+  const displayValue = (value: unknown): string => {
+    if (value === null || value === undefined) return '';
+    if (value instanceof Date) {
+      return Number.isNaN(value.getTime()) ? String(value) : value.toISOString();
+    }
+    if (Array.isArray(value)) return value.map(displayValue).join(', ');
+    if (typeof value === 'object') {
+      try {
+        return JSON.stringify(value);
+      } catch {
+        return String(value);
+      }
+    }
+    return String(value);
+  };
+  const esc = (value: unknown) => displayValue(value)
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   const list = (values: string[], empty: string) =>
     values.length > 0 ? `<ul>${values.map((value) => `<li>${esc(value)}</li>`).join('')}</ul>` : `<p>${empty}</p>`;

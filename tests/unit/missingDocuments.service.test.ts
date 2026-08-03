@@ -20,6 +20,7 @@ const mocks = vi.hoisted(() => ({
   claimNotification: vi.fn(),
   markNotificationComplete: vi.fn(),
   markNotificationFailed: vi.fn(),
+  logInfo: vi.fn(),
 }));
 
 vi.mock('../../src/db/pool', () => ({ queryOne: mocks.queryOne }));
@@ -53,6 +54,13 @@ vi.mock('../../src/common/config', () => ({
   config: {
     JOTFORM_MISSING_DOCS_FORM_ID: 'missing-form-1',
     JOTFORM_API_KEY: 'test-jotform-key',
+  },
+}));
+vi.mock('../../src/common/logger', () => ({
+  logger: {
+    info: mocks.logInfo,
+    warn: vi.fn(),
+    error: vi.fn(),
   },
 }));
 
@@ -106,7 +114,12 @@ const BASE_PAYLOAD: MissingDocumentsPayload = {
 function configureStatefulRepository() {
   mocks.reserve.mockImplementation(async (params: any) => {
     const isNew = !row;
-    if (!row) row = freshRow(params.submissionId);
+    if (!row) {
+      row = {
+        ...freshRow(params.submissionId),
+        contractor_message: params.contractorMessage ?? null,
+      };
+    }
     return { row, isNew };
   });
   mocks.getSubmission.mockImplementation(async () => row);
@@ -213,6 +226,126 @@ describe('processMissingDocumentsSubmission', () => {
       submissionId: SUBMISSION_ID,
       receivedDocuments: ['W-9'],
       failedDocuments: [],
+    }));
+  });
+
+  it('extracts a completedW9 array once and persists its Drive metadata and receipt', async () => {
+    const sourceUrl = 'https://www.jotform.com/uploads/account/form/sub/completed-w9.pdf';
+    const result = await processMissingDocumentsSubmission({
+      ...BASE_PAYLOAD,
+      w9: undefined,
+      completedW9: [sourceUrl],
+    });
+
+    expect(mocks.downloadAndUploadFile).toHaveBeenCalledTimes(1);
+    expect(mocks.downloadAndUploadFile).toHaveBeenCalledWith(expect.objectContaining({ sourceUrl }));
+    expect(row.document_results.w9).toMatchObject({
+      status: 'uploaded',
+      driveFileId: 'file-1',
+      driveFileUrl: 'https://drive.google.com/file/d/file-1/view',
+    });
+    expect(result.processedFiles).toEqual(['W-9']);
+    const fields = mocks.updateAirtable.mock.calls[0][1];
+    expect(fields.fld06XS5VPue6uSj8).toBe(true);
+    expect(Object.values(fields)).not.toContain(false);
+    expect(mocks.logInfo).toHaveBeenCalledWith(
+      expect.objectContaining({ documentType: 'w9', sourceField: 'completedW9' }),
+      '[MissingDocuments] Document upload field extracted',
+    );
+    expect(JSON.stringify(mocks.logInfo.mock.calls)).not.toContain(sourceUrl);
+  });
+
+  it('maps the dedicated signed agreement, insurance, other document, and message aliases', async () => {
+    const payload: MissingDocumentsPayload = {
+      ...BASE_PAYLOAD,
+      w9: undefined,
+      signedContractor: ['https://www.jotform.com/uploads/signed.pdf'],
+      proofOf: ['https://www.jotform.com/uploads/insurance.pdf'],
+      otherRequested: ['https://www.jotform.com/uploads/other.pdf'],
+      contractorMessage: undefined,
+      messageOr: 'Replacement documents attached',
+    };
+
+    const result = await processMissingDocumentsSubmission(payload);
+
+    expect(mocks.downloadAndUploadFile).toHaveBeenCalledTimes(3);
+    expect(mocks.downloadAndUploadFile.mock.calls.map(([call]) => call.sourceUrl)).toEqual([
+      'https://www.jotform.com/uploads/signed.pdf',
+      'https://www.jotform.com/uploads/insurance.pdf',
+      'https://www.jotform.com/uploads/other.pdf',
+    ]);
+    expect(result.processedFiles).toEqual([
+      'Signed Contractor Agreement',
+      'Insurance',
+      'Other Document',
+    ]);
+    expect(mocks.updateAirtable.mock.calls[0][1].fldQH4HCChb5i8HM9).toBe(true);
+    expect(mocks.sendNotification).toHaveBeenCalledWith(expect.objectContaining({
+      contractorMessage: 'Replacement documents attached',
+    }));
+    expect(Object.values(mocks.updateAirtable.mock.calls[0][1])).not.toContain(false);
+  });
+
+  it('preserves all existing onboarding-form document aliases', async () => {
+    await processMissingDocumentsSubmission({
+      ...BASE_PAYLOAD,
+      w9: undefined,
+      uploadSigned49: 'https://www.jotform.com/uploads/legacy-signed.pdf',
+      q24_fileupload22: 'https://www.jotform.com/uploads/legacy-w9.pdf',
+      q29_fileupload27: 'https://www.jotform.com/uploads/legacy-photo.pdf',
+      q30_fileupload28: 'https://www.jotform.com/uploads/legacy-insurance.pdf',
+      q31_fileupload29: 'https://www.jotform.com/uploads/legacy-other.pdf',
+    });
+
+    expect(mocks.downloadAndUploadFile).toHaveBeenCalledTimes(5);
+    expect(mocks.downloadAndUploadFile.mock.calls.map(([call]) => call.sourceUrl)).toEqual([
+      'https://www.jotform.com/uploads/legacy-signed.pdf',
+      'https://www.jotform.com/uploads/legacy-w9.pdf',
+      'https://www.jotform.com/uploads/legacy-photo.pdf',
+      'https://www.jotform.com/uploads/legacy-insurance.pdf',
+      'https://www.jotform.com/uploads/legacy-other.pdf',
+    ]);
+    const fields = mocks.updateAirtable.mock.calls[0][1];
+    expect(fields.fldQH4HCChb5i8HM9).toBe(true);
+    expect(fields.fld06XS5VPue6uSj8).toBe(true);
+    expect(fields.fldqZOgILUTVbqzii).toBe(true);
+    expect(Object.values(fields)).not.toContain(false);
+  });
+
+  it('keeps empty dedicated-form uploads not_supplied without false receipt writes', async () => {
+    const result = await processMissingDocumentsSubmission({
+      ...BASE_PAYLOAD,
+      w9: undefined,
+      signedContractor: [],
+      completedW9: [],
+      photoId: [],
+      proofOf: [],
+      otherRequested: [],
+    });
+
+    expect(mocks.downloadAndUploadFile).not.toHaveBeenCalled();
+    expect(result.documents).toHaveLength(5);
+    expect(result.documents.every((document) => document.status === 'not_supplied')).toBe(true);
+    const fields = mocks.updateAirtable.mock.calls[0][1];
+    expect(fields).not.toHaveProperty('fldQH4HCChb5i8HM9');
+    expect(fields).not.toHaveProperty('fld06XS5VPue6uSj8');
+    expect(fields).not.toHaveProperty('fldqZOgILUTVbqzii');
+    expect(Object.values(fields)).not.toContain(false);
+  });
+
+  it('normalizes PostgreSQL Date timestamps before Airtable and notification delivery', async () => {
+    row = {
+      ...freshRow(),
+      submitted_at: new Date('2026-08-02T04:32:35.000Z'),
+    };
+
+    await expect(processMissingDocumentsSubmission(BASE_PAYLOAD)).resolves.toMatchObject({
+      status: 'processed',
+    });
+    expect(mocks.updateAirtable.mock.calls[0][1].fld0Is7pUxLh2TZj3)
+      .toBe('2026-08-02T04:32:35.000Z');
+    expect(mocks.sendNotification).toHaveBeenCalledWith(expect.objectContaining({
+      submittedAt: '2026-08-02T04:32:35.000Z',
     }));
   });
 
