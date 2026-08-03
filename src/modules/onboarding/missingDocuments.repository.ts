@@ -21,7 +21,7 @@ export interface MissingDocumentsSubmissionRow {
   airtable_record_id: string;
   jotform_submission_id: string;
   jotform_form_id: string | null;
-  submitted_at: string;
+  submitted_at: string | Date;
   contractor_message: string | null;
   drive_folder_id: string | null;
   drive_folder_url: string | null;

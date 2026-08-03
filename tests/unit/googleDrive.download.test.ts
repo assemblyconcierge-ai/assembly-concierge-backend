@@ -118,6 +118,14 @@ describe('contractor Jotform file download security', () => {
     expect(mocks.fetch).toHaveBeenCalledOnce();
     expect(mocks.fetch.mock.calls[0][1]).toMatchObject({ redirect: 'manual' });
     expect(mocks.driveCreate).toHaveBeenCalledOnce();
+    expect(mocks.logInfo).toHaveBeenCalledWith(
+      expect.objectContaining({
+        fileName: 'W9_test-contractor.pdf',
+        contentType: 'application/pdf',
+        byteSize: 1024,
+      }),
+      '[GoogleDrive] File downloaded and validated successfully',
+    );
   });
 
   it.each([

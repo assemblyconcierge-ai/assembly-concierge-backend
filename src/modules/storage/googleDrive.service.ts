@@ -577,6 +577,15 @@ export async function downloadAndUploadFile(opts: {
   const fileNameWithoutExtension = safeFileName.replace(/\.[^./\\]+$/, '');
   const normalizedFileName = `${fileNameWithoutExtension.slice(0, 255 - extension.length)}${extension}`;
 
+  logger.info(
+    {
+      fileName: normalizedFileName,
+      contentType: trustedContentType,
+      byteSize: buffer.length,
+    },
+    '[GoogleDrive] File downloaded and validated successfully',
+  );
+
   // Upload to Drive — supportsAllDrives required for Shared Drive targets
   const drive = getDriveClient();
   const uploadRes = await drive.files.create({
