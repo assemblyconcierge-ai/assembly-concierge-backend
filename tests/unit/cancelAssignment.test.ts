@@ -19,11 +19,15 @@ const {
   mockRecordAuditEvent,
   mockEnqueueAirtableSync,
   mockSendSms,
+  mockParseSchedule,
+  mockLogWarn,
 } = vi.hoisted(() => ({
   mockWithTransaction: vi.fn(),
   mockRecordAuditEvent: vi.fn(),
   mockEnqueueAirtableSync: vi.fn(),
   mockSendSms: vi.fn(),
+  mockParseSchedule: vi.fn(),
+  mockLogWarn: vi.fn(),
 }));
 
 vi.mock('../../src/db/pool', () => ({
@@ -49,8 +53,13 @@ vi.mock('../../src/modules/sms/quo.adapter', () => ({
 }));
 
 vi.mock('../../src/common/utils/scheduleUtils', () => ({
-  parseSchedule: vi.fn(),
+  parseSchedule: mockParseSchedule,
 }));
+
+vi.mock('../../src/common/logger', () => {
+  const log = { info: vi.fn(), warn: mockLogWarn, error: vi.fn(), debug: vi.fn() };
+  return { logger: { ...log, child: vi.fn(() => log) } };
+});
 
 import { cancelContractorAssignment } from '../../src/modules/dispatch/dispatch.service';
 
@@ -61,6 +70,7 @@ interface MockAssignment {
   contractor_id: string;
   dispatch_id: string | null;
   status: string;
+  phone_e164: string;
 }
 
 function makeAssignment(overrides: Partial<MockAssignment> = {}): MockAssignment {
@@ -69,9 +79,28 @@ function makeAssignment(overrides: Partial<MockAssignment> = {}): MockAssignment
     contractor_id: 'contractor-uuid-1',
     dispatch_id: 'dispatch-uuid-1',
     status: 'pending',
+    phone_e164: '+14045550100',
     ...overrides,
   };
 }
+
+function makeJob(status = 'assigned', overrides: Record<string, unknown> = {}) {
+  return {
+    id: 'job-uuid-1',
+    status,
+    job_key: 'AC-2026-CANCEL',
+    scheduled_start_at: new Date('2026-08-10T13:00:00.000Z'),
+    scheduled_end_at: new Date('2026-08-10T15:00:00.000Z'),
+    appointment_date: '2026-08-10',
+    appointment_window: '9:00 AM - 11:00 AM',
+    timezone: 'America/New_York',
+    ...overrides,
+  };
+}
+
+const EXPECTED_CANCELLATION_SMS =
+  'AC UPDATE - Job AC-2026-CANCEL scheduled Mon, Aug 10, 2026, 9:00 AM-11:00 AM EDT '
+  + 'has been cancelled. You are no longer assigned. No action needed.';
 
 /**
  * Build a mock client whose query() calls return pre-queued responses in order.
@@ -92,10 +121,14 @@ function makeClient(responses: Array<{ rows: any[]; rowCount: number }>) {
  * Standard success scenario responses for a job in `assigned` state with one
  * active assignment that has a dispatch_id.
  */
-function successResponses(jobStatus = 'assigned', assignment = makeAssignment()) {
+function successResponses(
+  jobStatus = 'assigned',
+  assignment = makeAssignment(),
+  job = makeJob(jobStatus),
+) {
   return [
     // Step 0: SELECT ... FOR UPDATE on jobs
-    { rows: [{ id: 'job-uuid-1', status: jobStatus }], rowCount: 1 },
+    { rows: [job], rowCount: 1 },
     // Step 1: SELECT active contractor_assignments
     { rows: [assignment], rowCount: 1 },
     // Step 2: UPDATE contractor_assignments RETURNING id
@@ -116,6 +149,11 @@ function setupTransaction(responses: Array<{ rows: any[]; rowCount: number }>) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mockSendSms.mockResolvedValue({ messageId: 'quo-message-1' });
+  mockParseSchedule.mockReturnValue({
+    scheduledStartAt: new Date('2026-08-10T13:00:00.000Z'),
+    scheduledEndAt: new Date('2026-08-10T15:00:00.000Z'),
+  });
 });
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -233,6 +271,7 @@ describe('cancelContractorAssignment', () => {
     await expect(
       cancelContractorAssignment('job-uuid-1', 'corr-1', 'assign-uuid-NONEXISTENT'),
     ).rejects.toMatchObject({ statusCode: 404 });
+    expect(mockSendSms).not.toHaveBeenCalled();
   });
 
   it('rejects with ASSIGNMENT_ALREADY_CANCELLED if UPDATE affects 0 rows (concurrent cancellation)', async () => {
@@ -246,6 +285,7 @@ describe('cancelContractorAssignment', () => {
       statusCode: 409,
       errorCode: 'ASSIGNMENT_ALREADY_CANCELLED',
     });
+    expect(mockSendSms).not.toHaveBeenCalled();
   });
 
   it('handles assignment with null dispatch_id gracefully (skips dispatch UPDATE)', async () => {
@@ -262,11 +302,141 @@ describe('cancelContractorAssignment', () => {
     expect(result.success).toBe(true);
   });
 
-  it('does not call sendSms', async () => {
-    setupTransaction(successResponses('assigned'));
+  it('sends the exact cancellation SMS with stored timestamps after commit', async () => {
+    let committed = false;
+    const client = makeClient(successResponses('assigned'));
+    mockWithTransaction.mockImplementation(async (fn: (client: any) => Promise<any>) => {
+      const value = await fn(client);
+      committed = true;
+      return value;
+    });
+    mockSendSms.mockImplementation(async () => {
+      expect(committed).toBe(true);
+      return { messageId: 'quo-message-1' };
+    });
 
     await cancelContractorAssignment('job-uuid-1', 'corr-1');
+
+    expect(mockSendSms).toHaveBeenCalledWith(
+      '+14045550100',
+      EXPECTED_CANCELLATION_SMS,
+      'corr-1',
+    );
+  });
+
+  it('uses a derived schedule when stored timestamps are null', async () => {
+    const job = makeJob('assigned', {
+      scheduled_start_at: null,
+      scheduled_end_at: null,
+      appointment_date: '2026-09-15',
+      appointment_window: '1:00 PM - 4:00 PM',
+    });
+    mockParseSchedule.mockReturnValueOnce({
+      scheduledStartAt: new Date('2026-09-15T17:00:00.000Z'),
+      scheduledEndAt: new Date('2026-09-15T20:00:00.000Z'),
+    });
+    setupTransaction(successResponses('assigned', makeAssignment(), job));
+
+    await cancelContractorAssignment('job-uuid-1', 'corr-derived');
+
+    expect(mockParseSchedule).toHaveBeenCalledWith(
+      '2026-09-15',
+      '1:00 PM - 4:00 PM',
+      'America/New_York',
+    );
+    expect(mockSendSms).toHaveBeenCalledWith(
+      '+14045550100',
+      'AC UPDATE - Job AC-2026-CANCEL scheduled Tue, Sep 15, 2026, 1:00 PM-4:00 PM EDT '
+        + 'has been cancelled. You are no longer assigned. No action needed.',
+      'corr-derived',
+    );
+  });
+
+  it.each([
+    ['missing', makeJob('assigned', {
+      scheduled_start_at: null,
+      scheduled_end_at: null,
+      appointment_date: null,
+      appointment_window: null,
+    })],
+    ['invalid', makeJob('assigned', {
+      scheduled_start_at: new Date('invalid'),
+      scheduled_end_at: new Date('invalid'),
+    })],
+  ])('uses safe fallback wording when the schedule is %s', async (_label, job) => {
+    setupTransaction(successResponses('assigned', makeAssignment(), job));
+
+    await cancelContractorAssignment('job-uuid-1', 'corr-fallback');
+
+    expect(mockSendSms).toHaveBeenCalledWith(
+      '+14045550100',
+      'AC UPDATE - Job AC-2026-CANCEL has been cancelled. '
+        + 'You are no longer assigned. No action needed.',
+      'corr-fallback',
+    );
+  });
+
+  it('sends no SMS when the cancellation fails', async () => {
+    setupTransaction([
+      { rows: [makeJob('assigned')], rowCount: 1 },
+      { rows: [], rowCount: 0 },
+    ]);
+
+    await expect(cancelContractorAssignment('job-uuid-1', 'corr-1')).rejects.toMatchObject({
+      errorCode: 'NO_ACTIVE_ASSIGNMENT',
+    });
     expect(mockSendSms).not.toHaveBeenCalled();
+  });
+
+  it('does not send twice when the cancelled assignment is requested again', async () => {
+    const firstClient = makeClient(successResponses('assigned'));
+    const secondClient = makeClient([
+      { rows: [makeJob('ready_for_dispatch')], rowCount: 1 },
+    ]);
+    mockWithTransaction
+      .mockImplementationOnce(async (fn: (client: any) => Promise<any>) => fn(firstClient))
+      .mockImplementationOnce(async (fn: (client: any) => Promise<any>) => fn(secondClient));
+
+    await cancelContractorAssignment('job-uuid-1', 'corr-first', 'assign-uuid-1');
+    await expect(
+      cancelContractorAssignment('job-uuid-1', 'corr-duplicate', 'assign-uuid-1'),
+    ).rejects.toMatchObject({ errorCode: 'INVALID_JOB_STATE' });
+
+    expect(mockSendSms).toHaveBeenCalledTimes(1);
+  });
+
+  it('sends no SMS when the cancellation transaction rolls back', async () => {
+    const client = makeClient(successResponses('assigned'));
+    mockWithTransaction.mockImplementation(async (fn: (client: any) => Promise<any>) => {
+      await fn(client);
+      throw new Error('commit failed');
+    });
+
+    await expect(cancelContractorAssignment('job-uuid-1', 'corr-1')).rejects.toThrow('commit failed');
+    expect(mockSendSms).not.toHaveBeenCalled();
+  });
+
+  it('keeps the successful cancellation result when SMS delivery fails', async () => {
+    setupTransaction(successResponses('assigned'));
+    mockSendSms.mockRejectedValueOnce(new Error('Quo unavailable'));
+
+    const result = await cancelContractorAssignment('job-uuid-1', 'corr-1');
+
+    expect(result).toEqual({
+      success: true,
+      jobId: 'job-uuid-1',
+      cancelledAssignmentId: 'assign-uuid-1',
+      previousContractorId: 'contractor-uuid-1',
+      jobStatus: 'ready_for_dispatch',
+    });
+    expect(mockLogWarn).toHaveBeenCalledWith(
+      {
+        err: expect.any(Error),
+        assignmentId: 'assign-uuid-1',
+        jobKey: 'AC-2026-CANCEL',
+      },
+      '[CancelAssignment] Contractor cancellation SMS failed after commit',
+    );
   });
 
   it('does not call enqueueAirtableSync', async () => {

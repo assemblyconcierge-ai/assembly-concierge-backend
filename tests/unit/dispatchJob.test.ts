@@ -105,6 +105,10 @@ function expectedDispatchSms(whenLine: string): string {
   ].join('\n');
 }
 
+const EXPECTED_CANCELLATION_SMS =
+  'AC UPDATE - Job AC-2026-LOCK scheduled Mon, Aug 10, 2026, 9:00 AM-11:00 AM EDT '
+  + 'has been cancelled. You are no longer assigned. No action needed.';
+
 function makeState(overrides: Partial<FakeState> = {}): FakeState {
   return {
     job: {
@@ -176,9 +180,13 @@ function createClient(state: FakeState) {
         return { rows: state.job ? [{ ...state.job }] : [], rowCount: state.job ? 1 : 0 };
       }
 
-      if (sql.includes('SELECT id, status FROM jobs') && sql.includes('FOR UPDATE')) {
+      if (
+        sql.includes('FROM jobs')
+        && !sql.includes('FROM jobs j')
+        && sql.includes('FOR UPDATE')
+      ) {
         return {
-          rows: state.job ? [{ id: state.job.id, status: state.job.status }] : [],
+          rows: state.job ? [{ ...state.job }] : [],
           rowCount: state.job ? 1 : 0,
         };
       }
@@ -213,6 +221,7 @@ function createClient(state: FakeState) {
             contractor_id: assignment.contractorId,
             dispatch_id: assignment.dispatchId,
             status: assignment.status,
+            phone_e164: state.contractor?.phone_e164,
           }));
         return { rows, rowCount: rows.length };
       }
@@ -799,7 +808,7 @@ describe('dispatchJobToContractor transactional winner gate', () => {
     );
   });
 
-  it('allows dispatch, existing cancellation behavior, then legitimate redispatch', async () => {
+  it('allows cancellation SMS, then legitimate redispatch', async () => {
     const state = makeState();
     installState(state);
 
@@ -835,12 +844,13 @@ describe('dispatchJobToContractor transactional winner gate', () => {
       expect.objectContaining({ id: first.assignmentId, status: 'cancelled' }),
       expect.objectContaining({ id: second.assignmentId, status: 'pending' }),
     ]);
-    expect(mocks.sendSms).toHaveBeenCalledTimes(2);
+    expect(mocks.sendSms).toHaveBeenCalledTimes(3);
     const expectedSms = expectedDispatchSms(
       'When: Mon, Aug 10, 2026, 9:00 AM-11:00 AM EDT',
     );
     expect(mocks.sendSms.mock.calls).toEqual([
       ['+14045550100', expectedSms, 'corr-first'],
+      ['+14045550100', EXPECTED_CANCELLATION_SMS, 'corr-cancel'],
       ['+14045550100', expectedSms, 'corr-redispatch'],
     ]);
   });

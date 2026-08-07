@@ -427,6 +427,39 @@ interface AssignmentRow {
   contractor_id: string;
   dispatch_id: string | null;
   status: string;
+  phone_e164: string;
+}
+
+type CancellationJobRow = Pick<LockedDispatchJob,
+  'id' | 'status' | 'job_key' | 'scheduled_start_at' | 'scheduled_end_at'
+  | 'appointment_date' | 'appointment_window' | 'timezone'>;
+
+function buildCancellationMessage(job: CancellationJobRow): string {
+  const timezone = job.timezone ?? DEFAULT_TIMEZONE;
+  let scheduledStartAt = job.scheduled_start_at;
+  let scheduledEndAt = job.scheduled_end_at;
+
+  if ((!scheduledStartAt || !scheduledEndAt) && job.appointment_date && job.appointment_window) {
+    try {
+      const parsed = parseSchedule(job.appointment_date, job.appointment_window, timezone);
+      scheduledStartAt = parsed.scheduledStartAt;
+      scheduledEndAt = parsed.scheduledEndAt;
+    } catch {
+      scheduledStartAt = null;
+      scheduledEndAt = null;
+    }
+  }
+
+  const validDates = scheduledStartAt && scheduledEndAt
+    && DateTime.fromJSDate(scheduledStartAt).isValid
+    && DateTime.fromJSDate(scheduledEndAt).isValid;
+  const formattedSchedule = validDates
+    ? formatDispatchSchedule(scheduledStartAt!, scheduledEndAt!, timezone).replace(/^When: /, '')
+    : null;
+  const scheduleClause = formattedSchedule ? ` scheduled ${formattedSchedule}` : '';
+
+  return `AC UPDATE - Job ${job.job_key}${scheduleClause} has been cancelled. `
+    + 'You are no longer assigned. No action needed.';
 }
 
 /** Job statuses from which an assignment can be cancelled */
@@ -439,7 +472,7 @@ const CANCELLABLE_JOB_STATUSES = new Set(['dispatch_in_progress', 'assigned']);
  * to prevent stale-read races. The assignment UPDATE is guarded by job_id and
  * active status so a concurrent cancellation cannot double-fire.
  *
- * - Does not send SMS.
+ * - Sends cancellation SMS only after the transaction commits.
  * - Does not touch payment, customer, schedule, or intake fields.
  * - Does not enqueue Airtable sync (caller may do so if desired).
  */
@@ -452,17 +485,23 @@ export async function cancelContractorAssignment(
 
   // ── All reads + writes inside one transaction ─────────────────────────────
   let result!: CancelAssignmentResult;
+  let cancellationSms!: { to: string; content: string; assignmentId: string; jobKey: string };
 
   await withTransaction(async (client) => {
     // Step 0: Lock the job row for the duration of this transaction
-    const jobRes = await client.query<{ id: string; status: string }>(
-      `SELECT id, status FROM jobs WHERE id = $1 FOR UPDATE`,
+    const jobRes = await client.query<CancellationJobRow>(
+      `SELECT id, status, job_key, scheduled_start_at, scheduled_end_at,
+              appointment_date::text AS appointment_date, appointment_window, timezone
+         FROM jobs
+        WHERE id = $1
+        FOR UPDATE`,
       [jobId],
     );
     if (jobRes.rowCount === 0) {
       throw Object.assign(new Error('Job not found'), { statusCode: 404 });
     }
-    const jobStatus = jobRes.rows[0].status;
+    const job = jobRes.rows[0];
+    const jobStatus = job.status;
     if (!CANCELLABLE_JOB_STATUSES.has(jobStatus)) {
       throw Object.assign(
         new Error(
@@ -475,11 +514,12 @@ export async function cancelContractorAssignment(
 
     // Step 1: Read active assignments inside the transaction (consistent with the locked job row)
     const assignRes = await client.query<AssignmentRow>(
-      `SELECT id, contractor_id, dispatch_id, status
-         FROM contractor_assignments
-        WHERE job_id = $1
-          AND status IN ('pending', 'accepted')
-        ORDER BY assigned_at DESC`,
+      `SELECT ca.id, ca.contractor_id, ca.dispatch_id, ca.status, c.phone_e164
+         FROM contractor_assignments ca
+         JOIN contractors c ON c.id = ca.contractor_id
+        WHERE ca.job_id = $1
+          AND ca.status IN ('pending', 'accepted')
+        ORDER BY ca.assigned_at DESC`,
       [jobId],
     );
     const activeRows = assignRes.rows;
@@ -565,6 +605,13 @@ export async function cancelContractorAssignment(
       client,
     });
 
+    cancellationSms = {
+      to: targetAssignment.phone_e164,
+      content: buildCancellationMessage(job),
+      assignmentId: targetAssignment.id,
+      jobKey: job.job_key,
+    };
+
     result = {
       success: true,
       jobId,
@@ -578,6 +625,15 @@ export async function cancelContractorAssignment(
     { cancelledAssignmentId: result.cancelledAssignmentId, previousContractorId: result.previousContractorId },
     '[CancelAssignment] Assignment cancelled — job returned to ready_for_dispatch',
   );
+
+  try {
+    await sendSms(cancellationSms.to, cancellationSms.content, correlationId);
+  } catch (err) {
+    log.warn(
+      { err, assignmentId: cancellationSms.assignmentId, jobKey: cancellationSms.jobKey },
+      '[CancelAssignment] Contractor cancellation SMS failed after commit',
+    );
+  }
 
   return result;
 }
