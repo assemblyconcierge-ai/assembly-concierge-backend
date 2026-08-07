@@ -6,6 +6,7 @@
  */
 
 import { v4 as uuidv4 } from 'uuid';
+import { DateTime } from 'luxon';
 import { queryOne, withTransaction } from '../../db/pool';
 import { JobRow, updateJobStatus } from '../jobs/job.repository';
 import { assertTransition } from '../jobs/job.stateMachine';
@@ -62,15 +63,55 @@ function formatDollars(cents: number): string {
   return dollars % 1 === 0 ? dollars.toFixed(0) : dollars.toFixed(2);
 }
 
+const DEFAULT_TIMEZONE = 'America/New_York';
+
+function formatDispatchSchedule(
+  scheduledStartAt: Date,
+  scheduledEndAt: Date,
+  timezone: string,
+): string {
+  const toZonedDateTime = (date: Date, zone: string) =>
+    DateTime.fromJSDate(date, { zone }).setLocale('en-US');
+
+  let start = toZonedDateTime(scheduledStartAt, timezone);
+  let end = toZonedDateTime(scheduledEndAt, timezone);
+
+  if (!start.isValid || !end.isValid) {
+    start = toZonedDateTime(scheduledStartAt, DEFAULT_TIMEZONE);
+    end = toZonedDateTime(scheduledEndAt, DEFAULT_TIMEZONE);
+  }
+
+  const startZone = start.toFormat('ZZZZ');
+  const endZone = end.toFormat('ZZZZ');
+  const sameZone = startZone === endZone;
+
+  if (start.hasSame(end, 'day')) {
+    const timeRange = sameZone
+      ? `${start.toFormat('h:mm a')}-${end.toFormat('h:mm a')} ${endZone}`
+      : `${start.toFormat('h:mm a')} ${startZone}-${end.toFormat('h:mm a')} ${endZone}`;
+    return `When: ${start.toFormat('ccc, LLL d, yyyy')}, ${timeRange}`;
+  }
+
+  const startDisplay = start.toFormat('ccc, LLL d, yyyy, h:mm a');
+  const endDisplay = end.toFormat('ccc, LLL d, yyyy, h:mm a');
+  return sameZone
+    ? `When: ${startDisplay}-${endDisplay} ${endZone}`
+    : `When: ${startDisplay} ${startZone}-${endDisplay} ${endZone}`;
+}
+
 /** Build the SMS message body sent to the contractor at dispatch time */
 function buildDispatchMessage(
   serviceTypeName: string,
   city: string,
   contractorPayCents: number,
   jobKey: string,
+  scheduledStartAt: Date,
+  scheduledEndAt: Date,
+  timezone: string,
 ): string {
   return [
     `AC JOB - ${serviceTypeName}`,
+    formatDispatchSchedule(scheduledStartAt, scheduledEndAt, timezone),
     `${city}, GA`,
     `Pay: $${formatDollars(contractorPayCents)}`,
     '',
@@ -296,6 +337,9 @@ export async function dispatchJobToContractor(
       contractor,
       serviceTypeName,
       city,
+      scheduledStartAt: currentScheduledStart,
+      scheduledEndAt: currentScheduledEnd,
+      timezone: tz,
       dispatchId,
       assignmentId,
     };
@@ -306,6 +350,9 @@ export async function dispatchJobToContractor(
     contractor,
     serviceTypeName,
     city,
+    scheduledStartAt,
+    scheduledEndAt,
+    timezone,
     dispatchId,
     assignmentId,
   } = committed;
@@ -316,7 +363,15 @@ export async function dispatchJobToContractor(
   );
 
   // ── Send dispatch SMS (outside transaction) ───────────────────────────────
-  const message = buildDispatchMessage(serviceTypeName, city, job.contractor_total_payout_cents, job.job_key);
+  const message = buildDispatchMessage(
+    serviceTypeName,
+    city,
+    job.contractor_total_payout_cents,
+    job.job_key,
+    scheduledStartAt,
+    scheduledEndAt,
+    timezone,
+  );
   let smsSent = false;
 
   try {

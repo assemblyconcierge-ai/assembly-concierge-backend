@@ -93,6 +93,18 @@ interface FakeState {
 const JOB_ID = '11111111-1111-4111-8111-111111111111';
 const CONTRACTOR_ID = '22222222-2222-4222-8222-222222222222';
 
+function expectedDispatchSms(whenLine: string): string {
+  return [
+    'AC JOB - Furniture Assembly',
+    whenLine,
+    'Atlanta, GA',
+    'Pay: $75',
+    '',
+    'Reply CONFIRM AC-2026-LOCK to accept this job',
+    'Reply DECLINE AC-2026-LOCK if you are not available',
+  ].join('\n');
+}
+
 function makeState(overrides: Partial<FakeState> = {}): FakeState {
   return {
     job: {
@@ -721,6 +733,70 @@ describe('dispatchJobToContractor transactional winner gate', () => {
       jobId: JOB_ID,
       smsSent: true,
     });
+    expect(mocks.sendSms).toHaveBeenCalledWith(
+      '+14045550100',
+      expectedDispatchSms('When: Mon, Aug 10, 2026, 9:00 AM-11:00 AM EDT'),
+      'corr-success',
+    );
+  });
+
+  it('uses the parsed effective schedule in the SMS when stored schedule timestamps are null', async () => {
+    const state = makeState({
+      job: {
+        ...makeState().job,
+        scheduled_start_at: null,
+        scheduled_end_at: null,
+        appointment_date: '2026-09-15',
+        appointment_window: '1:00 PM - 4:00 PM',
+      },
+    });
+    installState(state);
+    mocks.parseSchedule.mockReturnValueOnce({
+      scheduledStartAt: new Date('2026-09-15T17:00:00.000Z'),
+      scheduledEndAt: new Date('2026-09-15T20:00:00.000Z'),
+    });
+
+    await dispatchJobToContractor(
+      JOB_ID,
+      CONTRACTOR_ID,
+      'corr-parsed-schedule',
+    );
+
+    expect(mocks.parseSchedule).toHaveBeenCalledWith(
+      '2026-09-15',
+      '1:00 PM - 4:00 PM',
+      'America/New_York',
+    );
+    expect(mocks.sendSms).toHaveBeenCalledWith(
+      '+14045550100',
+      expectedDispatchSms('When: Tue, Sep 15, 2026, 1:00 PM-4:00 PM EDT'),
+      'corr-parsed-schedule',
+    );
+  });
+
+  it('includes both dates in the SMS for a cross-midnight schedule', async () => {
+    const state = makeState({
+      job: {
+        ...makeState().job,
+        scheduled_start_at: new Date('2026-08-11T03:00:00.000Z'),
+        scheduled_end_at: new Date('2026-08-11T05:00:00.000Z'),
+      },
+    });
+    installState(state);
+
+    await dispatchJobToContractor(
+      JOB_ID,
+      CONTRACTOR_ID,
+      'corr-cross-midnight',
+    );
+
+    expect(mocks.sendSms).toHaveBeenCalledWith(
+      '+14045550100',
+      expectedDispatchSms(
+        'When: Mon, Aug 10, 2026, 11:00 PM-Tue, Aug 11, 2026, 1:00 AM EDT',
+      ),
+      'corr-cross-midnight',
+    );
   });
 
   it('allows dispatch, existing cancellation behavior, then legitimate redispatch', async () => {
@@ -760,5 +836,12 @@ describe('dispatchJobToContractor transactional winner gate', () => {
       expect.objectContaining({ id: second.assignmentId, status: 'pending' }),
     ]);
     expect(mocks.sendSms).toHaveBeenCalledTimes(2);
+    const expectedSms = expectedDispatchSms(
+      'When: Mon, Aug 10, 2026, 9:00 AM-11:00 AM EDT',
+    );
+    expect(mocks.sendSms.mock.calls).toEqual([
+      ['+14045550100', expectedSms, 'corr-first'],
+      ['+14045550100', expectedSms, 'corr-redispatch'],
+    ]);
   });
 });
