@@ -55,8 +55,9 @@ backend endpoints, writes operator-visible results, and routes failures into vis
 recovery paths.
 
 **Messaging** - Quo/OpenPhone-compatible SMS supports contractor dispatch commands
-such as confirm, decline, on-the-way, and done. Email flows cover contractor
-onboarding, missing-document correction, acceptance, and activation.
+such as confirm, decline, on-the-way, and done, plus post-commit contractor
+cancellation notices. Email flows cover contractor onboarding, missing-document
+correction, acceptance, and activation.
 
 ## Customer Booking and Interface Hardening
 
@@ -191,9 +192,10 @@ the ownership of the backend sync process.
 ## Make Orchestration Hardening
 
 Six production Make scenarios were inspected read-only first, corrected under explicit
-preconditions, saved, and re-read for structural verification. None of the six was
-executed, replayed, or production smoke-tested during this hardening phase. Runtime
-validation remains a launch gate.
+preconditions, saved, and re-read for structural verification. Subsequent launch smoke
+testing has now exercised the Dispatch Trigger and Cancel Assignment paths in
+production; runtime validation of the remaining hardened scenarios is tracked
+separately.
 
 ### Completion Approval Trigger
 
@@ -243,8 +245,13 @@ added for both dispatch paths. Those branches perform no Airtable write and send
 owner alert, preventing a losing concurrent request from overwriting the winner's
 state. Generic conflicts and failures remain on the failure path.
 
-The scenario is structurally verified but not executed. Make sends no contractor SMS
-in this flow; SMS remains a backend side effect after commit.
+A later production redispatch test exposed one additional route-state gap: the
+redispatch filter accepted `Pending Dispatch` and `Declined` but not the legitimate
+post-cancellation `Cancelled` mirror state. Execution history showed two webhook runs
+ending after record lookup with no route match. Route 3 was widened to accept
+`Cancelled`; a subsequent cancel, reassign, availability check, and approval completed
+through Route 3 without manually changing Dispatch Status. Make still sends no
+contractor SMS in this flow; SMS remains a backend side effect after commit.
 
 ### Owner Alert
 
@@ -264,8 +271,10 @@ for backend synchronization events, with incompatible semantics and formatting.
 
 That mapping was removed entirely rather than erased, preserving the last legitimate
 backend-sync value. The remaining success writeback clears assignment and dispatch
-references and restores redispatch eligibility. The scenario is structurally verified
-but not executed.
+references and restores redispatch eligibility. Production cancellation testing
+confirmed the backend returned the job to `ready_for_dispatch`, cleared the active
+assignment identifiers, and allowed a new assignment to be dispatched after the Route
+3 fix described above.
 
 ### Automation design principles
 
@@ -286,9 +295,13 @@ selects a contractor in Airtable, Make checks backend readiness and availability
 the backend performs the state transition that creates dispatch and assignment
 records.
 
-Contractors respond through SMS. Confirm assigns the job, decline returns it to a
-dispatchable state, on-the-way records an en-route timestamp and can notify the
-customer, and done or finish opens the completion-photo path.
+Contractors respond through SMS. The initial dispatch message now includes the job's
+scheduled date and time window in the job timezone, along with service, city, payout,
+and unchanged confirm/decline commands. Confirm assigns the job, decline returns it to
+a dispatchable state, on-the-way records an en-route timestamp and can notify the
+customer, and done or finish opens the completion-photo path. The schedule-bearing
+initial dispatch SMS was merged, deployed on Render, and confirmed in a production
+smoke test.
 
 Launch hardening added transactional duplicate-dispatch protection. The backend locks
 the job row before evaluating eligibility, checks for an active dispatch or active
@@ -298,13 +311,30 @@ marker-specific HTTP 409 response without creating another dispatch or assignmen
 Generic conflicts remain distinguishable from a true duplicate.
 
 Legitimate redispatch remains allowed when only cancelled or otherwise inactive
-historical assignments exist. SMS remains outside the database transaction and is
-sent only after the dispatch state commits.
+historical assignments exist. The production cancel-to-redispatch path was exercised
+with a real record after Make Route 3 was updated to accept the `Cancelled` mirror
+state; the new dispatch created fresh dispatch and assignment identifiers without a
+manual Dispatch Status reset.
 
-This patch passed the TypeScript build, 24 focused dispatch tests, and the full 748-test
-backend suite. It was merged into `main` and deployed live on Render. Real PostgreSQL
-concurrency execution and a narrow production duplicate-dispatch smoke test remain
-separate launch-validation gates.
+Contractor cancellation notification is also backend-owned. After a successful
+assignment cancellation transaction commits, the backend sends a concise cancellation
+SMS to the contractor using the existing Quo adapter. The send is deliberately
+non-fatal: an SMS failure is logged without rolling back or changing the successful
+cancellation result. Existing row locking and active-assignment guards prevent a
+second successful cancellation of the same assignment. The simplified patch passed 21
+focused cancellation tests, 19 dispatch regression tests, and TypeScript validation,
+was squash-merged into `main`, deployed through Render, and the cancellation text was
+confirmed received in production.
+
+The direct post-commit SMS design has the same known delivery gap as the existing
+dispatch SMS path: if the process stops after the state commit but before delivery,
+there is no durable notification worker to recover that send. A future notification
+worker can address this class of delivery gap across contractor messaging.
+
+The duplicate-dispatch hardening patch passed the TypeScript build, 24 focused dispatch
+tests, and the full 748-test backend suite. It was merged into `main` and deployed live
+on Render. Real PostgreSQL concurrency execution and a narrow production duplicate-
+dispatch race smoke test remain separate validation gates.
 
 ## Completion Photos, Approval, and Remainder Payment
 
@@ -373,21 +403,31 @@ Current evidence:
 - the missing-document production smoke test passed through Jotform parsing, validated
   file download, MIME/signature correction, Google Drive storage, PostgreSQL metadata,
   Airtable synchronization, and confirmed operator-email delivery;
-- the transactional duplicate-dispatch patch was merged and deployed live; and
-- six Make scenarios were corrected, saved, and structurally verified, with zero
-  post-change runtime executions claimed.
+- the transactional duplicate-dispatch patch was merged and deployed live;
+- the contractor dispatch SMS schedule patch passed 19 focused dispatch tests plus 40
+  route/SMS regression tests, was merged and deployed, and its date/time window was
+  confirmed in production;
+- the cancel-to-redispatch flow was production-tested through the legitimate
+  `Cancelled` Airtable mirror state after the Make Route 3 filter was corrected;
+- the contractor cancellation SMS patch passed 21 focused cancellation tests, 19
+  dispatch regression tests, and TypeScript validation, was squash-merged into
+  `main`, deployed, and confirmed received in production; and
+- the Dispatch Trigger and Cancel Assignment Make paths have now been exercised in
+  production after hardening, while the remaining hardened scenarios are still
+  tracked for runtime validation.
 
 Still pending or separately tracked:
 
 - operator acceptance and activation of the contractor used for the missing-document
   smoke test;
 - real PostgreSQL concurrency execution for the duplicate-dispatch race;
-- narrow production smoke testing of duplicate-dispatch behavior after deployment;
-- runtime validation of all six hardened Make scenarios;
+- narrow production smoke testing of duplicate-dispatch race behavior after deployment;
+- runtime validation of the remaining hardened Make scenarios;
 - captured request proof for completion override values and structured boolean output;
 - confirmation of selected Airtable field-ID-to-name mappings;
 - validation of the Cancel Job webhook payload and Airtable-side gating;
-- durable recovery for selected payment and downstream synchronization failures;
+- durable recovery for selected payment and downstream synchronization failures,
+  including the direct post-commit SMS crash window;
 - broader owner-alert filtering and deduplication;
 - final validation of external Make, Airtable, Stripe, and Render settings;
 - completion-override behavior under production use; and
